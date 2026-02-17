@@ -65,6 +65,8 @@ class CMakeBuild(build_ext):
             build_args += ['--', '-j2']
 
         # Dedicated variable for OptiX path - handles spaces without quoting issues
+        # Keep DLSS bindings enabled by default unless explicitly overridden.
+        cmake_args += ["-DPYOPTIX_ENABLE_DLSS=" + os.environ.get("PYOPTIX_ENABLE_DLSS", "ON")]
         if "OptiX_INSTALL_DIR" in os.environ:
             cmake_args += ["-DOptiX_INSTALL_DIR=" + os.environ['OptiX_INSTALL_DIR']]
         if "DLSS_ROOT" in os.environ:
