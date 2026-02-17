@@ -2377,7 +2377,11 @@ void dlssRRDenoise(
     float jitterY,
     const std::vector<float>& worldToViewMatrix,
     const std::vector<float>& viewToClipMatrix,
-    bool reset
+    bool reset,
+    int indicatorInvertXAxis,
+    int indicatorInvertYAxis,
+    float mvScaleX,
+    float mvScaleY
 )
 {
     if( !denoiser.handle || !denoiser.ngxParams )
@@ -2409,12 +2413,12 @@ void dlssRRDenoise(
     evalParams.pInSpecularHitDistance = &denoiser.textureResources[pyoptix::RESOURCE_SPECULAR_HITDISTANCE];
     evalParams.pInWorldToViewMatrix = const_cast<float*>( worldToViewMatrix.data() );
     evalParams.pInViewToClipMatrix = const_cast<float*>( viewToClipMatrix.data() );
-    evalParams.InJitterOffsetX = -jitterX;
-    evalParams.InJitterOffsetY = -jitterY;
-    evalParams.InMVScaleX = 1.0f;
-    evalParams.InMVScaleY = 1.0f;
-    evalParams.InIndicatorInvertXAxis = 0;
-    evalParams.InIndicatorInvertYAxis = 1;
+    evalParams.InJitterOffsetX = jitterX;
+    evalParams.InJitterOffsetY = jitterY;
+    evalParams.InMVScaleX = mvScaleX;
+    evalParams.InMVScaleY = mvScaleY;
+    evalParams.InIndicatorInvertXAxis = indicatorInvertXAxis;
+    evalParams.InIndicatorInvertYAxis = indicatorInvertYAxis;
     evalParams.InPreExposure = 1.0f;
     evalParams.InExposureScale = 1.0f;
     evalParams.InRenderSubrectDimensions = { renderWidth, renderHeight };
@@ -3182,7 +3186,11 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
               py::arg( "jitterY" ),
               py::arg( "worldToViewMatrix" ),
               py::arg( "viewToClipMatrix" ),
-              py::arg( "reset" ) = false )
+              py::arg( "reset" ) = false,
+              py::arg( "indicatorInvertXAxis" ) = 0,
+              py::arg( "indicatorInvertYAxis" ) = 1,
+              py::arg( "mvScaleX" ) = 1.0f,
+              py::arg( "mvScaleY" ) = 1.0f )
         .def( "deinit", &pyoptix::dlssRRDestroy )
         .def(py::self == py::self)
         ;
