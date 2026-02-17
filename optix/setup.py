@@ -67,6 +67,12 @@ class CMakeBuild(build_ext):
         # Dedicated variable for OptiX path - handles spaces without quoting issues
         if "OptiX_INSTALL_DIR" in os.environ:
             cmake_args += ["-DOptiX_INSTALL_DIR=" + os.environ['OptiX_INSTALL_DIR']]
+        if "DLSS_ROOT" in os.environ:
+            cmake_args += ["-DDLSS_ROOT=" + os.environ["DLSS_ROOT"]]
+        if "PYOPTIX_DLSS_VERSION" in os.environ:
+            cmake_args += ["-DPYOPTIX_DLSS_VERSION=" + os.environ["PYOPTIX_DLSS_VERSION"]]
+        if "PYOPTIX_AUTO_DOWNLOAD_DLSS" in os.environ:
+            cmake_args += ["-DPYOPTIX_AUTO_DOWNLOAD_DLSS=" + os.environ["PYOPTIX_AUTO_DOWNLOAD_DLSS"]]
 
         if "PYOPTIX_CMAKE_ARGS" in os.environ:
             cmake_args += shlex.split(os.environ[ 'PYOPTIX_CMAKE_ARGS' ])

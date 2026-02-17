@@ -8,10 +8,21 @@ Python bindings for OptiX 7.
 ### Dependencies
 
 #### OptiX SDK
-Install [OptiX SDK](https://developer.nvidia.com/designworks/optix/download) version 7.6 or newer.
+By default, the build will automatically download OptiX headers version `9.0.0`
+from [`NVIDIA/optix-dev`](https://github.com/NVIDIA/optix-dev) into
+`optix/third_party/optix-dev-9.0.0`.
+
+If you prefer to use a local installation, install
+[OptiX SDK](https://developer.nvidia.com/designworks/optix/download) version 7.6 or newer
+and set `OptiX_INSTALL_DIR` as shown below.
 
 #### CUDA SDK
 Install [CUDA SDK](https://developer.nvidia.com/cuda-downloads) version 12.6 or newer required for examples, otherwise as required by your OptiX SDK.
+
+#### DLSS SDK (Ray Reconstruction)
+By default, the build also downloads DLSS SDK version `310.5.3` into
+`optix/third_party/dlss-310.5.3` and enables CUDA/OptiX DLSS RR bindings.
+No Vulkan integration is used or exposed by these bindings.
 
 #### Build system requirements:
 * [cmake](https://cmake.org/)
@@ -50,7 +61,27 @@ conda activate pyoptix
 ```
 
 ### Building and installing the `optix` Python module
-Point `setuptools/CMake` to OptiX by setting the `OptiX_INSTALL_DIR` environment variable.
+Default (automatic OptiX headers download):
+
+Linux:
+```bash
+cd optix
+pip install .
+```
+
+Windows (PowerShell):
+```powershell
+cd optix
+pip install .
+```
+
+Windows (cmd):
+```cmd
+cd optix
+pip install .
+```
+
+Optional override: point `setuptools/CMake` to a local OptiX installation by setting `OptiX_INSTALL_DIR`.
 
 Linux:
 ```bash
@@ -74,6 +105,13 @@ pip install .
 ```
 
 For advanced use cases, additional CMake arguments can be passed via `PYOPTIX_CMAKE_ARGS`.
+
+Optional DLSS overrides:
+
+- `DLSS_ROOT`: use a local DLSS SDK instead of auto-download
+- `PYOPTIX_DLSS_VERSION`: override DLSS SDK version (default `310.5.3`)
+- `PYOPTIX_AUTO_DOWNLOAD_DLSS`: set to `OFF` to disable automatic DLSS download
+- `PYOPTIX_ENABLE_DLSS`: CMake option to disable DLSS bindings at build time (`OFF`)
 
 When compiling against an OptiX 7.0 SDK an additional environment variable needs to be set
 containing a path to the system's stddef.h location. E.g.

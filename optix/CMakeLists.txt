@@ -31,6 +31,10 @@ endif()
 if(NOT TARGET CUDA::cuda_driver)
   find_package( CUDAToolkit 10.0 REQUIRED )
 endif()
+option(PYOPTIX_ENABLE_DLSS "Enable DLSS Ray Reconstruction bindings" ON)
+if(PYOPTIX_ENABLE_DLSS)
+  find_package(DLSS REQUIRED)
+endif()
 
 configure_file("${CMAKE_SOURCE_DIR}/path_util.py.in" "${CMAKE_SOURCE_DIR}/../examples/path_util.py")
 
@@ -46,6 +50,11 @@ target_link_libraries( _optix PRIVATE
     CUDA::cuda_driver
     CUDA::cudart
     )
+if(PYOPTIX_ENABLE_DLSS)
+  target_compile_definitions(_optix PRIVATE PYOPTIX_ENABLE_DLSS=1)
+  target_link_libraries(_optix PRIVATE DLSS::DLSS)
+  dlss_setup_runtime_dependencies(_optix)
+endif()
 target_compile_features( _optix PRIVATE
     cxx_std_17
     )

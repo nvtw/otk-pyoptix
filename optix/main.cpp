@@ -15,11 +15,24 @@
 #include <optix_function_table_definition.h>
 #include <optix_stack_size.h>
 
+#ifdef PYOPTIX_ENABLE_DLSS
+#include <nvsdk_ngx.h>
+#include <nvsdk_ngx_defs_dlssd.h>
+#include <nvsdk_ngx_helpers_dlssd_cuda.h>
+#include <nvsdk_ngx_params.h>
+#include <nvsdk_ngx_params_dlssd.h>
+#endif
+
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstddef>
+#include <filesystem>
 #include <memory>
+#include <string>
 #include <stdexcept>
+#include <vector>
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 
@@ -43,6 +56,18 @@ namespace py = pybind11;
                     ": " + log_buf                                             \
                     );                                                         \
     } while( 0 )
+
+#ifdef PYOPTIX_ENABLE_DLSS
+#define PYDLSS_CHECK( call )                                                   \
+    do                                                                         \
+    {                                                                          \
+        NVSDK_NGX_Result res = call;                                           \
+        if( res != NVSDK_NGX_Result_Success )                                  \
+        {                                                                      \
+            throw std::runtime_error( "DLSS call failed with result code: " + std::to_string( static_cast<int>( res ) ) ); \
+        }                                                                      \
+    } while( 0 )
+#endif
 
 
 
@@ -134,6 +159,69 @@ struct Denoiser
     OptixDenoiser denoiser = 0;
 };
 bool operator==( const Denoiser& a, const Denoiser& b) { return a.denoiser== b.denoiser; }
+
+#ifdef PYOPTIX_ENABLE_DLSS
+enum DlssRRResource
+{
+    RESOURCE_COLOR_IN = 0,
+    RESOURCE_COLOR_OUT,
+    RESOURCE_DIFFUSE_ALBEDO,
+    RESOURCE_SPECULAR_ALBEDO,
+    RESOURCE_NORMALROUGHNESS,
+    RESOURCE_MOTIONVECTOR,
+    RESOURCE_LINEARDEPTH,
+    RESOURCE_SPECULAR_HITDISTANCE,
+    RESOURCE_NUM
+};
+
+struct DlssRRContext
+{
+    bool initialized = false;
+    NVSDK_NGX_Parameter* ngxParams = nullptr;
+    unsigned int minDriverVersionMajor = 0;
+    unsigned int minDriverVersionMinor = 0;
+};
+bool operator==( const DlssRRContext& a, const DlssRRContext& b) { return a.ngxParams == b.ngxParams; }
+
+struct DlssRRDenoiser
+{
+    NVSDK_NGX_Handle* handle = nullptr;
+    NVSDK_NGX_Parameter* ngxParams = nullptr;
+    std::array<CUtexObject, RESOURCE_NUM> textureResources{};
+    CUsurfObject outputSurface = 0;
+    unsigned int inputWidth = 0;
+    unsigned int inputHeight = 0;
+    unsigned int outputWidth = 0;
+    unsigned int outputHeight = 0;
+};
+bool operator==( const DlssRRDenoiser& a, const DlssRRDenoiser& b) { return a.handle == b.handle; }
+
+struct DlssRRInitInfo
+{
+    unsigned int inputWidth = 0;
+    unsigned int inputHeight = 0;
+    unsigned int outputWidth = 0;
+    unsigned int outputHeight = 0;
+    NVSDK_NGX_PerfQuality_Value quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
+    NVSDK_NGX_RayReconstruction_Hint_Render_Preset preset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+    bool mvJittered = false;
+    bool lowResolutionMotionVectors = true;
+    bool isContentHDR = true;
+    bool depthInverted = false;
+    bool autoExposure = false;
+    bool useHWDepth = false;
+};
+
+struct DlssRRSupportedSizes
+{
+    unsigned int minWidth = 0;
+    unsigned int minHeight = 0;
+    unsigned int maxWidth = 0;
+    unsigned int maxHeight = 0;
+    unsigned int optimalWidth = 0;
+    unsigned int optimalHeight = 0;
+};
+#endif
 
 //------------------------------------------------------------------------------
 //
@@ -2090,6 +2178,251 @@ void denoiserInvokeTiled(
     );
 }
 
+#ifdef PYOPTIX_ENABLE_DLSS
+static std::wstring toWideString( const std::string& value )
+{
+    return std::wstring( value.begin(), value.end() );
+}
+
+void dlssRRContextInit(
+    pyoptix::DlssRRContext& context,
+    const std::string& applicationDataPath,
+    const std::string& projectId,
+    const std::string& engineVersion
+)
+{
+    if( context.initialized )
+        return;
+
+    const std::wstring appPath = applicationDataPath.empty() ? std::filesystem::current_path().wstring() : toWideString( applicationDataPath );
+    PYDLSS_CHECK(
+        NVSDK_NGX_CUDA_Init_with_ProjectID(
+            projectId.c_str(),
+            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+            engineVersion.c_str(),
+            appPath.c_str()
+        )
+    );
+    PYDLSS_CHECK( NVSDK_NGX_CUDA_GetCapabilityParameters( &context.ngxParams ) );
+    context.initialized = true;
+}
+
+void dlssRRContextDeinit( pyoptix::DlssRRContext& context )
+{
+    if( context.ngxParams )
+    {
+        NVSDK_NGX_CUDA_DestroyParameters( context.ngxParams );
+        context.ngxParams = nullptr;
+    }
+    if( context.initialized )
+    {
+        NVSDK_NGX_CUDA_Shutdown();
+        context.initialized = false;
+    }
+}
+
+bool dlssRRContextIsAvailable( const pyoptix::DlssRRContext& context )
+{
+    if( !context.ngxParams )
+        throw std::runtime_error( "DlssRRContext is not initialized." );
+
+    int available = 0;
+    int initResult = 0;
+    int needsUpdatedDriver = 0;
+    PYDLSS_CHECK( context.ngxParams->Get( NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver, &needsUpdatedDriver ) );
+    if( needsUpdatedDriver )
+        return false;
+
+    PYDLSS_CHECK( context.ngxParams->Get( NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &available ) );
+    if( !available )
+        return false;
+
+    PYDLSS_CHECK( context.ngxParams->Get( NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult, &initResult ) );
+    return initResult != 0;
+}
+
+py::tuple dlssRRContextGetMinDriverVersion( const pyoptix::DlssRRContext& context )
+{
+    if( !context.ngxParams )
+        throw std::runtime_error( "DlssRRContext is not initialized." );
+    unsigned int major = 0;
+    unsigned int minor = 0;
+    PYDLSS_CHECK( context.ngxParams->Get( NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMajor, &major ) );
+    PYDLSS_CHECK( context.ngxParams->Get( NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMinor, &minor ) );
+    return py::make_tuple( major, minor );
+}
+
+std::string dlssRRGetResultString( int ngxResultCode )
+{
+    (void)GetNGXResultAsString( static_cast<NVSDK_NGX_Result>( ngxResultCode ) );
+    return std::string( "NGX result code: " ) + std::to_string( ngxResultCode );
+}
+
+pyoptix::DlssRRSupportedSizes dlssRRQuerySupportedDlssInputSizes(
+    pyoptix::DlssRRContext& context,
+    unsigned int outputWidth,
+    unsigned int outputHeight,
+    NVSDK_NGX_PerfQuality_Value quality
+)
+{
+    if( !context.ngxParams )
+        throw std::runtime_error( "DlssRRContext is not initialized." );
+    if( quality == NVSDK_NGX_PerfQuality_Value_UltraQuality )
+        throw std::runtime_error( "UltraQuality is not supported for DLSS Ray Reconstruction query." );
+
+    pyoptix::DlssRRSupportedSizes sizes;
+    float sharpness = 0.0f;
+    PYDLSS_CHECK(
+        NGX_DLSSD_GET_OPTIMAL_SETTINGS(
+            context.ngxParams,
+            outputWidth,
+            outputHeight,
+            quality,
+            &sizes.optimalWidth,
+            &sizes.optimalHeight,
+            &sizes.maxWidth,
+            &sizes.maxHeight,
+            &sizes.minWidth,
+            &sizes.minHeight,
+            &sharpness
+        )
+    );
+    return sizes;
+}
+
+pyoptix::DlssRRDenoiser dlssRRCreate(
+    pyoptix::DlssRRContext& context,
+    const pyoptix::DlssRRInitInfo& initInfo,
+    uintptr_t stream
+)
+{
+    if( !context.ngxParams )
+        throw std::runtime_error( "DlssRRContext is not initialized." );
+
+    pyoptix::DlssRRDenoiser denoiser;
+    denoiser.ngxParams = context.ngxParams;
+    denoiser.inputWidth = initInfo.inputWidth;
+    denoiser.inputHeight = initInfo.inputHeight;
+    denoiser.outputWidth = initInfo.outputWidth;
+    denoiser.outputHeight = initInfo.outputHeight;
+
+    int createFlags = NVSDK_NGX_DLSS_Feature_Flags_None;
+    createFlags |= initInfo.lowResolutionMotionVectors ? NVSDK_NGX_DLSS_Feature_Flags_MVLowRes : 0;
+    createFlags |= initInfo.isContentHDR ? NVSDK_NGX_DLSS_Feature_Flags_IsHDR : 0;
+    createFlags |= initInfo.depthInverted ? NVSDK_NGX_DLSS_Feature_Flags_DepthInverted : 0;
+    createFlags |= initInfo.mvJittered ? NVSDK_NGX_DLSS_Feature_Flags_MVJittered : 0;
+    createFlags |= initInfo.autoExposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0;
+
+    NVSDK_NGX_DLSSD_Create_Params dlssParams = {};
+    dlssParams.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+    // DlssRRCpp exposes a combined NORMALROUGHNESS resource.
+    dlssParams.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
+    dlssParams.InUseHWDepth = initInfo.useHWDepth ? NVSDK_NGX_DLSS_Depth_Type_HW : NVSDK_NGX_DLSS_Depth_Type_Linear;
+    dlssParams.InWidth = initInfo.inputWidth;
+    dlssParams.InHeight = initInfo.inputHeight;
+    dlssParams.InTargetWidth = initInfo.outputWidth;
+    dlssParams.InTargetHeight = initInfo.outputHeight;
+    dlssParams.InPerfQualityValue = initInfo.quality;
+    dlssParams.InFeatureCreateFlags = createFlags;
+    dlssParams.InEnableOutputSubrects = false;
+
+    context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, initInfo.preset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality, initInfo.preset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality, initInfo.preset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Balanced, initInfo.preset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Performance, initInfo.preset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance, initInfo.preset );
+
+    CUcontext cuContext = nullptr;
+    cuCtxGetCurrent( &cuContext );
+
+    NVSDK_NGX_CUDA_DLSSD_Create_Params cudaParams = {};
+    cudaParams.Feature = dlssParams;
+    cudaParams.InCUContext = cuContext;
+    cudaParams.InCUStream = reinterpret_cast<CUstream>( stream );
+    PYDLSS_CHECK( NGX_CUDA_CREATE_DLSSD_EXT( &denoiser.handle, context.ngxParams, &cudaParams ) );
+    return denoiser;
+}
+
+void dlssRRDestroy( pyoptix::DlssRRDenoiser& denoiser )
+{
+    if( denoiser.handle )
+    {
+        PYDLSS_CHECK( NVSDK_NGX_CUDA_ReleaseFeature( denoiser.handle ) );
+        denoiser.handle = nullptr;
+    }
+}
+
+void dlssRRSetResource( pyoptix::DlssRRDenoiser& denoiser, pyoptix::DlssRRResource resourceId, uint64_t resourceHandle )
+{
+    if( resourceId == pyoptix::RESOURCE_COLOR_OUT )
+        denoiser.outputSurface = static_cast<CUsurfObject>( resourceHandle );
+    else
+        denoiser.textureResources[resourceId] = static_cast<CUtexObject>( resourceHandle );
+}
+
+void dlssRRResetResource( pyoptix::DlssRRDenoiser& denoiser, pyoptix::DlssRRResource resourceId )
+{
+    if( resourceId == pyoptix::RESOURCE_COLOR_OUT )
+        denoiser.outputSurface = 0;
+    else
+        denoiser.textureResources[resourceId] = 0;
+}
+
+void dlssRRDenoise(
+    pyoptix::DlssRRDenoiser& denoiser,
+    unsigned int renderWidth,
+    unsigned int renderHeight,
+    float jitterX,
+    float jitterY,
+    const std::vector<float>& worldToViewMatrix,
+    const std::vector<float>& viewToClipMatrix,
+    bool reset
+)
+{
+    if( !denoiser.handle || !denoiser.ngxParams )
+        throw std::runtime_error( "DlssRRDenoiser is not initialized." );
+    if( worldToViewMatrix.size() != 16 || viewToClipMatrix.size() != 16 )
+        throw std::runtime_error( "Matrices must contain exactly 16 floats each." );
+    if( denoiser.textureResources[pyoptix::RESOURCE_COLOR_IN] == 0 || denoiser.outputSurface == 0
+        || denoiser.textureResources[pyoptix::RESOURCE_DIFFUSE_ALBEDO] == 0
+        || denoiser.textureResources[pyoptix::RESOURCE_SPECULAR_ALBEDO] == 0
+        || denoiser.textureResources[pyoptix::RESOURCE_NORMALROUGHNESS] == 0
+        || denoiser.textureResources[pyoptix::RESOURCE_LINEARDEPTH] == 0
+        || denoiser.textureResources[pyoptix::RESOURCE_MOTIONVECTOR] == 0 )
+    {
+        throw std::runtime_error( "Missing required DLSS RR resources." );
+    }
+    if( renderWidth == 0 || renderHeight == 0 || renderWidth > denoiser.inputWidth || renderHeight > denoiser.inputHeight )
+        throw std::runtime_error( "Invalid render dimensions for DLSS RR." );
+
+    NVSDK_NGX_CUDA_DLSSD_Eval_Params evalParams = {};
+    evalParams.InReset = reset ? 1 : 0;
+    evalParams.pInColor = &denoiser.textureResources[pyoptix::RESOURCE_COLOR_IN];
+    evalParams.pInOutput = &denoiser.outputSurface;
+    evalParams.pInDiffuseAlbedo = &denoiser.textureResources[pyoptix::RESOURCE_DIFFUSE_ALBEDO];
+    evalParams.pInSpecularAlbedo = &denoiser.textureResources[pyoptix::RESOURCE_SPECULAR_ALBEDO];
+    evalParams.pInNormals = &denoiser.textureResources[pyoptix::RESOURCE_NORMALROUGHNESS];
+    evalParams.pInRoughness = &denoiser.textureResources[pyoptix::RESOURCE_NORMALROUGHNESS];
+    evalParams.pInDepth = &denoiser.textureResources[pyoptix::RESOURCE_LINEARDEPTH];
+    evalParams.pInMotionVectors = &denoiser.textureResources[pyoptix::RESOURCE_MOTIONVECTOR];
+    evalParams.pInSpecularHitDistance = &denoiser.textureResources[pyoptix::RESOURCE_SPECULAR_HITDISTANCE];
+    evalParams.pInWorldToViewMatrix = const_cast<float*>( worldToViewMatrix.data() );
+    evalParams.pInViewToClipMatrix = const_cast<float*>( viewToClipMatrix.data() );
+    evalParams.InJitterOffsetX = -jitterX;
+    evalParams.InJitterOffsetY = -jitterY;
+    evalParams.InMVScaleX = 1.0f;
+    evalParams.InMVScaleY = 1.0f;
+    evalParams.InIndicatorInvertXAxis = 0;
+    evalParams.InIndicatorInvertYAxis = 1;
+    evalParams.InPreExposure = 1.0f;
+    evalParams.InExposureScale = 1.0f;
+    evalParams.InRenderSubrectDimensions = { renderWidth, renderHeight };
+
+    PYDLSS_CHECK( NGX_CUDA_EVALUATE_DLSSD_EXT( denoiser.handle, denoiser.ngxParams, &evalParams ) );
+}
+#endif
+
 //------------------------------------------------------------------------------
 //
 // optix util wrappers
@@ -2578,6 +2911,34 @@ PYBIND11_MODULE( _optix, m )
         IF_OPTIX74( .value( "DENOISER_MODEL_KIND_TEMPORAL_AOV", OPTIX_DENOISER_MODEL_KIND_AOV ) )
         .export_values();
 
+#ifdef PYOPTIX_ENABLE_DLSS
+    py::enum_<NVSDK_NGX_PerfQuality_Value>(m, "DlssPerfQuality", py::arithmetic())
+        .value( "MAX_PERF", NVSDK_NGX_PerfQuality_Value_MaxPerf )
+        .value( "BALANCED", NVSDK_NGX_PerfQuality_Value_Balanced )
+        .value( "MAX_QUALITY", NVSDK_NGX_PerfQuality_Value_MaxQuality )
+        .value( "ULTRA_PERFORMANCE", NVSDK_NGX_PerfQuality_Value_UltraPerformance )
+        .value( "ULTRA_QUALITY", NVSDK_NGX_PerfQuality_Value_UltraQuality )
+        .value( "DLAA", NVSDK_NGX_PerfQuality_Value_DLAA )
+        .export_values();
+
+    py::enum_<NVSDK_NGX_RayReconstruction_Hint_Render_Preset>(m, "RayReconstructionHintRenderPreset", py::arithmetic())
+        .value( "DEFAULT", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default )
+        .value( "D", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D )
+        .value( "E", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E )
+        .export_values();
+
+    py::enum_<pyoptix::DlssRRResource>(m, "DlssRRResource", py::arithmetic())
+        .value( "RESOURCE_COLOR_IN", pyoptix::RESOURCE_COLOR_IN )
+        .value( "RESOURCE_COLOR_OUT", pyoptix::RESOURCE_COLOR_OUT )
+        .value( "RESOURCE_DIFFUSE_ALBEDO", pyoptix::RESOURCE_DIFFUSE_ALBEDO )
+        .value( "RESOURCE_SPECULAR_ALBEDO", pyoptix::RESOURCE_SPECULAR_ALBEDO )
+        .value( "RESOURCE_NORMALROUGHNESS", pyoptix::RESOURCE_NORMALROUGHNESS )
+        .value( "RESOURCE_MOTIONVECTOR", pyoptix::RESOURCE_MOTIONVECTOR )
+        .value( "RESOURCE_LINEARDEPTH", pyoptix::RESOURCE_LINEARDEPTH )
+        .value( "RESOURCE_SPECULAR_HITDISTANCE", pyoptix::RESOURCE_SPECULAR_HITDISTANCE )
+        .export_values();
+#endif
+
     py::enum_<OptixRayFlags>(m, "RayFlags", py::arithmetic())
         .value( "RAY_FLAG_NONE", OPTIX_RAY_FLAG_NONE )
         .value( "RAY_FLAG_DISABLE_ANYHIT", OPTIX_RAY_FLAG_DISABLE_ANYHIT )
@@ -2790,6 +3151,44 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
         IF_OPTIX73( .def( "computeAverageColor", &pyoptix::denoiserComputeAverageColor ) )
         .def(py::self == py::self)
         ;
+
+#ifdef PYOPTIX_ENABLE_DLSS
+    py::class_<pyoptix::DlssRRContext>( m, "DlssRRContext" )
+        .def( py::init<>() )
+        .def(
+            "init",
+            &pyoptix::dlssRRContextInit,
+            py::arg( "applicationDataPath" ) = "",
+            py::arg( "projectId" ) = "dddbee68-a452-4fab-9371-f9575480a154",
+            py::arg( "engineVersion" ) = "1.0.0"
+        )
+        .def( "deinit", &pyoptix::dlssRRContextDeinit )
+        .def( "isDlssRRAvailable", &pyoptix::dlssRRContextIsAvailable )
+        .def( "getMinDriverVersion", &pyoptix::dlssRRContextGetMinDriverVersion )
+        .def( "querySupportedDlssInputSizes", &pyoptix::dlssRRQuerySupportedDlssInputSizes,
+              py::arg( "outputWidth" ), py::arg( "outputHeight" ),
+              py::arg( "quality" ) = NVSDK_NGX_PerfQuality_Value_MaxQuality )
+        .def( "initDlssRR", &pyoptix::dlssRRCreate, py::arg( "initInfo" ), py::arg( "stream" ) = 0u )
+        .def(py::self == py::self)
+        ;
+
+    py::class_<pyoptix::DlssRRDenoiser>( m, "DlssRRDenoiser" )
+        .def( "setResource", &pyoptix::dlssRRSetResource )
+        .def( "resetResource", &pyoptix::dlssRRResetResource )
+        .def( "denoise", &pyoptix::dlssRRDenoise,
+              py::arg( "renderWidth" ),
+              py::arg( "renderHeight" ),
+              py::arg( "jitterX" ),
+              py::arg( "jitterY" ),
+              py::arg( "worldToViewMatrix" ),
+              py::arg( "viewToClipMatrix" ),
+              py::arg( "reset" ) = false )
+        .def( "deinit", &pyoptix::dlssRRDestroy )
+        .def(py::self == py::self)
+        ;
+
+    m.def( "dlssRRGetResultString", &pyoptix::dlssRRGetResultString, py::arg( "ngxResultCode" ) );
+#endif
 
 
     //---------------------------------------------------------------------------
@@ -3524,6 +3923,34 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
 #endif
         .def_readwrite( "overlapWindowSizeInPixels", &OptixDenoiserSizes::overlapWindowSizeInPixels )
         ;
+
+#ifdef PYOPTIX_ENABLE_DLSS
+    py::class_<pyoptix::DlssRRInitInfo>(m, "DlssRRInitInfo")
+        .def( py::init([]() { return std::unique_ptr<pyoptix::DlssRRInitInfo>(new pyoptix::DlssRRInitInfo{} ); } ) )
+        .def_readwrite( "inputWidth", &pyoptix::DlssRRInitInfo::inputWidth )
+        .def_readwrite( "inputHeight", &pyoptix::DlssRRInitInfo::inputHeight )
+        .def_readwrite( "outputWidth", &pyoptix::DlssRRInitInfo::outputWidth )
+        .def_readwrite( "outputHeight", &pyoptix::DlssRRInitInfo::outputHeight )
+        .def_readwrite( "quality", &pyoptix::DlssRRInitInfo::quality )
+        .def_readwrite( "preset", &pyoptix::DlssRRInitInfo::preset )
+        .def_readwrite( "mvJittered", &pyoptix::DlssRRInitInfo::mvJittered )
+        .def_readwrite( "lowResolutionMotionVectors", &pyoptix::DlssRRInitInfo::lowResolutionMotionVectors )
+        .def_readwrite( "isContentHDR", &pyoptix::DlssRRInitInfo::isContentHDR )
+        .def_readwrite( "depthInverted", &pyoptix::DlssRRInitInfo::depthInverted )
+        .def_readwrite( "autoExposure", &pyoptix::DlssRRInitInfo::autoExposure )
+        .def_readwrite( "useHWDepth", &pyoptix::DlssRRInitInfo::useHWDepth )
+        ;
+
+    py::class_<pyoptix::DlssRRSupportedSizes>(m, "DlssRRSupportedSizes")
+        .def( py::init([]() { return std::unique_ptr<pyoptix::DlssRRSupportedSizes>(new pyoptix::DlssRRSupportedSizes{} ); } ) )
+        .def_readwrite( "minWidth", &pyoptix::DlssRRSupportedSizes::minWidth )
+        .def_readwrite( "minHeight", &pyoptix::DlssRRSupportedSizes::minHeight )
+        .def_readwrite( "maxWidth", &pyoptix::DlssRRSupportedSizes::maxWidth )
+        .def_readwrite( "maxHeight", &pyoptix::DlssRRSupportedSizes::maxHeight )
+        .def_readwrite( "optimalWidth", &pyoptix::DlssRRSupportedSizes::optimalWidth )
+        .def_readwrite( "optimalHeight", &pyoptix::DlssRRSupportedSizes::optimalHeight )
+        ;
+#endif
 
 
 #if OPTIX_VERSION >= 70200
