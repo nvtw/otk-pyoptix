@@ -3188,7 +3188,7 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
               py::arg( "viewToClipMatrix" ),
               py::arg( "reset" ) = false,
               py::arg( "indicatorInvertXAxis" ) = 0,
-              py::arg( "indicatorInvertYAxis" ) = 1,
+              py::arg( "indicatorInvertYAxis" ) = 0,
               py::arg( "mvScaleX" ) = 1.0f,
               py::arg( "mvScaleY" ) = 1.0f )
         .def( "deinit", &pyoptix::dlssRRDestroy )
