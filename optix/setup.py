@@ -8,8 +8,9 @@ import sys
 import platform
 import shlex
 import subprocess
+from pathlib import Path
 
-from setuptools import setup, Extension, find_packages
+from setuptools import setup, Extension
 from setuptools.command.build_ext import build_ext
 from distutils.version import LooseVersion
 import shutil
@@ -22,6 +23,58 @@ class CMakeExtension(Extension):
 
 
 class CMakeBuild(build_ext):
+    @staticmethod
+    def _get_cmake_cache_value(cache_path, key):
+        if not os.path.exists(cache_path):
+            return None
+        with open(cache_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith(f"{key}:"):
+                    parts = line.strip().split("=", 1)
+                    if len(parts) == 2:
+                        return parts[1]
+        return None
+
+    @staticmethod
+    def _copy_optix_headers_into_package(extdir, build_temp):
+        """
+        Ensure OptiX headers are present under the installed package directory.
+        CMake already copies these as a post-build step, but we enforce it here so
+        wheel installs always carry headers needed for downstream compilation.
+        """
+        dest_include = Path(extdir) / "include"
+        dest_header = dest_include / "optix.h"
+        if dest_header.exists():
+            return
+
+        source_include = None
+
+        cache_path = os.path.join(build_temp, "CMakeCache.txt")
+        include_from_cache = CMakeBuild._get_cmake_cache_value(cache_path, "OptiX_INCLUDE_DIR")
+        if include_from_cache:
+            candidate = Path(include_from_cache)
+            if (candidate / "optix.h").exists():
+                source_include = candidate
+
+        if source_include is None and "OptiX_INSTALL_DIR" in os.environ:
+            candidate = Path(os.environ["OptiX_INSTALL_DIR"]) / "include"
+            if (candidate / "optix.h").exists():
+                source_include = candidate
+
+        if source_include is None:
+            third_party_root = Path(__file__).resolve().parent / "third_party"
+            if third_party_root.exists():
+                for child in third_party_root.iterdir():
+                    candidate = child / "include"
+                    if (candidate / "optix.h").exists():
+                        source_include = candidate
+                        break
+
+        if source_include is None:
+            raise RuntimeError("Could not locate OptiX headers to package (missing include/optix.h).")
+
+        shutil.copytree(source_include, dest_include, dirs_exist_ok=True)
+
     def run(self):
         try:
             out = subprocess.check_output(['cmake', '--version'])
@@ -92,6 +145,7 @@ class CMakeBuild(build_ext):
         print( "CMAKE CMD: <<<{}>>>".format( ' '.join( ['cmake', ext.sourcedir] + cmake_args ) ) )
         subprocess.check_call(['cmake', ext.sourcedir] + cmake_args, cwd=self.build_temp, env=env)
         subprocess.check_call(['cmake', '--build', '.'] + build_args, cwd=self.build_temp)
+        self._copy_optix_headers_into_package(extdir, self.build_temp)
 
 
 

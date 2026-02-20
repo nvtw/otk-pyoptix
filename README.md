@@ -113,6 +113,16 @@ Optional DLSS overrides:
 - `PYOPTIX_AUTO_DOWNLOAD_DLSS`: set to `OFF` to disable automatic DLSS download
 - `PYOPTIX_ENABLE_DLSS`: CMake option to disable DLSS bindings at build time (`OFF`)
 
+After installation, you can query the packaged OptiX header directory from Python:
+
+```python
+import optix
+print(optix.get_optix_include_dir())
+```
+
+This path points to the `include` directory shipped with the installed package,
+so downstream compilation can use the same OptiX headers that `pyoptix` was built with.
+
 When compiling against an OptiX 7.0 SDK an additional environment variable needs to be set
 containing a path to the system's stddef.h location. E.g.
 ```

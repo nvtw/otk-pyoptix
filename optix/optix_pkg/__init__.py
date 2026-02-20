@@ -12,6 +12,7 @@ or it will attempt to auto-detect from CUDA_PATH.
 
 import os
 import sys
+from pathlib import Path
 
 def _add_dll_directories():
     """Add CUDA DLL directories for Windows Python 3.8+."""
@@ -41,6 +42,21 @@ def _add_dll_directories():
 
 _add_dll_directories()
 
+def get_optix_include_dir():
+    """
+    Return the directory containing packaged OptiX headers.
+
+    This is useful when compiling OptiX device code against the same header
+    version that this installed pyoptix build uses.
+    """
+    include_dir = Path(__file__).resolve().parent / "include"
+    if not (include_dir / "optix.h").exists():
+        raise FileNotFoundError(
+            f"Packaged OptiX headers were not found at '{include_dir}'. "
+            "Reinstall pyoptix to include headers."
+        )
+    return str(include_dir)
+
 # Import everything from the native module
-from ._optix import *
+from ._optix import *  # noqa: E402,F403
 
