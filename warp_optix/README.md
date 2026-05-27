@@ -1,0 +1,43 @@
+# warp_optix
+
+Warp addon that adds OptiX support, shipped as part of `otk-pyoptix`.
+
+This package replaces the `warp.optix` Python module that used to live inside
+the `warp` source tree. It registers itself with warp on import:
+
+```python
+import warp as wp
+import warp_optix as wo  # registers OptiX builtins, headers, and entry-point specs
+```
+
+Once imported, you can decorate kernels with the OptiX entry-point kinds:
+
+```python
+@wp.kernel(entry_point=wo.RAYGEN)
+def raygen_program():
+    idx = wo.optix_get_launch_index()
+    ...
+```
+
+## Install
+
+From the otk-pyoptix repo root:
+
+```bash
+pip install -e warp_optix/
+```
+
+The `optix` Python module (the pyoptix C++ binding) must also be installed:
+
+```bash
+pip install -e optix/
+```
+
+## Layout
+
+- `warp_optix/__init__.py` — public re-exports of the runtime API.
+- `warp_optix/_runtime/` — pyoptix-side runtime helpers (formerly `warp/_src/render/optix_*.py`).
+- `warp_optix/_builtins.py` — OptiX `add_builtin(...)` registrations.
+- `warp_optix/_codegen.py` — `OptixKernelType` enum and codegen entry-point specs.
+- `warp_optix/_native/include/warp_optix_builtins.h` — device-side C++ wrappers.
+- `warp_optix/_addon.py` — runs on import; wires the above into warp.

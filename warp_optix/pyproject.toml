@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "warp_optix"
+version = "0.1.0"
+description = "Warp + OptiX integration helpers (otk-pyoptix addon)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+authors = [{name = "NVIDIA"}]
+dependencies = [
+    "warp-lang",
+    "optix",
+    "numpy",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["warp_optix*"]
+
+[tool.setuptools.package-data]
+"warp_optix" = ["_native/include/*.h"]

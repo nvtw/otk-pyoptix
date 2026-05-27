@@ -1,0 +1,80 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import warp as wp
+
+@dataclass
+class HitKernel:
+    closest_hit: str
+    any_hit: str | None = None
+    intersection: str | None = None
+
+class HitKernelManager:
+    @property
+    def count(self) -> int: ...
+    def register_hit_shader_type(self, *kernel_names: str | HitKernel): ...
+    def get_sbt_offset(self, handle) -> int: ...
+    def get_list(self): ...
+
+@dataclass
+class SbtResources:
+    sbt: object
+    keepalive: dict
+
+class SbtKernelManager:
+    def __init__(self, optix, ctx, module, num_ray_subtypes: int = 1) -> None: ...
+    def set_raygen_kernel(self, kernel_name: str) -> None: ...
+    def add_miss_kernels(self, kernel_names: list[str]) -> None: ...
+    def register_hit_shader_type(self, *kernel_names: str | HitKernel): ...
+    def get_all_program_groups(self): ...
+    def build_sbt(self, device: str = "cuda") -> SbtResources: ...
+
+@dataclass
+class LaunchParamsBuffer:
+    struct_type: type
+    struct_ctype: type
+    bytes: wp.array
+    nbytes: int
+    device: str
+
+class GLInteropViewer:
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        device: str,
+        title: str = "Warp OptiX Tiny Raytracer",
+        fps: int = 60,
+        resizable: bool = False,
+    ): ...
+    def run(self, render_callback: Any, max_frames: int = 0): ...
+
+def require_optix(): ...
+def create_context(optix, cuda_context, log_level: int = 4): ...
+def compile_warp_module_to_ptx(
+    module: wp.Module,
+    launch_preamble: str,
+    module_tag: str,
+    script_dir: str,
+    device: str = "cuda",
+) -> bytes: ...
+def create_triangle_gas(optix, ctx, vertices, indices, device: str): ...
+def create_pipeline_and_sbt(
+    optix,
+    ctx,
+    ptx: bytes,
+    raygen_entry: wp.Kernel | str,
+    miss_entry: wp.Kernel | str,
+    closest_hit_entry: wp.Kernel | str | None,
+    num_payload_values: int,
+    num_attribute_values: int,
+    device: str,
+): ...
+def get_entry_name(kernel_or_entry, expected_kernel_type: wp.OptixKernelType | None = None) -> str: ...
+def create_launch_params_buffer(params_struct_type: type, device: str = "cuda") -> LaunchParamsBuffer: ...
+def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> None: ...
+def launch(
+    optix, pipeline, sbt, width: int, height: int, params_buffer: LaunchParamsBuffer, stream: int = 0
+) -> None: ...

@@ -5,3 +5,8 @@ optix/build/
 optix/build-local/
 optix/optix.egg-info/
 optix/third_party/
+
+# Build output of the `optix` C++/pybind11 extension. Populated by setup.py +
+# CMake POST_BUILD (compiled .pyd, copied OptiX headers, DLSS runtime DLL).
+# Source lives in optix/optix_pkg/.
+optix/optix/
