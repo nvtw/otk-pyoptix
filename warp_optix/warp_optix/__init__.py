@@ -23,7 +23,6 @@ _register_with_warp()
 
 from warp_optix._codegen import OptixKernelType as OptixKernelType
 from warp_optix._codegen import optix_kernel as optix_kernel
-from warp_optix._codegen import optix_template_for as optix_template_for
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer as GLInteropViewer
 from warp_optix._runtime.hit_kernels import HitKernel as HitKernel
 from warp_optix._runtime.hit_kernels import HitKernelManager as HitKernelManager
@@ -56,7 +55,6 @@ __all__ = [
     "get_entry_name",
     "launch",
     "optix_kernel",
-    "optix_template_for",
     "require_optix",
     "write_launch_params",
 ]
