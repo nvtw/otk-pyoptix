@@ -12,9 +12,9 @@
 
 #pragma once
 
-// This header is injected by `warp_optix._addon` into every CUDA TU via
-// `warp.config.extra_device_preamble`. The preamble fires before warp's own
-// `cuda_module_header`, so we must declare `WP_NO_CRT` ourselves before pulling
+// This header is injected through `wp.ModuleBuildOptions.extra_device_preamble`
+// before warp's own `cuda_module_header`, so we must declare `WP_NO_CRT`
+// ourselves before pulling
 // in `builtin.h` — otherwise `crt.h` tries to `#include <assert.h>` which is
 // unavailable under NVRTC. `cuda_module_header`'s own `#define WP_NO_CRT` and
 // `#include "builtin.h"` further down become no-ops thanks to `#pragma once`.

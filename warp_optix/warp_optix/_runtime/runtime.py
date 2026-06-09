@@ -29,6 +29,8 @@ import warp._src.build as wp_build
 import warp._src.types
 from warp._src.thirdparty import appdirs
 
+from warp_optix._addon import get_module_build_options
+
 
 def require_optix():
     try:
@@ -173,10 +175,16 @@ def compile_warp_module_to_ptx(
     if not device_obj.is_cuda:
         raise RuntimeError(f"PTX can only be generated for CUDA devices, got '{device_obj}'")
 
-    options = module.options.copy()
-    hasher = wp._src.context.ModuleHasher(module._get_live_kernels(), options)
-    builder = wp._src.context.ModuleBuilder(module, options=options, hasher=hasher)
-    warp_cuda = builder.codegen("cuda")
+    old_build_options = module.options.get("extra_build_options")
+    module.options["extra_build_options"] = get_module_build_options(wp, old_build_options)
+    try:
+        options = module.resolve_options(wp.config)
+        hasher = wp._src.context.ModuleHasher(module._get_live_kernels(), options)
+        builder = wp._src.context.ModuleBuilder(module, options=options, hasher=hasher)
+        warp_cuda = builder.codegen("cuda")
+    finally:
+        module.options["extra_build_options"] = old_build_options
+
     cuda_source = launch_preamble + "\n" + warp_cuda
 
     digest = hashlib.sha256(cuda_source.encode("utf-8")).hexdigest()[:16]
@@ -197,7 +205,13 @@ def compile_warp_module_to_ptx(
         old_use_pch = wp.config.use_precompiled_headers
         try:
             wp.config.use_precompiled_headers = False
-            wp_build.build_cuda(cu_path, arch=device_obj.arch, output_path=ptx_path, pch_dir=module_dir)
+            wp_build.build_cuda(
+                cu_path,
+                arch=device_obj.arch,
+                output_path=ptx_path,
+                pch_dir=module_dir,
+                extra_include_dirs=options["extra_cuda_include_dirs"],
+            )
         finally:
             wp.config.use_precompiled_headers = old_use_pch
 

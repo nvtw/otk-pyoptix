@@ -248,7 +248,7 @@ def tiny_raygen(params: TinyLaunchParams):
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.MISS)
-def tiny_miss():
+def tiny_miss(params: TinyLaunchParams):
     wp.optix_set_payload_0(wp.uint32(0))
     wp.optix_set_payload_1(wp.uint32(0))
     wp.optix_set_payload_2(wp.uint32(0))
@@ -256,7 +256,7 @@ def tiny_miss():
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
-def tiny_closest_hit():
+def tiny_closest_hit(params: TinyLaunchParams):
     pid = int(wp.optix_get_primitive_index())
 
     n = wp.vec3(0.0, 0.0, 1.0)

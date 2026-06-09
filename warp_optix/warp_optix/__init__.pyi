@@ -1,9 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 import warp as wp
+
+class OptixKernelType(Enum):
+    RAYGEN: str
+    MISS: str
+    CLOSEST_HIT: str
+    ANY_HIT: str
+    INTERSECTION: str
+
+def optix_kernel(kind: OptixKernelType, **kernel_kwargs: Any): ...
 
 @dataclass
 class HitKernel:
@@ -72,7 +82,7 @@ def create_pipeline_and_sbt(
     num_attribute_values: int,
     device: str,
 ): ...
-def get_entry_name(kernel_or_entry, expected_kernel_type: wp.OptixKernelType | None = None) -> str: ...
+def get_entry_name(kernel_or_entry, expected_kernel_type: OptixKernelType | None = None) -> str: ...
 def create_launch_params_buffer(params_struct_type: type, device: str = "cuda") -> LaunchParamsBuffer: ...
 def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> None: ...
 def launch(

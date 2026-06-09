@@ -23,15 +23,21 @@ import warp as wp
 import warp_optix as woptix
 
 
+@wp.struct
+class ExampleLaunchParams:
+    value: wp.uint32
+
+
 @woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
-def raygen_program():
+def raygen_program(params: ExampleLaunchParams):
     launch_idx = wp.optix_get_launch_index()
-    if launch_idx[0] == 0 and launch_idx[1] == 0 and launch_idx[2] == 0:
+    if launch_idx[0] == 0 and launch_idx[1] == 0 and launch_idx[2] == 0 and params.value == wp.uint32(0):
         pass
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.MISS)
-def miss_program():
+def miss_program(params: ExampleLaunchParams):
+    _ = params.value
     return
 
 

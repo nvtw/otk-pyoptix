@@ -1,10 +1,9 @@
 """OptiX kernel-type helpers.
 
 ``OptixKernelType`` maps the five OptiX program kinds to the name prefix
-that warp's codegen attaches to the generated CUDA entry point. The
-companion :func:`optix_kernel` decorator is a thin wrapper around
-``@wp.kernel(entry_prefix=...)`` that also stashes the kind on the kernel
-so the runtime can reconstruct the full entry name.
+that Warp's codegen attaches to the generated CUDA entry point. The
+companion :func:`optix_kernel` decorator selects Warp's external constant
+params ABI and stores the kind for runtime entry-name lookup.
 """
 
 from __future__ import annotations
@@ -27,20 +26,25 @@ F = TypeVar("F", bound=Callable[..., Any])
 def optix_kernel(kind: "OptixKernelType", **kernel_kwargs: Any) -> Callable[[F], Any]:
     """Decorator: register a Warp kernel as an OptiX entry point of ``kind``.
 
-    Equivalent to ``@wp.kernel(entry_prefix=kind.value, enable_backward=False, ...)``
-    plus a stash of ``kind`` on the resulting kernel so
+    Equivalent to ``@wp.kernel(entry_prefix=kind.value,
+    entry_point_abi="external_constant_params", enable_backward=False, ...)``.
+    The single Warp struct argument is bound to OptiX launch params ``params``.
+    The kind is stored so
     :func:`warp_optix.get_entry_name` can reconstruct the full entry name
     (e.g. ``__raygen__<mangled>``). The decorated function is dispatched by
     the OptiX pipeline, not by ``wp.launch``.
     """
     import warp as wp  # noqa: PLC0415
 
-    # OptiX entry programs don't have a meaningful backward pass. We set
-    # this on the addon side so warp's @wp.kernel stays agnostic.
-    kernel_kwargs.setdefault("enable_backward", False)
-
     def _wrap(fn: F) -> Any:
-        k = wp.kernel(entry_prefix=kind.value, **kernel_kwargs)(fn)
+        kwargs = dict(kernel_kwargs)
+
+        # OptiX entry programs don't have a meaningful backward pass. We set
+        # this on the addon side so Warp's @wp.kernel stays agnostic.
+        kwargs.setdefault("enable_backward", False)
+        kwargs.setdefault("entry_point_abi", "external_constant_params")
+
+        k = wp.kernel(entry_prefix=kind.value, **kwargs)(fn)
         k.options["optix_kernel_type"] = kind
         return k
 
