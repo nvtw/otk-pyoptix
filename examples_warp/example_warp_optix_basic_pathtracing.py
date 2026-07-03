@@ -64,6 +64,7 @@ def _parse_args():
     parser.add_argument("--fps", type=int, default=60)
     parser.add_argument("--max-frames", type=int, default=0, help="Auto-exit after N frames (0 = run forever).")
     parser.add_argument("--title", type=str, default="Warp OptiX Basic Pathtracing")
+    parser.add_argument("--camera-speed", type=float, default=0.5, help="Camera movement speed in scene units/second.")
     parser.add_argument("--no-dlss-rr", action="store_true", help="Disable DLSS Ray Reconstruction.")
     parser.add_argument("--no-set", action="store_true", help="Disable Shader Execution Reordering.")
     return parser.parse_args()
@@ -94,7 +95,9 @@ def _resolve_scene_gltf(scene_gltf_arg: str | None) -> Path:
 class FreeCameraController:
     """Newton-style interactive camera controls for the basic pathtracing example."""
 
-    def __init__(self, viewer, api: PathTracerAPI, position, yaw: float, pitch: float, fov: float):
+    def __init__(
+        self, viewer, api: PathTracerAPI, position, yaw: float, pitch: float, fov: float, movement_speed: float
+    ):
         self.window = viewer.window
         self.pyglet = viewer.pyglet
         self.api = api
@@ -103,7 +106,7 @@ class FreeCameraController:
         self.pitch = float(pitch)
         self.fov = float(fov)
         self._keys_down: set[int] = set()
-        self._cam_speed = 4.0
+        self._cam_speed = max(0.0, float(movement_speed))
         self._look_sensitivity = 0.1
 
         # Push initial camera state.
@@ -250,7 +253,7 @@ def main():
     )
 
     # Attach Newton-style free camera controls to the viewer window.
-    controller = FreeCameraController(viewer, api, cam_pos, cam_yaw, cam_pitch, cam_fov)
+    controller = FreeCameraController(viewer, api, cam_pos, cam_yaw, cam_pitch, cam_fov, args.camera_speed)
 
     def _render(mapped_image: wp.array, _frame_idx: int, elapsed_sec: float):
         nonlocal last_elapsed

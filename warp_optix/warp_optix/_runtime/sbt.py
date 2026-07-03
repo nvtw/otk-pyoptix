@@ -75,7 +75,7 @@ class SbtKernelManager:
         desc = self.optix.ProgramGroupDesc()
         desc.raygenModule = self.module
         desc.raygenEntryFunctionName = kernel_name
-        if self.optix.version()[1] >= 4:
+        if tuple(self.optix.version()) >= (7, 4):
             self.raygen_group = self.ctx.programGroupCreate([desc], self.optix.ProgramGroupOptions())[0][0]
         else:
             self.raygen_group = self.ctx.programGroupCreate([desc])[0][0]
@@ -85,7 +85,7 @@ class SbtKernelManager:
             desc = self.optix.ProgramGroupDesc()
             desc.missModule = self.module
             desc.missEntryFunctionName = name
-            if self.optix.version()[1] >= 4:
+            if tuple(self.optix.version()) >= (7, 4):
                 pg = self.ctx.programGroupCreate([desc], self.optix.ProgramGroupOptions())[0][0]
             else:
                 pg = self.ctx.programGroupCreate([desc])[0][0]

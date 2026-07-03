@@ -15,6 +15,7 @@ import warp as wp
 
 add_builtin = wp.add_builtin
 
+bool = wp.bool  # noqa: A001
 float = wp.float32  # noqa: A001
 uint32 = wp.uint32
 uint64 = wp.uint64
@@ -102,6 +103,30 @@ def register_addon_builtins() -> None:
     )
 
     add_builtin(
+        "optix_get_object_ray_origin",
+        input_types={},
+        value_type=vec3,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
+        "optix_get_object_ray_direction",
+        input_types={},
+        value_type=vec3,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
+        "optix_get_ray_tmin",
+        input_types={},
+        value_type=float,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
         "optix_get_ray_tmax",
         input_types={},
         value_type=float,
@@ -134,6 +159,23 @@ def register_addon_builtins() -> None:
     )
 
     add_builtin(
+        "optix_get_hit_kind",
+        input_types={},
+        value_type=uint32,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    for _attribute_i in range(8):
+        add_builtin(
+            f"optix_get_attribute_{_attribute_i}",
+            input_types={},
+            value_type=uint32,
+            group="Utility",
+            is_differentiable=False,
+        )
+
+    add_builtin(
         "optix_transform_normal_from_object_to_world_space",
         input_types={"normal": vec3},
         value_type=vec3,
@@ -164,6 +206,21 @@ def register_addon_builtins() -> None:
         group="Utility",
         is_differentiable=False,
     )
+
+    # OptiX accepts zero to eight 32-bit attributes when an intersection is
+    # reported. Register each arity explicitly so Warp can type-check calls and
+    # emit a normal overload call into the variadic C++ wrapper.
+    for _num_attributes in range(9):
+        _input_types = {"hit_t": float, "hit_kind": uint32}
+        _input_types.update({f"attribute_{i}": uint32 for i in range(_num_attributes)})
+        add_builtin(
+            "optix_report_intersection",
+            input_types=_input_types,
+            value_type=bool,
+            group="Utility",
+            doc="Report a custom-primitive intersection with up to eight 32-bit attributes.",
+            is_differentiable=False,
+        )
 
     add_builtin(
         "optix_trace",

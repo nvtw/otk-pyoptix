@@ -122,6 +122,35 @@ inline CUDA_CALLABLE_DEVICE vec3 optix_get_world_ray_direction()
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE vec3 optix_get_object_ray_origin()
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 o = optixGetObjectRayOrigin();
+    return vec3(o.x, o.y, o.z);
+#else
+    return vec3(0.0f, 0.0f, 0.0f);
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE vec3 optix_get_object_ray_direction()
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 d = optixGetObjectRayDirection();
+    return vec3(d.x, d.y, d.z);
+#else
+    return vec3(0.0f, 0.0f, 0.0f);
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE float optix_get_ray_tmin()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixGetRayTmin();
+#else
+    return 0.0f;
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE float optix_get_ray_tmax()
 {
 #if defined(WP_ENABLE_OPTIX)
@@ -158,6 +187,32 @@ inline CUDA_CALLABLE_DEVICE uint32 optix_get_instance_id()
     return 0u;
 #endif
 }
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_hit_kind()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetHitKind());
+#else
+    return 0u;
+#endif
+}
+
+#define WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(I)                  \
+    inline CUDA_CALLABLE_DEVICE uint32 optix_get_attribute_##I() \
+    {                                                          \
+        return static_cast<uint32>(optixGetAttribute_##I());   \
+    }
+
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(0)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(1)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(2)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(3)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(4)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(5)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(6)
+WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR(7)
+
+#undef WP_DEFINE_OPTIX_ATTRIBUTE_ACCESSOR
 
 inline CUDA_CALLABLE_DEVICE vec3 optix_transform_normal_from_object_to_world_space(const vec3& normal)
 {
@@ -204,6 +259,19 @@ inline CUDA_CALLABLE_DEVICE void optix_ignore_intersection()
 {
 #if defined(WP_ENABLE_OPTIX)
     optixIgnoreIntersection();
+#endif
+}
+
+template <typename... Attributes>
+inline CUDA_CALLABLE_DEVICE bool optix_report_intersection(float hit_t, uint32 hit_kind, Attributes... attributes)
+{
+    static_assert(sizeof...(Attributes) <= 8, "optixReportIntersection accepts at most eight attributes");
+#if defined(WP_ENABLE_OPTIX)
+    return optixReportIntersection(hit_t, hit_kind, static_cast<uint32>(attributes)...);
+#else
+    (void)hit_t;
+    (void)hit_kind;
+    return false;
 #endif
 }
 

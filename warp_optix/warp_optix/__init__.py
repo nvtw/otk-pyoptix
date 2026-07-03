@@ -28,6 +28,8 @@ from warp_optix._runtime.hit_kernels import HitKernel as HitKernel
 from warp_optix._runtime.hit_kernels import HitKernelManager as HitKernelManager
 from warp_optix._runtime.runtime import LaunchParamsBuffer as LaunchParamsBuffer
 from warp_optix._runtime.runtime import compile_warp_module_to_ptx as compile_warp_module_to_ptx
+from warp_optix._runtime.runtime import create_custom_primitive_gas as create_custom_primitive_gas
+from warp_optix._runtime.runtime import create_instance_acceleration_structure as create_instance_acceleration_structure
 from warp_optix._runtime.runtime import create_launch_params_buffer as create_launch_params_buffer
 from warp_optix._runtime.runtime import create_optix_context as create_context
 from warp_optix._runtime.runtime import create_pipeline_and_sbt as create_pipeline_and_sbt
@@ -49,6 +51,8 @@ __all__ = [
     "SbtResources",
     "compile_warp_module_to_ptx",
     "create_context",
+    "create_custom_primitive_gas",
+    "create_instance_acceleration_structure",
     "create_launch_params_buffer",
     "create_pipeline_and_sbt",
     "create_triangle_gas",

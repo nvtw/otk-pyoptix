@@ -16,6 +16,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import warp as wp
 
 
 @dataclass(frozen=True)
@@ -46,9 +50,9 @@ class _HandleBuffer:
 
 @dataclass
 class HitKernel:
-    closest_hit: str
-    any_hit: str | None = None
-    intersection: str | None = None
+    closest_hit: wp.Kernel | str | None = None
+    any_hit: wp.Kernel | str | None = None
+    intersection: wp.Kernel | str | None = None
 
 
 class HitKernelManager:
@@ -76,13 +80,16 @@ class HitKernelManager:
 
         if len(kernels) != self.num_ray_types_per_intersection_type:
             raise ValueError(f"Expected {self.num_ray_types_per_intersection_type} kernels, got {len(kernels)}")
+        if any(not (kernel.closest_hit or kernel.any_hit or kernel.intersection) for kernel in kernels):
+            raise ValueError("A hit group must define at least one closest-hit, any-hit, or intersection program")
 
         index = len(self._hit_shaders)
         handle = self._handle_to_offset.add(index)
         for kernel in kernels:
             desc = self.optix.ProgramGroupDesc()
-            desc.hitgroupModuleCH = self.module
-            desc.hitgroupEntryFunctionNameCH = kernel.closest_hit
+            if kernel.closest_hit:
+                desc.hitgroupModuleCH = self.module
+                desc.hitgroupEntryFunctionNameCH = kernel.closest_hit
             if kernel.any_hit:
                 desc.hitgroupModuleAH = self.module
                 desc.hitgroupEntryFunctionNameAH = kernel.any_hit
@@ -90,7 +97,7 @@ class HitKernelManager:
                 desc.hitgroupModuleIS = self.module
                 desc.hitgroupEntryFunctionNameIS = kernel.intersection
 
-            if self.optix.version()[1] >= 4:
+            if tuple(self.optix.version()) >= (7, 4):
                 pg_options = self.optix.ProgramGroupOptions()
                 pg = self.ctx.programGroupCreate([desc], pg_options)[0][0]
             else:
