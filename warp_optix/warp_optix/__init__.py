@@ -27,6 +27,7 @@ from warp_optix._runtime.gl_interop import OptixGLInteropViewer as GLInteropView
 from warp_optix._runtime.hit_kernels import HitKernel as HitKernel
 from warp_optix._runtime.hit_kernels import HitKernelManager as HitKernelManager
 from warp_optix._runtime.runtime import LaunchParamsBuffer as LaunchParamsBuffer
+from warp_optix._runtime.runtime import AccelResources as AccelResources
 from warp_optix._runtime.runtime import compile_warp_module_to_ptx as compile_warp_module_to_ptx
 from warp_optix._runtime.runtime import create_custom_primitive_gas as create_custom_primitive_gas
 from warp_optix._runtime.runtime import create_instance_acceleration_structure as create_instance_acceleration_structure
@@ -37,12 +38,14 @@ from warp_optix._runtime.runtime import create_triangle_gas as create_triangle_g
 from warp_optix._runtime.runtime import get_optix_entry_name as get_entry_name
 from warp_optix._runtime.runtime import launch as launch
 from warp_optix._runtime.runtime import require_optix as require_optix
+from warp_optix._runtime.runtime import refit_acceleration_structure as refit_acceleration_structure
 from warp_optix._runtime.runtime import write_launch_params as write_launch_params
 from warp_optix._runtime.sbt import SbtKernelManager as SbtKernelManager
 from warp_optix._runtime.sbt import SbtResources as SbtResources
 
 __all__ = [
     "GLInteropViewer",
+    "AccelResources",
     "HitKernel",
     "HitKernelManager",
     "LaunchParamsBuffer",
@@ -60,5 +63,6 @@ __all__ = [
     "launch",
     "optix_kernel",
     "require_optix",
+    "refit_acceleration_structure",
     "write_launch_params",
 ]

@@ -102,3 +102,25 @@ Triangle any-hit and closest-hit kernels can call
 `wp.optix_get_triangle_vertex_data()`. It returns a `wp.mat33` whose rows are
 the three object-space vertices of the current triangle; this current-hit form
 does not require random vertex access or extra launch-parameter arrays.
+
+Acceleration-structure builders accept `compact=True` for static data and a
+normal OptiX `build_flags` value for advanced use. For dynamic geometry, build
+with `BUILD_FLAG_ALLOW_UPDATE`, update the retained Warp buffer, then refit in
+place:
+
+```python
+gas, gas_resources = wo.create_triangle_gas(
+    optix,
+    context,
+    vertices,
+    indices,
+    "cuda",
+    build_flags=optix.BUILD_FLAG_ALLOW_UPDATE,
+)
+gas_resources["d_vertices"].assign(updated_vertices)
+gas = wo.refit_acceleration_structure(optix, context, gas_resources)
+```
+
+Compaction and update are deliberately mutually exclusive in these helpers:
+compaction targets immutable geometry, while update retains the original output
+capacity required by OptiX refits.

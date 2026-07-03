@@ -116,7 +116,11 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
 
         vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
         indices = np.array([[0, 1, 2]], dtype=np.uint32)
-        gas, gas_buffers = woptix.create_triangle_gas(optix, context, vertices, indices, device_name)
+        gas, gas_buffers = woptix.create_triangle_gas(
+            optix, context, vertices, indices, device_name, compact=True
+        )
+        assert gas_buffers.build_flags & int(optix.BUILD_FLAG_ALLOW_COMPACTION)
+        assert gas_buffers.output_size_in_bytes <= gas_buffers.uncompacted_size_in_bytes
         pipeline, sbt, pipeline_buffers = woptix.create_pipeline_and_sbt(
             optix,
             context,
@@ -160,4 +164,30 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         assert int(result[9]) | (int(result[10]) << 32) == gas
         assert result[11] == 0
 
-        _keepalive = (gas_buffers, pipeline_buffers, ias_buffers, params_buffer)
+        dynamic_flags = int(optix.BUILD_FLAG_ALLOW_UPDATE | optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS)
+        dynamic_gas, dynamic_buffers = woptix.create_triangle_gas(
+            optix, context, vertices, indices, device_name, build_flags=dynamic_flags
+        )
+        dynamic_instance = optix.Instance(transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, dynamic_gas)
+        dynamic_ias, dynamic_ias_buffers = woptix.create_instance_acceleration_structure(
+            optix, context, [dynamic_instance], device_name
+        )
+        params.traversable = wp.uint64(dynamic_ias)
+        woptix.write_launch_params(params_buffer, params)
+
+        moved_vertices = vertices + np.array([10.0, 0.0, 0.0], dtype=np.float32)
+        dynamic_buffers["d_vertices"].assign(moved_vertices)
+        assert woptix.refit_acceleration_structure(optix, context, dynamic_buffers) == dynamic_gas
+        output.zero_()
+        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        assert output.numpy()[0] == np.uint32(0xFFFFFFFF)
+
+        _keepalive = (
+            gas_buffers,
+            pipeline_buffers,
+            ias_buffers,
+            dynamic_buffers,
+            dynamic_ias_buffers,
+            params_buffer,
+        )

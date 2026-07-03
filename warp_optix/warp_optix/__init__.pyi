@@ -6,6 +6,15 @@ from typing import Any
 
 import warp as wp
 
+class AccelResources(dict):
+    handle: int
+    build_flags: int
+    output_size_in_bytes: int
+    uncompacted_size_in_bytes: int
+    update_temp_size_in_bytes: int
+    compacted: bool
+    device: str
+
 class OptixKernelType(Enum):
     RAYGEN: str
     MISS: str
@@ -71,7 +80,9 @@ def compile_warp_module_to_ptx(
     script_dir: str,
     device: str = "cuda",
 ) -> bytes: ...
-def create_triangle_gas(optix, ctx, vertices, indices, device: str): ...
+def create_triangle_gas(
+    optix, ctx, vertices, indices, device: str, *, build_flags=None, compact: bool = False
+) -> tuple[int, AccelResources]: ...
 def create_custom_primitive_gas(
     optix,
     ctx,
@@ -83,10 +94,12 @@ def create_custom_primitive_gas(
     sbt_index_offsets=None,
     num_sbt_records: int = 1,
     primitive_index_offset: int = 0,
-): ...
+    compact: bool = False,
+) -> tuple[int, AccelResources]: ...
 def create_instance_acceleration_structure(
-    optix, ctx, instances, device: str, *, build_flags=None
-): ...
+    optix, ctx, instances, device: str, *, build_flags=None, compact: bool = False
+) -> tuple[int, AccelResources]: ...
+def refit_acceleration_structure(optix, ctx, resources: AccelResources, *, stream: int = 0) -> int: ...
 def create_pipeline_and_sbt(
     optix,
     ctx,

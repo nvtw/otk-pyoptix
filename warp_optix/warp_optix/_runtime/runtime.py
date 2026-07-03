@@ -180,14 +180,154 @@ def compile_warp_module_to_ptx(
         module.options["extra_build_options"] = old_build_options
 
 
-def create_triangle_gas(optix, ctx, vertices: np.ndarray, indices: np.ndarray, device: str):
+class AccelResources(dict):
+    """Device buffers and retained build state for one acceleration structure."""
+
+    def __init__(
+        self,
+        buffers,
+        *,
+        handle,
+        build_inputs,
+        build_flags,
+        motion_options,
+        output_buffer,
+        output_size,
+        uncompacted_size,
+        update_temp_size,
+        compacted,
+        device,
+    ):
+        super().__init__(buffers)
+        self.handle = int(handle)
+        self.build_inputs = list(build_inputs)
+        self.build_flags = int(build_flags)
+        self.motion_options = motion_options
+        self.output_buffer = output_buffer
+        self.output_size_in_bytes = int(output_size)
+        self.uncompacted_size_in_bytes = int(uncompacted_size)
+        self.update_temp_size_in_bytes = int(update_temp_size)
+        self.compacted = bool(compacted)
+        self.device = device
+
+
+def _build_acceleration_structure(
+    optix,
+    ctx,
+    build_inputs,
+    buffers,
+    output_key: str,
+    device: str,
+    *,
+    build_flags,
+    compact: bool,
+    motion_options=None,
+):
+    build_flags = int(build_flags)
+    if compact and build_flags & int(optix.BUILD_FLAG_ALLOW_UPDATE):
+        raise ValueError("compact and BUILD_FLAG_ALLOW_UPDATE cannot be combined")
+    if compact:
+        build_flags |= int(optix.BUILD_FLAG_ALLOW_COMPACTION)
+
+    options_kwargs = {"buildFlags": build_flags, "operation": optix.BUILD_OPERATION_BUILD}
+    if motion_options is not None:
+        options_kwargs["motionOptions"] = motion_options
+    options = optix.AccelBuildOptions(**options_kwargs)
+    sizes = ctx.accelComputeMemoryUsage([options], build_inputs)
+    d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device=device)
+    d_output = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device=device)
+
+    emitted = []
+    d_compacted_size = None
+    if compact:
+        d_compacted_size = wp.zeros(1, dtype=wp.uint64, device=device)
+        emitted.append(optix.AccelEmitDesc(d_compacted_size.ptr, optix.PROPERTY_TYPE_COMPACTED_SIZE))
+
+    handle = ctx.accelBuild(
+        0,
+        [options],
+        build_inputs,
+        d_temp.ptr,
+        sizes.tempSizeInBytes,
+        d_output.ptr,
+        sizes.outputSizeInBytes,
+        emitted,
+    )
+    wp.synchronize_device(device)
+
+    compacted = False
+    output_size = int(sizes.outputSizeInBytes)
+    if d_compacted_size is not None:
+        compacted_size = int(d_compacted_size.numpy()[0])
+        if 0 < compacted_size < output_size:
+            compacted_output = wp.empty(compacted_size, dtype=wp.uint8, device=device)
+            handle = ctx.accelCompact(0, handle, compacted_output.ptr, compacted_size)
+            wp.synchronize_device(device)
+            d_output = compacted_output
+            output_size = compacted_size
+            compacted = True
+
+    buffers[output_key] = d_output
+    resources = AccelResources(
+        buffers,
+        handle=handle,
+        build_inputs=build_inputs,
+        build_flags=build_flags,
+        motion_options=getattr(options, "motionOptions", None),
+        output_buffer=d_output,
+        output_size=output_size,
+        uncompacted_size=sizes.outputSizeInBytes,
+        update_temp_size=getattr(sizes, "tempUpdateSizeInBytes", 0),
+        compacted=compacted,
+        device=device,
+    )
+    return resources.handle, resources
+
+
+def refit_acceleration_structure(optix, ctx, resources: AccelResources, *, stream: int = 0) -> int:
+    """Refit an acceleration structure after updating its retained device buffers."""
+    if not isinstance(resources, AccelResources):
+        raise TypeError("resources must be returned by a warp_optix acceleration-structure helper")
+    if not resources.build_flags & int(optix.BUILD_FLAG_ALLOW_UPDATE):
+        raise ValueError("the acceleration structure was not built with BUILD_FLAG_ALLOW_UPDATE")
+    if resources.compacted:
+        raise ValueError("compacted acceleration structures cannot be refit by this helper")
+
+    options = optix.AccelBuildOptions(
+        buildFlags=resources.build_flags,
+        operation=optix.BUILD_OPERATION_UPDATE,
+        motionOptions=resources.motion_options,
+    )
+    d_temp = wp.empty(resources.update_temp_size_in_bytes, dtype=wp.uint8, device=resources.device)
+    resources.handle = int(
+        ctx.accelBuild(
+            stream,
+            [options],
+            resources.build_inputs,
+            d_temp.ptr,
+            resources.update_temp_size_in_bytes,
+            resources.output_buffer.ptr,
+            resources.uncompacted_size_in_bytes,
+            [],
+        )
+    )
+    wp.synchronize_device(resources.device)
+    return resources.handle
+
+
+def create_triangle_gas(
+    optix,
+    ctx,
+    vertices: np.ndarray,
+    indices: np.ndarray,
+    device: str,
+    *,
+    build_flags=None,
+    compact: bool = False,
+):
     d_vertices = wp.array(vertices, dtype=wp.float32, device=device)
     d_indices = wp.array(indices, dtype=wp.uint32, device=device)
 
-    options = optix.AccelBuildOptions(
-        buildFlags=int(optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS),
-        operation=optix.BUILD_OPERATION_BUILD,
-    )
     tri = optix.BuildInputTriangleArray()
     tri.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
     tri.numVertices = vertices.shape[0]
@@ -200,22 +340,18 @@ def create_triangle_gas(optix, ctx, vertices: np.ndarray, indices: np.ndarray, d
     tri.flags = [optix.GEOMETRY_FLAG_NONE]
     tri.numSbtRecords = 1
 
-    sizes = ctx.accelComputeMemoryUsage([options], [tri])
-    d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device=device)
-    d_gas = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device=device)
-    handle = ctx.accelBuild(
-        0,
-        [options],
+    if build_flags is None:
+        build_flags = optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS
+    return _build_acceleration_structure(
+        optix,
+        ctx,
         [tri],
-        d_temp.ptr,
-        sizes.tempSizeInBytes,
-        d_gas.ptr,
-        sizes.outputSizeInBytes,
-        [],
+        {"d_vertices": d_vertices, "d_indices": d_indices},
+        "d_gas",
+        device,
+        build_flags=build_flags,
+        compact=compact,
     )
-    wp.synchronize_device(device)
-    keepalive = {"d_vertices": d_vertices, "d_indices": d_indices, "d_temp": d_temp, "d_gas": d_gas}
-    return int(handle), keepalive
 
 
 def create_custom_primitive_gas(
@@ -229,6 +365,7 @@ def create_custom_primitive_gas(
     sbt_index_offsets: np.ndarray | None = None,
     num_sbt_records: int = 1,
     primitive_index_offset: int = 0,
+    compact: bool = False,
 ):
     """Build a GAS for custom primitives from object-space AABBs.
 
@@ -273,10 +410,6 @@ def create_custom_primitive_gas(
             raise ValueError("sbt_index_offsets values must be less than num_sbt_records")
         d_sbt_indices = wp.array(np.ascontiguousarray(host_sbt_indices), dtype=wp.uint32, device=device)
 
-    options = optix.AccelBuildOptions(
-        buildFlags=int(optix.BUILD_FLAG_NONE if build_flags is None else build_flags),
-        operation=optix.BUILD_OPERATION_BUILD,
-    )
     custom = optix.BuildInputCustomPrimitiveArray(
         aabbBuffers=[d_aabbs.ptr],
         numPrimitives=host_aabbs.shape[0],
@@ -289,30 +422,21 @@ def create_custom_primitive_gas(
         primitiveIndexOffset=int(primitive_index_offset),
     )
 
-    sizes = ctx.accelComputeMemoryUsage([options], [custom])
-    d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device=device)
-    d_gas = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device=device)
-    handle = ctx.accelBuild(
-        0,
-        [options],
+    return _build_acceleration_structure(
+        optix,
+        ctx,
         [custom],
-        d_temp.ptr,
-        sizes.tempSizeInBytes,
-        d_gas.ptr,
-        sizes.outputSizeInBytes,
-        [],
+        {"d_aabbs": d_aabbs, "d_sbt_indices": d_sbt_indices},
+        "d_gas",
+        device,
+        build_flags=optix.BUILD_FLAG_NONE if build_flags is None else build_flags,
+        compact=compact,
     )
-    wp.synchronize_device(device)
-    keepalive = {
-        "d_aabbs": d_aabbs,
-        "d_sbt_indices": d_sbt_indices,
-        "d_temp": d_temp,
-        "d_gas": d_gas,
-    }
-    return int(handle), keepalive
 
 
-def create_instance_acceleration_structure(optix, ctx, instances, device: str, *, build_flags=None):
+def create_instance_acceleration_structure(
+    optix, ctx, instances, device: str, *, build_flags=None, compact: bool = False
+):
     """Build an IAS from a non-empty sequence of ``optix.Instance`` objects."""
     instances = list(instances)
     if not instances:
@@ -321,25 +445,16 @@ def create_instance_acceleration_structure(optix, ctx, instances, device: str, *
     host_bytes = np.frombuffer(optix.getDeviceRepresentation(instances), dtype=np.uint8)
     d_instances = wp.array(host_bytes, dtype=wp.uint8, device=device)
     instance_input = optix.BuildInputInstanceArray(instances=d_instances.ptr, numInstances=len(instances))
-    options = optix.AccelBuildOptions(
-        buildFlags=int(optix.BUILD_FLAG_NONE if build_flags is None else build_flags),
-        operation=optix.BUILD_OPERATION_BUILD,
-    )
-    sizes = ctx.accelComputeMemoryUsage([options], [instance_input])
-    d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device=device)
-    d_ias = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device=device)
-    handle = ctx.accelBuild(
-        0,
-        [options],
+    return _build_acceleration_structure(
+        optix,
+        ctx,
         [instance_input],
-        d_temp.ptr,
-        sizes.tempSizeInBytes,
-        d_ias.ptr,
-        sizes.outputSizeInBytes,
-        [],
+        {"d_instances": d_instances},
+        "d_ias",
+        device,
+        build_flags=optix.BUILD_FLAG_NONE if build_flags is None else build_flags,
+        compact=compact,
     )
-    wp.synchronize_device(device)
-    return int(handle), {"d_instances": d_instances, "d_temp": d_temp, "d_ias": d_ias}
 
 
 def _set_pipeline_stack_size(optix, pipeline, program_groups, max_trace_depth: int, max_traversable_depth: int):
