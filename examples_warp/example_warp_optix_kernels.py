@@ -16,7 +16,7 @@
 """Minimal Warp-defined OptiX entry kernels.
 
 This example defines OptiX raygen/miss entry points with the new `kernel_type` API,
-then emits CUDA source so the generated entry names can be inspected.
+then emits PTX so the generated entry names can be inspected.
 """
 
 import warp as wp
@@ -43,15 +43,18 @@ def miss_program(params: ExampleLaunchParams):
 
 def main() -> None:
     module = wp.get_module(__name__)
-    hasher = wp._src.context.ModuleHasher(module._get_live_kernels(), module.options.copy())
-    builder = wp._src.context.ModuleBuilder(module, options=module.options.copy(), hasher=hasher)
-    cuda_source = builder.codegen("cuda")
+    ptx = woptix.compile_warp_module_to_ptx(
+        module=module,
+        launch_preamble="",
+        module_tag="optix_kernels_example",
+        script_dir=__file__,
+    )
 
     print("Generated OptiX entry symbols:")
     print(f"  __raygen__{raygen_program.get_mangled_name()}")
     print(f"  __miss__{miss_program.get_mangled_name()}")
-    print("\nFirst 40 lines of generated CUDA source:")
-    print("\n".join(cuda_source.splitlines()[:40]))
+    print("\nFirst 40 lines of generated PTX:")
+    print("\n".join(ptx.decode("utf-8", errors="replace").splitlines()[:40]))
 
 
 if __name__ == "__main__":

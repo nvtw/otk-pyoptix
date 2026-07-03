@@ -1,6 +1,6 @@
 """OptiX builtin registrations for warp.
 
-This module was extracted verbatim from ``warp/_src/builtins.py``; importing it
+This module was extracted from ``warp/_src/builtins.py``; importing it
 calls ``warp.add_builtin(...)`` for every OptiX-related builtin so that the rest
 of warp can codegen against them. ``warp_optix._addon`` triggers the import.
 
@@ -11,9 +11,16 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from warp._src.builtins import add_builtin
-from warp._src.codegen import Reference, Var
-from warp._src.types import float32 as float, uint32, uint64, vec2, vec3, vec3ui  # noqa: A001
+import warp as wp
+
+add_builtin = wp.add_builtin
+
+float = wp.float32  # noqa: A001
+uint32 = wp.uint32
+uint64 = wp.uint64
+vec2 = wp.vec2
+vec3 = wp.vec3
+vec3ui = wp.vec3ui
 
 
 def register_addon_builtins() -> None:
@@ -24,7 +31,7 @@ def register_addon_builtins() -> None:
     is new so the registrations don't run as a side-effect of merely importing
     this module's symbols.
     """
-    def optix_trace_payload_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
+    def optix_trace_payload_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Any]):
         func_args = (
             args["traversable"],
             args["ray_origin"],
@@ -37,18 +44,12 @@ def register_addon_builtins() -> None:
             args["sbt_offset"],
             args["sbt_stride"],
             args["miss_sbt_index"],
-            Reference(args["payload"]),
+            args["payload"],
         )
         return (func_args, ())
 
-
-    def optix_load_payload_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
-        return ((Reference(args["payload"]),), ())
-
-
-    def optix_matrix_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Var]):
-        return ((Reference(args["matrix"]),), ())
-
+    def optix_load_payload_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Any]):
+        return ((args["payload"],), ())
 
     add_builtin(
         "float_to_uint32",
@@ -149,26 +150,6 @@ def register_addon_builtins() -> None:
     )
 
     add_builtin(
-        "optix_get_object_to_world_transform_matrix",
-        input_types={"matrix": Any},
-        value_type=None,
-        dispatch_func=optix_matrix_dispatch_func,
-        export=False,
-        group="Utility",
-        is_differentiable=False,
-    )
-
-    add_builtin(
-        "optix_get_world_to_object_transform_matrix",
-        input_types={"matrix": Any},
-        value_type=None,
-        dispatch_func=optix_matrix_dispatch_func,
-        export=False,
-        group="Utility",
-        is_differentiable=False,
-    )
-
-    add_builtin(
         "optix_terminate_ray",
         input_types={},
         value_type=None,
@@ -241,4 +222,3 @@ def register_addon_builtins() -> None:
             group="Utility",
             is_differentiable=False,
         )
-

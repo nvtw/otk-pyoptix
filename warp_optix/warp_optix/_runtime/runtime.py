@@ -18,16 +18,12 @@
 from __future__ import annotations
 
 import ctypes
-import hashlib
 import os
 from dataclasses import dataclass
 
 import numpy as np
 
 import warp as wp
-import warp._src.build as wp_build
-import warp._src.types
-from warp._src.thirdparty import appdirs
 
 from warp_optix._addon import get_module_build_options
 
@@ -81,15 +77,19 @@ class LaunchParamsBuffer:
     device: str
 
 
+def _is_warp_struct_type(value) -> bool:
+    return hasattr(value, "ctype") and hasattr(value, "instance_type")
+
+
 def _get_struct_type_info(params_struct_type):
-    if isinstance(params_struct_type, wp._src.codegen.Struct):
+    if _is_warp_struct_type(params_struct_type):
         wp_struct = params_struct_type
     else:
         wp_struct = getattr(params_struct_type, "_cls", None)
         if wp_struct is None and hasattr(params_struct_type, "__class__"):
             wp_struct = getattr(params_struct_type.__class__, "_cls", None)
 
-    if not isinstance(wp_struct, wp._src.codegen.Struct):
+    if not _is_warp_struct_type(wp_struct):
         raise TypeError(
             "params_struct_type must be a @wp.struct definition (example: create_launch_params_buffer(MyLaunchParams, ...))"
         )
@@ -111,7 +111,7 @@ def create_launch_params_buffer(params_struct_type: type, device: str = "cuda") 
 def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> None:
     if not isinstance(buffer, LaunchParamsBuffer):
         raise TypeError("buffer must be a LaunchParamsBuffer created by create_launch_params_buffer()")
-    if not warp._src.types.is_struct(params_struct_instance):
+    if not hasattr(params_struct_instance, "_ctype"):
         raise TypeError("params_struct_instance must be a Warp struct instance")
     if not isinstance(params_struct_instance, buffer.struct_type):
         raise TypeError(
@@ -151,17 +151,20 @@ def get_optix_entry_name(kernel_or_entry, expected_kernel_type=None) -> str:
     return f"{kernel_type.value}{kernel_or_entry.get_mangled_name()}"
 
 
-def _default_kernel_cache_root() -> str:
-    cache_root_dir = appdirs.user_cache_dir(appname="warp", appauthor="NVIDIA", version=wp.config.version)
+def _prepend_device_preamble(build_options: wp.ModuleBuildOptions, preamble: str) -> wp.ModuleBuildOptions:
+    if not preamble:
+        return build_options
 
-    if os.name == "nt" and os.path.isabs(cache_root_dir) and not cache_root_dir.startswith("\\\\?\\"):
-        # Match build.init_kernel_cache() long-path handling.
-        if cache_root_dir.startswith("\\\\"):
-            cache_root_dir = "\\\\?\\UNC\\" + cache_root_dir.removeprefix("\\\\")
-        else:
-            cache_root_dir = "\\\\?\\" + cache_root_dir
+    if not preamble.endswith("\n"):
+        preamble += "\n"
 
-    return cache_root_dir
+    return wp.ModuleBuildOptions(
+        extra_include_dirs=build_options.extra_include_dirs,
+        extra_cuda_include_dirs=build_options.extra_cuda_include_dirs,
+        extra_cpu_include_dirs=build_options.extra_cpu_include_dirs,
+        extra_device_preamble=preamble + build_options.extra_device_preamble,
+        extra_cpu_preamble=build_options.extra_cpu_preamble,
+    )
 
 
 def compile_warp_module_to_ptx(
@@ -171,52 +174,20 @@ def compile_warp_module_to_ptx(
     script_dir: str,
     device: str = "cuda",
 ) -> bytes:
-    device_obj = wp.get_device(device)
-    if not device_obj.is_cuda:
-        raise RuntimeError(f"PTX can only be generated for CUDA devices, got '{device_obj}'")
+    if not hasattr(wp, "compile_module_to_ptx"):
+        raise RuntimeError("warp_optix requires a Warp build with wp.compile_module_to_ptx()")
+
+    del script_dir  # Preserved for backward-compatible call sites.
 
     old_build_options = module.options.get("extra_build_options")
-    module.options["extra_build_options"] = get_module_build_options(wp, old_build_options)
+    build_options = get_module_build_options(wp, old_build_options)
+    module.options["extra_build_options"] = _prepend_device_preamble(build_options, launch_preamble)
     try:
-        options = module.resolve_options(wp.config)
-        hasher = wp._src.context.ModuleHasher(module._get_live_kernels(), options)
-        builder = wp._src.context.ModuleBuilder(module, options=options, hasher=hasher)
-        warp_cuda = builder.codegen("cuda")
+        wp.get_device(device)
+        module_dir = os.path.join(wp.config.kernel_cache_dir, "optix", module_tag)
+        return wp.compile_module_to_ptx(module, device=device, module_dir=module_dir)
     finally:
         module.options["extra_build_options"] = old_build_options
-
-    cuda_source = launch_preamble + "\n" + warp_cuda
-
-    digest = hashlib.sha256(cuda_source.encode("utf-8")).hexdigest()[:16]
-    module_dir = os.path.join(wp.config.kernel_cache_dir, f"wp_optix_{module_tag}_{digest}")
-    try:
-        os.makedirs(module_dir, exist_ok=True)
-    except PermissionError:
-        fallback_cache_root = os.path.join(_default_kernel_cache_root(), "optix")
-        module_dir = os.path.join(fallback_cache_root, f"wp_optix_{module_tag}_{digest}")
-        os.makedirs(module_dir, exist_ok=True)
-
-    cu_path = os.path.join(module_dir, f"wp_optix_{module_tag}_{digest}.cu")
-    ptx_path = os.path.join(module_dir, f"wp_optix_{module_tag}_{digest}.ptx")
-    if not os.path.exists(ptx_path) or not wp.config.cache_kernels:
-        with open(cu_path, "w", encoding="utf-8") as f:
-            f.write(cuda_source)
-
-        old_use_pch = wp.config.use_precompiled_headers
-        try:
-            wp.config.use_precompiled_headers = False
-            wp_build.build_cuda(
-                cu_path,
-                arch=device_obj.arch,
-                output_path=ptx_path,
-                pch_dir=module_dir,
-                extra_include_dirs=options["extra_cuda_include_dirs"],
-            )
-        finally:
-            wp.config.use_precompiled_headers = old_use_pch
-
-    with open(ptx_path, "rb") as f:
-        return f.read()
 
 
 def create_triangle_gas(optix, ctx, vertices: np.ndarray, indices: np.ndarray, device: str):
