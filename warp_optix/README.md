@@ -69,6 +69,9 @@ pipeline, sbt, pipeline_resources = wo.create_pipeline_and_sbt(
 )
 ```
 
+See `examples_warp/example_warp_optix_motion_blur.py` for temporal sampling
+across a two-key triangle deformation.
+
 Inside an `INTERSECTION` kernel, use `wp.optix_get_object_ray_origin()`,
 `wp.optix_get_object_ray_direction()`, and `wp.optix_report_intersection()`.
 The latter accepts a hit distance, hit kind, and zero to eight `wp.uint32`
