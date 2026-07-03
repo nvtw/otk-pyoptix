@@ -88,6 +88,7 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     assert "optix_get_ray_tmin" in registered_names
     assert "optix_get_hit_kind" in registered_names
     assert "optix_get_triangle_vertex_data" in registered_names
+    assert "optix_get_curve_parameter" in registered_names
     assert all(f"optix_get_attribute_{i}" in registered_names for i in range(8))
     assert {
         "optix_get_ray_time",

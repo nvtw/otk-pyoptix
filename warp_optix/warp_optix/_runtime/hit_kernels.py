@@ -53,6 +53,8 @@ class HitKernel:
     closest_hit: wp.Kernel | str | None = None
     any_hit: wp.Kernel | str | None = None
     intersection: wp.Kernel | str | None = None
+    builtin_intersection_type: int | None = None
+    intersection_module: object | None = None
 
 
 class HitKernelManager:
@@ -80,7 +82,10 @@ class HitKernelManager:
 
         if len(kernels) != self.num_ray_types_per_intersection_type:
             raise ValueError(f"Expected {self.num_ray_types_per_intersection_type} kernels, got {len(kernels)}")
-        if any(not (kernel.closest_hit or kernel.any_hit or kernel.intersection) for kernel in kernels):
+        if any(
+            not (kernel.closest_hit or kernel.any_hit or kernel.intersection or kernel.intersection_module)
+            for kernel in kernels
+        ):
             raise ValueError("A hit group must define at least one closest-hit, any-hit, or intersection program")
 
         index = len(self._hit_shaders)
@@ -93,8 +98,9 @@ class HitKernelManager:
             if kernel.any_hit:
                 desc.hitgroupModuleAH = self.module
                 desc.hitgroupEntryFunctionNameAH = kernel.any_hit
+            if kernel.intersection or kernel.intersection_module:
+                desc.hitgroupModuleIS = kernel.intersection_module or self.module
             if kernel.intersection:
-                desc.hitgroupModuleIS = self.module
                 desc.hitgroupEntryFunctionNameIS = kernel.intersection
 
             if tuple(self.optix.version()) >= (7, 4):

@@ -218,6 +218,15 @@ inline CUDA_CALLABLE_DEVICE mat33 optix_get_triangle_vertex_data()
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE float optix_get_curve_parameter()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixGetCurveParameter();
+#else
+    return 0.0f;
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE uint32 optix_get_primitive_index()
 {
 #if defined(WP_ENABLE_OPTIX)

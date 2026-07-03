@@ -127,6 +127,8 @@ class SbtKernelManager:
                         if kernel.intersection is not None
                         else None
                     ),
+                    builtin_intersection_type=kernel.builtin_intersection_type,
+                    intersection_module=kernel.intersection_module,
                 )
             )
         return self.hit_kernels.register_hit_shader_type(*resolved)

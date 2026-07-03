@@ -124,3 +124,22 @@ gas = wo.refit_acceleration_structure(optix, context, gas_resources)
 Compaction and update are deliberately mutually exclusive in these helpers:
 compaction targets immutable geometry, while update retains the original output
 capacity required by OptiX refits.
+
+For vertex motion blur, pass triangle vertices as `(K, N, 3)` motion keys and
+enable motion on the pipeline:
+
+```python
+gas, gas_resources = wo.create_triangle_gas(
+    optix, context, vertex_keys, indices, "cuda", motion_time_range=(0.0, 1.0)
+)
+pipeline, sbt, pipeline_resources = wo.create_pipeline_and_sbt(
+    ...,
+    uses_motion_blur=True,
+)
+```
+
+`create_curve_gas()` builds native round linear, B-spline, Catmull-Rom, and
+Bezier curves. Associate its hit record with OptiX's built-in intersector by
+setting `HitKernel(builtin_intersection_type=curve_type)`. Curve shaders can
+read the current parameter with `wp.optix_get_curve_parameter()`. Curve vertex
+and width arrays may also contain motion keys.

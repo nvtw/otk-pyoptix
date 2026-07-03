@@ -315,6 +315,22 @@ def refit_acceleration_structure(optix, ctx, resources: AccelResources, *, strea
     return resources.handle
 
 
+def _motion_options_for_keys(optix, num_keys: int, motion_time_range):
+    if num_keys == 1:
+        return None
+    if num_keys < 2:
+        raise ValueError("motion geometry requires at least two keys")
+    time_begin, time_end = (0.0, 1.0) if motion_time_range is None else motion_time_range
+    if not float(time_begin) < float(time_end):
+        raise ValueError("motion_time_range must have an increasing begin and end")
+    return optix.MotionOptions(
+        numKeys=num_keys,
+        flags=optix.MOTION_FLAG_NONE,
+        timeBegin=float(time_begin),
+        timeEnd=float(time_end),
+    )
+
+
 def create_triangle_gas(
     optix,
     ctx,
@@ -324,17 +340,30 @@ def create_triangle_gas(
     *,
     build_flags=None,
     compact: bool = False,
+    motion_time_range=None,
 ):
-    d_vertices = wp.array(vertices, dtype=wp.float32, device=device)
-    d_indices = wp.array(indices, dtype=wp.uint32, device=device)
+    host_vertices = np.asarray(vertices, dtype=np.float32)
+    if host_vertices.ndim == 2 and host_vertices.shape[1] == 3:
+        host_vertex_keys = [np.ascontiguousarray(host_vertices)]
+    elif host_vertices.ndim == 3 and host_vertices.shape[2] == 3:
+        host_vertex_keys = [np.ascontiguousarray(key) for key in host_vertices]
+    else:
+        raise ValueError("vertices must have shape (N, 3) or (K, N, 3)")
+    d_vertex_buffers = [wp.array(key, dtype=wp.float32, device=device) for key in host_vertex_keys]
+
+    host_indices = np.asarray(indices, dtype=np.uint32)
+    if host_indices.ndim != 2 or host_indices.shape[1] != 3:
+        raise ValueError("indices must have shape (M, 3)")
+    d_indices = wp.array(np.ascontiguousarray(host_indices), dtype=wp.uint32, device=device)
+    motion_options = _motion_options_for_keys(optix, len(d_vertex_buffers), motion_time_range)
 
     tri = optix.BuildInputTriangleArray()
     tri.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
-    tri.numVertices = vertices.shape[0]
+    tri.numVertices = host_vertex_keys[0].shape[0]
     tri.vertexStrideInBytes = 12
-    tri.vertexBuffers = [d_vertices.ptr]
+    tri.vertexBuffers = [buffer.ptr for buffer in d_vertex_buffers]
     tri.indexFormat = optix.INDICES_FORMAT_UNSIGNED_INT3
-    tri.numIndexTriplets = indices.shape[0]
+    tri.numIndexTriplets = host_indices.shape[0]
     tri.indexStrideInBytes = 12
     tri.indexBuffer = d_indices.ptr
     tri.flags = [optix.GEOMETRY_FLAG_NONE]
@@ -346,11 +375,16 @@ def create_triangle_gas(
         optix,
         ctx,
         [tri],
-        {"d_vertices": d_vertices, "d_indices": d_indices},
+        {
+            "d_vertices": d_vertex_buffers[0],
+            "d_vertex_buffers": d_vertex_buffers,
+            "d_indices": d_indices,
+        },
         "d_gas",
         device,
         build_flags=build_flags,
         compact=compact,
+        motion_options=motion_options,
     )
 
 
@@ -434,6 +468,89 @@ def create_custom_primitive_gas(
     )
 
 
+def create_curve_gas(
+    optix,
+    ctx,
+    vertices: np.ndarray,
+    widths: np.ndarray,
+    segment_indices: np.ndarray,
+    device: str,
+    *,
+    curve_type=None,
+    geometry_flag=None,
+    build_flags=None,
+    compact: bool = False,
+    motion_time_range=None,
+):
+    """Build a GAS of round linear, B-spline, Catmull-Rom, or Bezier curves."""
+    if curve_type is None:
+        curve_type = optix.PRIMITIVE_TYPE_ROUND_LINEAR
+
+    host_vertices = np.asarray(vertices, dtype=np.float32)
+    if host_vertices.ndim == 2 and host_vertices.shape[1] == 3:
+        host_vertex_keys = [np.ascontiguousarray(host_vertices)]
+    elif host_vertices.ndim == 3 and host_vertices.shape[2] == 3:
+        host_vertex_keys = [np.ascontiguousarray(key) for key in host_vertices]
+    else:
+        raise ValueError("vertices must have shape (N, 3) or (K, N, 3)")
+    num_keys = len(host_vertex_keys)
+
+    host_widths = np.asarray(widths, dtype=np.float32)
+    if host_widths.ndim == 1:
+        if host_widths.shape[0] != host_vertex_keys[0].shape[0]:
+            raise ValueError("widths must contain one value per curve vertex")
+        host_width_keys = [np.ascontiguousarray(host_widths)] * num_keys
+    elif host_widths.ndim == 2 and host_widths.shape == (num_keys, host_vertex_keys[0].shape[0]):
+        host_width_keys = [np.ascontiguousarray(key) for key in host_widths]
+    else:
+        raise ValueError("widths must have shape (N,) or (K, N), matching vertices")
+
+    host_indices = np.asarray(segment_indices, dtype=np.uint32)
+    if host_indices.ndim != 1 or host_indices.size == 0:
+        raise ValueError("segment_indices must be a non-empty one-dimensional array")
+    host_indices = np.ascontiguousarray(host_indices)
+
+    d_vertex_buffers = [wp.array(key, dtype=wp.float32, device=device) for key in host_vertex_keys]
+    if len({id(key) for key in host_width_keys}) == 1:
+        d_width = wp.array(host_width_keys[0], dtype=wp.float32, device=device)
+        d_width_buffers = [d_width] * num_keys
+    else:
+        d_width_buffers = [wp.array(key, dtype=wp.float32, device=device) for key in host_width_keys]
+    d_indices = wp.array(host_indices, dtype=wp.uint32, device=device)
+    motion_options = _motion_options_for_keys(optix, num_keys, motion_time_range)
+
+    curve = optix.BuildInputCurveArray(
+        curveType=curve_type,
+        numPrimitives=host_indices.size,
+        vertexBuffers=[buffer.ptr for buffer in d_vertex_buffers],
+        numVertices=host_vertex_keys[0].shape[0],
+        vertexStrideInBytes=3 * np.dtype(np.float32).itemsize,
+        widthBuffers=[buffer.ptr for buffer in d_width_buffers],
+        widthStrideInBytes=np.dtype(np.float32).itemsize,
+        normalBuffers=[0] * num_keys,
+        normalStrideInBytes=0,
+        indexBuffer=d_indices.ptr,
+        indexStrideInBytes=np.dtype(np.uint32).itemsize,
+        flag=optix.GEOMETRY_FLAG_NONE if geometry_flag is None else geometry_flag,
+        primitiveIndexOffset=0,
+    )
+    return _build_acceleration_structure(
+        optix,
+        ctx,
+        [curve],
+        {
+            "d_vertex_buffers": d_vertex_buffers,
+            "d_width_buffers": d_width_buffers,
+            "d_indices": d_indices,
+        },
+        "d_gas",
+        device,
+        build_flags=optix.BUILD_FLAG_NONE if build_flags is None else build_flags,
+        compact=compact,
+        motion_options=motion_options,
+    )
+
+
 def create_instance_acceleration_structure(
     optix, ctx, instances, device: str, *, build_flags=None, compact: bool = False
 ):
@@ -475,6 +592,20 @@ def _set_pipeline_stack_size(optix, pipeline, program_groups, max_trace_depth: i
         pipeline.setStackSize(2 * 1024, 2 * 1024, 2 * 1024, max_traversable_depth)
 
 
+def _primitive_type_flag(optix, primitive_type) -> int:
+    names = (
+        "ROUND_QUADRATIC_BSPLINE",
+        "ROUND_CUBIC_BSPLINE",
+        "ROUND_LINEAR",
+        "ROUND_CATMULLROM",
+        "ROUND_CUBIC_BEZIER",
+    )
+    for name in names:
+        if primitive_type == getattr(optix, f"PRIMITIVE_TYPE_{name}", None):
+            return int(getattr(optix, f"PRIMITIVE_TYPE_FLAGS_{name}"))
+    raise ValueError(f"Unsupported built-in intersection primitive type: {primitive_type}")
+
+
 def create_pipeline_and_sbt(
     optix,
     ctx,
@@ -491,6 +622,7 @@ def create_pipeline_and_sbt(
     hit_groups=None,
     traversable_graph_flags: int | None = None,
     max_traversable_depth: int | None = None,
+    uses_motion_blur: bool = False,
 ):
     from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
     from warp_optix._runtime.hit_kernels import HitKernel  # noqa: PLC0415
@@ -527,9 +659,18 @@ def create_pipeline_and_sbt(
             if group.intersection is not None
             else None
         )
-        if not (closest_hit_name or any_hit_name or intersection_name):
+        if intersection_name is not None and group.builtin_intersection_type is not None:
+            raise ValueError("a hit group cannot combine custom and built-in intersection programs")
+        if not (closest_hit_name or any_hit_name or intersection_name or group.builtin_intersection_type is not None):
             raise ValueError("each hit group must define at least one program")
-        resolved_hit_groups.append((closest_hit_name, any_hit_name, intersection_name))
+        resolved_hit_groups.append(
+            HitKernel(
+                closest_hit_name,
+                any_hit_name,
+                intersection_name,
+                builtin_intersection_type=group.builtin_intersection_type,
+            )
+        )
 
     if traversable_graph_flags is None:
         traversable_graph_flags = optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS
@@ -539,7 +680,7 @@ def create_pipeline_and_sbt(
         )
 
     kwargs = {
-        "usesMotionBlur": False,
+        "usesMotionBlur": bool(uses_motion_blur),
         "traversableGraphFlags": int(traversable_graph_flags),
         "numPayloadValues": num_payload_values,
         "numAttributeValues": num_attribute_values,
@@ -549,12 +690,13 @@ def create_pipeline_and_sbt(
     if _optix_version_at_least(optix, 7, 2):
         if primitive_type_flags is None:
             primitive_type_flags = 0
-            for _, _, intersection_name in resolved_hit_groups:
-                primitive_type_flags |= int(
-                    optix.PRIMITIVE_TYPE_FLAGS_CUSTOM
-                    if intersection_name is not None
-                    else optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
-                )
+            for group in resolved_hit_groups:
+                if group.builtin_intersection_type is not None:
+                    primitive_type_flags |= _primitive_type_flag(optix, group.builtin_intersection_type)
+                elif group.intersection is not None:
+                    primitive_type_flags |= int(optix.PRIMITIVE_TYPE_FLAGS_CUSTOM)
+                else:
+                    primitive_type_flags |= int(optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE)
             if not resolved_hit_groups:
                 primitive_type_flags = optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
         kwargs["usesPrimitiveTypeFlags"] = int(primitive_type_flags)
@@ -572,10 +714,25 @@ def create_pipeline_and_sbt(
     sbt_manager.set_raygen_kernel(raygen_name)
     sbt_manager.add_miss_kernels([miss_name])
     hit_group_handles = []
-    for closest_hit_name, any_hit_name, intersection_name in resolved_hit_groups:
+    builtin_modules = []
+    for group in resolved_hit_groups:
+        intersection_module = None
+        if group.builtin_intersection_type is not None:
+            builtin_options = optix.BuiltinISOptions(
+                builtinISModuleType=group.builtin_intersection_type,
+                usesMotionBlur=bool(uses_motion_blur),
+            )
+            intersection_module = ctx.builtinISModuleGet(module_options, pipeline_options, builtin_options)
+            builtin_modules.append(intersection_module)
         hit_group_handles.append(
             sbt_manager.register_hit_shader_type(
-                HitKernel(closest_hit_name, any_hit_name, intersection_name)
+                HitKernel(
+                    group.closest_hit,
+                    group.any_hit,
+                    group.intersection,
+                    builtin_intersection_type=group.builtin_intersection_type,
+                    intersection_module=intersection_module,
+                )
             )
         )
 
@@ -593,5 +750,6 @@ def create_pipeline_and_sbt(
         "sbt": sbt_resources.keepalive,
         "sbt_manager": sbt_manager,
         "hit_group_handles": hit_group_handles,
+        "builtin_modules": builtin_modules,
     }
     return pipeline, sbt_resources.sbt, keepalive

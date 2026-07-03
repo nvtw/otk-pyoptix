@@ -95,6 +95,58 @@ def query_closest_hit(params: QueryParams):
     params.output[11] = error
 
 
+@woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
+def motion_raygen(params: QueryParams):
+    payload = QueryPayload()
+    payload.value = wp.uint32(0)
+    wp.optix_trace(
+        params.traversable,
+        wp.vec3(0.0, 0.0, 3.0),
+        wp.vec3(0.0, 0.0, -1.0),
+        0.001,
+        100.0,
+        0.25,
+        wp.uint32(255),
+        wp.uint32(0),
+        wp.uint32(0),
+        wp.uint32(1),
+        wp.uint32(0),
+        payload,
+    )
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def motion_closest_hit(params: QueryParams):
+    params.output[0] = wp.float_to_uint32(wp.optix_get_ray_time())
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
+def curve_raygen(params: QueryParams):
+    payload = QueryPayload()
+    payload.value = wp.uint32(0)
+    wp.optix_trace(
+        params.traversable,
+        wp.vec3(0.0, 0.0, 3.0),
+        wp.vec3(0.0, 0.0, -1.0),
+        0.001,
+        100.0,
+        0.0,
+        wp.uint32(255),
+        wp.uint32(0),
+        wp.uint32(0),
+        wp.uint32(1),
+        wp.uint32(0),
+        payload,
+    )
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def curve_closest_hit(params: QueryParams):
+    params.output[0] = wp.uint32(1)
+    params.output[1] = wp.optix_get_primitive_type()
+    params.output[2] = wp.float_to_uint32(wp.optix_get_curve_parameter())
+
+
 def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
     try:
         optix = woptix.require_optix()
@@ -189,5 +241,100 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
             ias_buffers,
             dynamic_buffers,
             dynamic_ias_buffers,
+            params_buffer,
+        )
+
+
+def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
+    try:
+        optix = woptix.require_optix()
+        wp.init()
+    except Exception as error:
+        pytest.skip(f"OptiX/Warp unavailable: {error}")
+    if not wp.is_cuda_available():
+        pytest.skip("CUDA device unavailable")
+
+    device_name = "cuda:0"
+    monkeypatch.setattr(wp.config, "kernel_cache_dir", str(tmp_path / "warp_cache"))
+    with wp.ScopedDevice(device_name):
+        device = wp.get_device(device_name)
+        cuda_context = device.context.value if hasattr(device.context, "value") else int(device.context)
+        context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+        ptx = woptix.compile_warp_module_to_ptx(
+            wp.get_module(__name__), "", "test_motion_curves", __file__, device=device_name
+        )
+
+        vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        vertex_keys = np.stack((vertices, vertices + np.array([0.0, 0.0, -0.5], dtype=np.float32)))
+        indices = np.array([[0, 1, 2]], dtype=np.uint32)
+        motion_gas, motion_buffers = woptix.create_triangle_gas(
+            optix, context, vertex_keys, indices, device_name, motion_time_range=(0.0, 1.0)
+        )
+        motion_pipeline, motion_sbt, motion_pipeline_buffers = woptix.create_pipeline_and_sbt(
+            optix,
+            context,
+            ptx,
+            motion_raygen,
+            query_miss,
+            motion_closest_hit,
+            num_payload_values=1,
+            num_attribute_values=2,
+            device=device_name,
+            uses_motion_blur=True,
+        )
+
+        output = wp.zeros(12, dtype=wp.uint32, device=device_name)
+        params = QueryParams()
+        params.output = output
+        params.traversable = wp.uint64(motion_gas)
+        params_buffer = woptix.create_launch_params_buffer(QueryParams, device_name)
+        woptix.write_launch_params(params_buffer, params)
+        woptix.launch(optix, motion_pipeline, motion_sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        assert output.numpy()[0] == np.float32(0.25).view(np.uint32)
+
+        curve_vertices = np.array([[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        curve_widths = np.array([0.25, 0.25], dtype=np.float32)
+        curve_gas, curve_buffers = woptix.create_curve_gas(
+            optix,
+            context,
+            curve_vertices,
+            curve_widths,
+            np.array([0], dtype=np.uint32),
+            device_name,
+        )
+        curve_pipeline, curve_sbt, curve_pipeline_buffers = woptix.create_pipeline_and_sbt(
+            optix,
+            context,
+            ptx,
+            curve_raygen,
+            query_miss,
+            None,
+            num_payload_values=1,
+            num_attribute_values=1,
+            device=device_name,
+            hit_groups=[
+                woptix.HitKernel(
+                    closest_hit=curve_closest_hit,
+                    builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+                )
+            ],
+        )
+        output.zero_()
+        params.traversable = wp.uint64(curve_gas)
+        woptix.write_launch_params(params_buffer, params)
+        woptix.launch(optix, curve_pipeline, curve_sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        result = output.numpy()
+        assert result[0] == 1
+        assert result[1] == int(optix.PRIMITIVE_TYPE_ROUND_LINEAR)
+        curve_u = np.array(result[2], dtype=np.uint32).view(np.float32).item()
+        assert 0.0 <= curve_u <= 1.0
+
+        _keepalive = (
+            motion_buffers,
+            motion_pipeline_buffers,
+            curve_buffers,
+            curve_pipeline_buffers,
             params_buffer,
         )

@@ -170,6 +170,14 @@ def register_addon_builtins() -> None:
     )
 
     add_builtin(
+        "optix_get_curve_parameter",
+        input_types={},
+        value_type=float,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
         "optix_get_primitive_index",
         input_types={},
         value_type=uint32,

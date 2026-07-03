@@ -29,6 +29,7 @@ class HitKernel:
     closest_hit: wp.Kernel | str | None = None
     any_hit: wp.Kernel | str | None = None
     intersection: wp.Kernel | str | None = None
+    builtin_intersection_type: int | None = None
 
 class HitKernelManager:
     @property
@@ -81,7 +82,15 @@ def compile_warp_module_to_ptx(
     device: str = "cuda",
 ) -> bytes: ...
 def create_triangle_gas(
-    optix, ctx, vertices, indices, device: str, *, build_flags=None, compact: bool = False
+    optix,
+    ctx,
+    vertices,
+    indices,
+    device: str,
+    *,
+    build_flags=None,
+    compact: bool = False,
+    motion_time_range=None,
 ) -> tuple[int, AccelResources]: ...
 def create_custom_primitive_gas(
     optix,
@@ -95,6 +104,20 @@ def create_custom_primitive_gas(
     num_sbt_records: int = 1,
     primitive_index_offset: int = 0,
     compact: bool = False,
+) -> tuple[int, AccelResources]: ...
+def create_curve_gas(
+    optix,
+    ctx,
+    vertices,
+    widths,
+    segment_indices,
+    device: str,
+    *,
+    curve_type=None,
+    geometry_flag=None,
+    build_flags=None,
+    compact: bool = False,
+    motion_time_range=None,
 ) -> tuple[int, AccelResources]: ...
 def create_instance_acceleration_structure(
     optix, ctx, instances, device: str, *, build_flags=None, compact: bool = False
@@ -116,6 +139,7 @@ def create_pipeline_and_sbt(
     hit_groups: list[HitKernel] | None = None,
     traversable_graph_flags: int | None = None,
     max_traversable_depth: int | None = None,
+    uses_motion_blur: bool = False,
 ): ...
 def get_entry_name(kernel_or_entry, expected_kernel_type: OptixKernelType | None = None) -> str: ...
 def create_launch_params_buffer(params_struct_type: type, device: str = "cuda") -> LaunchParamsBuffer: ...
