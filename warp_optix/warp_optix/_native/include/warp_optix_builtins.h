@@ -197,6 +197,27 @@ inline CUDA_CALLABLE_DEVICE vec2 optix_get_triangle_barycentrics()
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE mat33 optix_get_triangle_vertex_data()
+{
+#if defined(WP_ENABLE_OPTIX)
+    float3 vertices[3];
+    optixGetTriangleVertexData(vertices);
+    return mat33(
+        vertices[0].x,
+        vertices[0].y,
+        vertices[0].z,
+        vertices[1].x,
+        vertices[1].y,
+        vertices[1].z,
+        vertices[2].x,
+        vertices[2].y,
+        vertices[2].z
+    );
+#else
+    return mat33(0.0f);
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE uint32 optix_get_primitive_index()
 {
 #if defined(WP_ENABLE_OPTIX)

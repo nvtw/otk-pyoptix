@@ -97,3 +97,8 @@ handles; front/back-face tests; and point/vector/normal transforms in both
 directions. The names follow Warp's existing snake-case convention, for
 example `wp.optix_get_instance_index()` and
 `wp.optix_transform_point_from_world_to_object_space()`.
+
+Triangle any-hit and closest-hit kernels can call
+`wp.optix_get_triangle_vertex_data()`. It returns a `wp.mat33` whose rows are
+the three object-space vertices of the current triangle; this current-hit form
+does not require random vertex access or extra launch-parameter arrays.

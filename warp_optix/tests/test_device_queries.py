@@ -84,6 +84,14 @@ def query_closest_hit(params: QueryParams):
     world_normal = wp.optix_transform_normal_from_object_to_world_space(normal)
     if wp.length(wp.optix_transform_normal_from_world_to_object_space(world_normal) - normal) > 1.0e-5:
         error |= wp.uint32(8)
+
+    vertices = wp.optix_get_triangle_vertex_data()
+    if wp.length(wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2]) - wp.vec3(-1.0, -1.0, 0.0)) > 1.0e-5:
+        error |= wp.uint32(16)
+    if wp.length(wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2]) - wp.vec3(1.0, -1.0, 0.0)) > 1.0e-5:
+        error |= wp.uint32(32)
+    if wp.length(wp.vec3(vertices[2, 0], vertices[2, 1], vertices[2, 2]) - wp.vec3(0.0, 1.0, 0.0)) > 1.0e-5:
+        error |= wp.uint32(64)
     params.output[11] = error
 
 

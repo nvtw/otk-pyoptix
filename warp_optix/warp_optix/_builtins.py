@@ -22,6 +22,7 @@ uint64 = wp.uint64
 vec2 = wp.vec2
 vec3 = wp.vec3
 vec3ui = wp.vec3ui
+mat33 = wp.mat33
 
 
 def register_addon_builtins() -> None:
@@ -156,6 +157,15 @@ def register_addon_builtins() -> None:
         input_types={},
         value_type=vec2,
         group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
+        "optix_get_triangle_vertex_data",
+        input_types={},
+        value_type=mat33,
+        group="Utility",
+        doc="Return the current triangle's three object-space vertices as rows of a mat33.",
         is_differentiable=False,
     )
 

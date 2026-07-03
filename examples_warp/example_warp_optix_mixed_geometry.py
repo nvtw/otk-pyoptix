@@ -100,7 +100,12 @@ def miss(params: LaunchParams):
 def triangle_closest_hit(params: LaunchParams):
     barycentrics = wp.optix_get_triangle_barycentrics()
     albedo = wp.vec3(0.85, 0.25 + 0.4 * barycentrics[0], 0.12 + 0.3 * barycentrics[1])
-    normal = wp.optix_transform_normal_from_object_to_world_space(wp.vec3(0.0, 0.0, 1.0))
+    vertices = wp.optix_get_triangle_vertex_data()
+    v0 = wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2])
+    v1 = wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2])
+    v2 = wp.vec3(vertices[2, 0], vertices[2, 1], vertices[2, 2])
+    object_normal = wp.normalize(wp.cross(v1 - v0, v2 - v0))
+    normal = wp.optix_transform_normal_from_object_to_world_space(object_normal)
     _store_color(_shade(normal, albedo))
 
 

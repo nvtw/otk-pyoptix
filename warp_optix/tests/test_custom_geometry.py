@@ -62,6 +62,7 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     fake_warp.vec2 = type("vec2", (), {})
     fake_warp.vec3 = type("vec3", (), {})
     fake_warp.vec3ui = type("vec3ui", (), {})
+    fake_warp.mat33 = type("mat33", (), {})
 
     module_name = "warp_optix_builtins_under_test"
     builtins_path = Path(__file__).parents[1] / "warp_optix" / "_builtins.py"
@@ -86,6 +87,7 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     assert "optix_get_object_ray_direction" in registered_names
     assert "optix_get_ray_tmin" in registered_names
     assert "optix_get_hit_kind" in registered_names
+    assert "optix_get_triangle_vertex_data" in registered_names
     assert all(f"optix_get_attribute_{i}" in registered_names for i in range(8))
     assert {
         "optix_get_ray_time",
