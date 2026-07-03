@@ -53,10 +53,10 @@ def _background(direction: wp.vec3) -> wp.vec3:
     fill = wp.exp(-2.8 * ((x + 0.95) * (x + 0.95) + (y - 0.6) * (y - 0.6)))
     floor = wp.exp(-3.2 * (0.55 * x * x + (y + 0.9) * (y + 0.9)))
     return (
-        wp.vec3(0.80, 0.825, 0.87)
-        + key * wp.vec3(0.18, 0.165, 0.115)
-        + fill * wp.vec3(0.025, 0.035, 0.06)
-        + floor * wp.vec3(0.04, 0.03, 0.012)
+        wp.vec3(0.72, 0.75, 0.80)
+        + key * wp.vec3(0.27, 0.245, 0.18)
+        + fill * wp.vec3(0.025, 0.045, 0.08)
+        + floor * wp.vec3(0.05, 0.035, 0.015)
     )
 
 
