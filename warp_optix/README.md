@@ -80,10 +80,10 @@ pipeline, and SBT are in use; they own the corresponding device allocations.
 
 For mixed geometry, build one GAS per geometry type, place them under an IAS
 with `create_instance_acceleration_structure()`, and pass one `HitKernel` per
-SBT record through `hit_groups`. The pipeline helper infers combined triangle
-and custom primitive flags and stores all hit records contiguously. See
-`examples_warp/example_warp_optix_mixed_geometry.py` for a triangle and a
-procedural sphere sharing one pipeline.
+SBT record through `hit_groups`. The pipeline helper infers combined primitive
+flags and stores all hit records contiguously. See
+`examples_warp/example_warp_optix_mixed_geometry.py` for triangle, native curve,
+and analytical custom geometry sharing one pipeline.
 
 `SbtKernelManager` is the single low-level SBT builder used by the convenience
 pipeline helper. It keeps records header-only, accepts decorated Warp kernels

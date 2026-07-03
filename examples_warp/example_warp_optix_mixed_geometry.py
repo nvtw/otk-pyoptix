@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Render triangle geometry alongside six analytical custom primitives."""
+"""Render triangle, native curve, and analytical custom geometry together."""
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ import warp_optix as woptix
 @wp.struct
 class LaunchParams:
     image: wp.array(dtype=wp.uint32)
+    curve_vertices: wp.array2d(dtype=wp.float32)
+    curve_indices: wp.array(dtype=wp.uint32)
     width: wp.uint32
     height: wp.uint32
     traversable: wp.uint64
@@ -308,6 +310,28 @@ def analytical_closest_hit(params: LaunchParams):
     _store_color(_shade(world_normal, albedo))
 
 
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def curve_closest_hit(params: LaunchParams):
+    primitive = int(wp.optix_get_primitive_index())
+    vertex = int(params.curve_indices[primitive])
+    u = wp.optix_get_curve_parameter()
+    p0 = wp.vec3(
+        params.curve_vertices[vertex, 0],
+        params.curve_vertices[vertex, 1],
+        params.curve_vertices[vertex, 2],
+    )
+    p1 = wp.vec3(
+        params.curve_vertices[vertex + 1, 0],
+        params.curve_vertices[vertex + 1, 1],
+        params.curve_vertices[vertex + 1, 2],
+    )
+    center = p0 * (1.0 - u) + p1 * u
+    world_center = wp.optix_transform_point_from_object_to_world_space(center)
+    hit = wp.optix_get_world_ray_origin() + wp.optix_get_ray_tmax() * wp.optix_get_world_ray_direction()
+    world_normal = wp.normalize(hit - world_center)
+    _store_color(_shade(world_normal, wp.vec3(0.95, 0.72, 0.12)))
+
+
 def _save_bmp(path: Path, pixels: np.ndarray, width: int, height: int) -> None:
     import struct  # noqa: PLC0415
 
@@ -358,6 +382,22 @@ def main() -> None:
         shape_gas, shape_buffers = woptix.create_custom_primitive_gas(
             optix, context, shape_aabb, args.device
         )
+        curve_x = np.linspace(-1.85, 1.85, 17, dtype=np.float32)
+        curve_vertices = np.stack(
+            (curve_x, 0.18 * np.sin(2.7 * curve_x), np.full_like(curve_x, -0.35)), axis=1
+        )
+        curve_widths = np.full(curve_x.shape, 0.045, dtype=np.float32)
+        curve_indices = np.arange(curve_x.size - 1, dtype=np.uint32)
+        curve_type = optix.PRIMITIVE_TYPE_ROUND_LINEAR
+        curve_gas, curve_buffers = woptix.create_curve_gas(
+            optix,
+            context,
+            curve_vertices,
+            curve_widths,
+            curve_indices,
+            args.device,
+            curve_type=curve_type,
+        )
 
         pipeline, sbt, pipeline_buffers = woptix.create_pipeline_and_sbt(
             optix,
@@ -375,11 +415,15 @@ def main() -> None:
                     closest_hit=analytical_closest_hit,
                     intersection=analytical_intersection,
                 ),
+                woptix.HitKernel(
+                    closest_hit=curve_closest_hit,
+                    builtin_intersection_type=curve_type,
+                ),
             ],
             traversable_graph_flags=optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
         )
         sbt_manager = pipeline_buffers["sbt_manager"]
-        triangle_hit_group, shape_hit_group = pipeline_buffers["hit_group_handles"]
+        triangle_hit_group, shape_hit_group, curve_hit_group = pipeline_buffers["hit_group_handles"]
 
         identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         instances = [
@@ -412,6 +456,16 @@ def main() -> None:
                     shape_gas,
                 )
             )
+        instances.append(
+            optix.Instance(
+                identity,
+                7,
+                sbt_manager.get_sbt_offset(curve_hit_group),
+                255,
+                optix.INSTANCE_FLAG_NONE,
+                curve_gas,
+            )
+        )
         ias, ias_buffers = woptix.create_instance_acceleration_structure(
             optix, context, instances, args.device
         )
@@ -419,6 +473,8 @@ def main() -> None:
         image = wp.empty(args.width * args.height, dtype=wp.uint32, device=args.device)
         params = LaunchParams()
         params.image = image
+        params.curve_vertices = curve_buffers["d_vertex_buffers"][0]
+        params.curve_indices = curve_buffers["d_indices"]
         params.width = wp.uint32(args.width)
         params.height = wp.uint32(args.height)
         params.traversable = wp.uint64(ias)
@@ -429,9 +485,9 @@ def main() -> None:
 
         pixels = image.numpy()
         _save_bmp(args.output, pixels, args.width, args.height)
-        _keepalive = (triangle_buffers, shape_buffers, ias_buffers, pipeline_buffers)
+        _keepalive = (triangle_buffers, shape_buffers, curve_buffers, ias_buffers, pipeline_buffers)
         print(f"Wrote {args.output} (checksum {int(np.bitwise_xor.reduce(pixels)):#010x})")
-        print("Top: sphere, cylinder, cone. Bottom: cube, capsule, ellipsoid.")
+        print("Top: sphere, cylinder, cone. Bottom: cube, capsule, ellipsoid. Gold: round curve.")
         print(f"OptiX log messages: {logger.num_messages}")
 
 

@@ -147,6 +147,10 @@ def curve_closest_hit(params: QueryParams):
     params.output[0] = wp.uint32(1)
     params.output[1] = wp.optix_get_primitive_type()
     params.output[2] = wp.float_to_uint32(wp.optix_get_curve_parameter())
+    world_hit = wp.optix_get_world_ray_origin() + wp.optix_get_ray_tmax() * wp.optix_get_world_ray_direction()
+    params.output[3] = wp.float_to_uint32(world_hit[2])
+    object_origin = wp.optix_transform_point_from_object_to_world_space(wp.vec3(0.0))
+    params.output[4] = wp.float_to_uint32(object_origin[2])
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
@@ -427,6 +431,10 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
         assert result[1] == int(optix.PRIMITIVE_TYPE_ROUND_LINEAR)
         curve_u = np.array(result[2], dtype=np.uint32).view(np.float32).item()
         assert 0.0 <= curve_u <= 1.0
+        hit_z = np.array(result[3], dtype=np.uint32).view(np.float32).item()
+        object_origin_z = np.array(result[4], dtype=np.uint32).view(np.float32).item()
+        assert hit_z == pytest.approx(0.25)
+        assert object_origin_z == 0.0
 
         _keepalive = (
             motion_buffers,
