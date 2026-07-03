@@ -192,16 +192,6 @@ def main() -> None:
             optix, context, sphere_aabb, args.device
         )
 
-        identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-        sphere_transform = [1.0, 0.0, 0.0, 0.75, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-        instances = [
-            optix.Instance(identity, 0, 0, 255, optix.INSTANCE_FLAG_NONE, triangle_gas),
-            optix.Instance(sphere_transform, 1, 1, 255, optix.INSTANCE_FLAG_NONE, sphere_gas),
-        ]
-        ias, ias_buffers = woptix.create_instance_acceleration_structure(
-            optix, context, instances, args.device
-        )
-
         pipeline, sbt, pipeline_buffers = woptix.create_pipeline_and_sbt(
             optix,
             context,
@@ -217,6 +207,32 @@ def main() -> None:
                 woptix.HitKernel(closest_hit=sphere_closest_hit, intersection=sphere_intersection),
             ],
             traversable_graph_flags=optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
+        )
+        sbt_manager = pipeline_buffers["sbt_manager"]
+        triangle_hit_group, sphere_hit_group = pipeline_buffers["hit_group_handles"]
+
+        identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        sphere_transform = [1.0, 0.0, 0.0, 0.75, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        instances = [
+            optix.Instance(
+                identity,
+                0,
+                sbt_manager.get_sbt_offset(triangle_hit_group),
+                255,
+                optix.INSTANCE_FLAG_NONE,
+                triangle_gas,
+            ),
+            optix.Instance(
+                sphere_transform,
+                1,
+                sbt_manager.get_sbt_offset(sphere_hit_group),
+                255,
+                optix.INSTANCE_FLAG_NONE,
+                sphere_gas,
+            ),
+        ]
+        ias, ias_buffers = woptix.create_instance_acceleration_structure(
+            optix, context, instances, args.device
         )
 
         image = wp.empty(args.width * args.height, dtype=wp.uint32, device=args.device)

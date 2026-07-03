@@ -5,12 +5,19 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+import warp as wp  # noqa: E402
+from warp_optix._runtime import runtime  # noqa: E402
+from warp_optix._runtime import sbt as sbt_module  # noqa: E402
+from warp_optix._runtime.hit_kernels import HitKernel  # noqa: E402
+from warp_optix._runtime.sbt import SbtKernelManager  # noqa: E402
 
 
 class _DeviceArray:
@@ -24,7 +31,7 @@ class _DeviceArray:
 
 
 class _FakeWarp:
-    Kernel = type("Kernel", (), {})
+    Kernel = wp.Kernel
     float32 = np.float32
     uint32 = np.uint32
     uint8 = np.uint8
@@ -42,65 +49,6 @@ class _FakeWarp:
     @staticmethod
     def synchronize_device(device):
         del device
-
-
-def _load_runtime_module():
-    """Load runtime.py with a tiny Warp shim for host-only unit tests."""
-    fake_warp = ModuleType("warp")
-    for name in ("Kernel", "float32", "uint32", "uint8", "array", "empty", "synchronize_device"):
-        setattr(fake_warp, name, getattr(_FakeWarp, name))
-
-    fake_package = ModuleType("warp_optix")
-    fake_package.__path__ = []
-    fake_addon = ModuleType("warp_optix._addon")
-    fake_addon.get_module_build_options = lambda warp, options: options
-    fake_codegen = ModuleType("warp_optix._codegen")
-
-    class _KernelType(Enum):
-        RAYGEN = "__raygen__"
-        MISS = "__miss__"
-        CLOSEST_HIT = "__closesthit__"
-        ANY_HIT = "__anyhit__"
-        INTERSECTION = "__intersection__"
-
-    fake_codegen.OptixKernelType = _KernelType
-    fake_hit_kernels = ModuleType("warp_optix._runtime.hit_kernels")
-
-    class _HitKernel:
-        def __init__(self, closest_hit=None, any_hit=None, intersection=None):
-            self.closest_hit = closest_hit
-            self.any_hit = any_hit
-            self.intersection = intersection
-
-    fake_hit_kernels.HitKernel = _HitKernel
-
-    module_name = "warp_optix_runtime_under_test"
-    runtime_path = Path(__file__).parents[1] / "warp_optix" / "_runtime" / "runtime.py"
-    spec = importlib.util.spec_from_file_location(module_name, runtime_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-
-    module_names = ("warp", "warp_optix", "warp_optix._addon", module_name)
-    saved = {name: sys.modules.get(name) for name in module_names}
-    sys.modules["warp"] = fake_warp
-    sys.modules["warp_optix"] = fake_package
-    sys.modules["warp_optix._addon"] = fake_addon
-    sys.modules[module_name] = module
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        for name, previous in saved.items():
-            if previous is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = previous
-
-    module._test_codegen_module = fake_codegen
-    module._test_hit_kernels_module = fake_hit_kernels
-    return module
-
-
-runtime = _load_runtime_module()
 
 
 def test_custom_primitive_builtins_register_all_attribute_arities():
@@ -261,8 +209,7 @@ def test_create_custom_primitive_gas_validates_aabbs(monkeypatch, aabbs, message
 
 def test_custom_pipeline_infers_primitive_flag_and_wires_intersection(monkeypatch):
     monkeypatch.setattr(runtime, "wp", _FakeWarp)
-    monkeypatch.setitem(sys.modules, "warp_optix._codegen", runtime._test_codegen_module)
-    monkeypatch.setitem(sys.modules, "warp_optix._runtime.hit_kernels", runtime._test_hit_kernels_module)
+    monkeypatch.setattr(sbt_module, "wp", _FakeWarp)
     optix = _Optix()
     ctx = _Context()
 
@@ -289,8 +236,7 @@ def test_custom_pipeline_infers_primitive_flag_and_wires_intersection(monkeypatc
 
 def test_triangle_pipeline_default_is_preserved(monkeypatch):
     monkeypatch.setattr(runtime, "wp", _FakeWarp)
-    monkeypatch.setitem(sys.modules, "warp_optix._codegen", runtime._test_codegen_module)
-    monkeypatch.setitem(sys.modules, "warp_optix._runtime.hit_kernels", runtime._test_hit_kernels_module)
+    monkeypatch.setattr(sbt_module, "wp", _FakeWarp)
     optix = _Optix()
     ctx = _Context()
 
@@ -312,9 +258,7 @@ def test_triangle_pipeline_default_is_preserved(monkeypatch):
 
 def test_mixed_pipeline_uses_contiguous_hit_records(monkeypatch):
     monkeypatch.setattr(runtime, "wp", _FakeWarp)
-    monkeypatch.setitem(sys.modules, "warp_optix._codegen", runtime._test_codegen_module)
-    monkeypatch.setitem(sys.modules, "warp_optix._runtime.hit_kernels", runtime._test_hit_kernels_module)
-    hit_kernel = runtime._test_hit_kernels_module.HitKernel
+    monkeypatch.setattr(sbt_module, "wp", _FakeWarp)
     optix = _Optix()
     ctx = _Context()
 
@@ -329,8 +273,8 @@ def test_mixed_pipeline_uses_contiguous_hit_records(monkeypatch):
         3,
         "cuda",
         hit_groups=[
-            hit_kernel(closest_hit="__closesthit__triangle"),
-            hit_kernel(closest_hit="__closesthit__sphere", intersection="__intersection__sphere"),
+            HitKernel(closest_hit="__closesthit__triangle"),
+            HitKernel(closest_hit="__closesthit__sphere", intersection="__intersection__sphere"),
         ],
         traversable_graph_flags=optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
     )
@@ -338,7 +282,9 @@ def test_mixed_pipeline_uses_contiguous_hit_records(monkeypatch):
     expected_flags = optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE | optix.PRIMITIVE_TYPE_FLAGS_CUSTOM
     assert ctx.pipeline_options.usesPrimitiveTypeFlags == expected_flags
     assert sbt.hitgroupRecordCount == 2
-    assert resources["records"][2].shape == (2 * optix.SBT_RECORD_HEADER_SIZE,)
+    assert resources["sbt"]["d_hg"].shape == (2 * optix.SBT_RECORD_HEADER_SIZE,)
+    manager = resources["sbt_manager"]
+    assert [manager.get_sbt_offset(handle) for handle in resources["hit_group_handles"]] == [0, 1]
     assert ctx.pipeline.stack_size[-1] == 2
 
 
@@ -353,3 +299,26 @@ def test_create_instance_acceleration_structure(monkeypatch):
     assert handle == 42
     assert keepalive["d_instances"].shape == (160,)
     assert ctx.build_input.numInstances == 2
+
+
+def test_sbt_manager_standardizes_multiple_geometry_and_ray_types(monkeypatch):
+    monkeypatch.setattr(sbt_module, "wp", _FakeWarp)
+    manager = SbtKernelManager(_Optix(), _Context(), object(), num_ray_subtypes=2)
+    manager.set_raygen_kernel("__raygen__rg")
+    manager.add_miss_kernels(["__miss__primary", "__miss__shadow"])
+
+    triangle = manager.register_hit_shader_type(
+        HitKernel(closest_hit="__closesthit__triangle"),
+        HitKernel(any_hit="__anyhit__triangle_shadow"),
+    )
+    custom = manager.register_hit_shader_type(
+        HitKernel(closest_hit="__closesthit__custom", intersection="__intersection__custom"),
+        HitKernel(any_hit="__anyhit__custom_shadow", intersection="__intersection__custom"),
+    )
+    resources = manager.build_sbt("cuda")
+
+    assert manager.get_sbt_offset(triangle) == 0
+    assert manager.get_sbt_offset(custom) == 2
+    assert resources.sbt.missRecordCount == 2
+    assert resources.sbt.hitgroupRecordCount == 4
+    assert resources.keepalive["d_hg"].shape == (4 * _Optix.SBT_RECORD_HEADER_SIZE,)

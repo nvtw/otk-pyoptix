@@ -71,7 +71,16 @@ class SbtKernelManager:
         self.miss_groups = []
         self.hit_kernels = HitKernelManager(optix, ctx, module, num_ray_subtypes)
 
-    def set_raygen_kernel(self, kernel_name: str) -> None:
+    @staticmethod
+    def _entry_name(kernel_or_name, kernel_type):
+        from warp_optix._runtime.runtime import get_optix_entry_name  # noqa: PLC0415
+
+        return get_optix_entry_name(kernel_or_name, expected_kernel_type=kernel_type)
+
+    def set_raygen_kernel(self, kernel_or_name) -> None:
+        from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
+
+        kernel_name = self._entry_name(kernel_or_name, OptixKernelType.RAYGEN)
         desc = self.optix.ProgramGroupDesc()
         desc.raygenModule = self.module
         desc.raygenEntryFunctionName = kernel_name
@@ -80,8 +89,11 @@ class SbtKernelManager:
         else:
             self.raygen_group = self.ctx.programGroupCreate([desc])[0][0]
 
-    def add_miss_kernels(self, kernel_names: list[str]) -> None:
-        for name in kernel_names:
+    def add_miss_kernels(self, kernels) -> None:
+        from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
+
+        for kernel in kernels:
+            name = self._entry_name(kernel, OptixKernelType.MISS)
             desc = self.optix.ProgramGroupDesc()
             desc.missModule = self.module
             desc.missEntryFunctionName = name
@@ -91,8 +103,37 @@ class SbtKernelManager:
                 pg = self.ctx.programGroupCreate([desc])[0][0]
             self.miss_groups.append(pg)
 
-    def register_hit_shader_type(self, *kernel_names: str | HitKernel):
-        return self.hit_kernels.register_hit_shader_type(*kernel_names)
+    def register_hit_shader_type(self, *kernels: str | HitKernel):
+        from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
+
+        resolved = []
+        for kernel in kernels:
+            if not isinstance(kernel, HitKernel):
+                kernel = HitKernel(closest_hit=kernel)
+            resolved.append(
+                HitKernel(
+                    closest_hit=(
+                        self._entry_name(kernel.closest_hit, OptixKernelType.CLOSEST_HIT)
+                        if kernel.closest_hit is not None
+                        else None
+                    ),
+                    any_hit=(
+                        self._entry_name(kernel.any_hit, OptixKernelType.ANY_HIT)
+                        if kernel.any_hit is not None
+                        else None
+                    ),
+                    intersection=(
+                        self._entry_name(kernel.intersection, OptixKernelType.INTERSECTION)
+                        if kernel.intersection is not None
+                        else None
+                    ),
+                )
+            )
+        return self.hit_kernels.register_hit_shader_type(*resolved)
+
+    def get_sbt_offset(self, handle) -> int:
+        """Resolve an opaque hit-group handle to its SBT record offset."""
+        return self.hit_kernels.get_sbt_offset(handle)
 
     def get_all_program_groups(self):
         groups = []

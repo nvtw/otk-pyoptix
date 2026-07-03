@@ -84,3 +84,9 @@ SBT record through `hit_groups`. The pipeline helper infers combined triangle
 and custom primitive flags and stores all hit records contiguously. See
 `examples_warp/example_warp_optix_mixed_geometry.py` for a triangle and a
 procedural sphere sharing one pipeline.
+
+`SbtKernelManager` is the single low-level SBT builder used by the convenience
+pipeline helper. It keeps records header-only, accepts decorated Warp kernels
+or explicit entry names, and returns opaque hit-group handles. Resolve a handle
+with `get_sbt_offset()` only when assigning an OptiX instance; users do not need
+to pack headers or calculate record strides.

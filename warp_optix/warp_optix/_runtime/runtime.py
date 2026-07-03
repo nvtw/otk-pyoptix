@@ -58,21 +58,6 @@ def create_optix_context(optix, cuda_context, log_level: int = 4):
     return optix.deviceContextCreate(cuda_context, options), logger
 
 
-def _round_up(v: int, alignment: int) -> int:
-    return v if (v % alignment) == 0 else v + alignment - (v % alignment)
-
-
-def aligned_record_dtype(optix) -> np.dtype:
-    header_format = f"{optix.SBT_RECORD_HEADER_SIZE}B"
-    itemsize = _round_up(optix.SBT_RECORD_HEADER_SIZE, optix.SBT_RECORD_ALIGNMENT)
-    return np.dtype({"names": ["header"], "formats": [header_format], "itemsize": itemsize, "align": True})
-
-
-def to_device_bytes(host_records: np.ndarray, device: str) -> wp.array:
-    host_bytes = np.ascontiguousarray(host_records).view(np.uint8).reshape(-1)
-    return wp.array(host_bytes, dtype=wp.uint8, device=device)
-
-
 @dataclass
 class LaunchParamsBuffer:
     struct_type: type
@@ -394,6 +379,7 @@ def create_pipeline_and_sbt(
 ):
     from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
     from warp_optix._runtime.hit_kernels import HitKernel  # noqa: PLC0415
+    from warp_optix._runtime.sbt import SbtKernelManager  # noqa: PLC0415
 
     raygen_name = get_optix_entry_name(raygen_entry, expected_kernel_type=OptixKernelType.RAYGEN)
     miss_name = get_optix_entry_name(miss_entry, expected_kernel_type=OptixKernelType.MISS)
@@ -467,69 +453,30 @@ def create_pipeline_and_sbt(
     if log:
         print(f"Module create log:\n{log}")
 
-    rg_desc = optix.ProgramGroupDesc()
-    rg_desc.raygenModule = module
-    rg_desc.raygenEntryFunctionName = raygen_name
-
-    ms_desc = optix.ProgramGroupDesc()
-    ms_desc.missModule = module
-    ms_desc.missEntryFunctionName = miss_name
-
-    hit_descs = []
+    sbt_manager = SbtKernelManager(optix, ctx, module)
+    sbt_manager.set_raygen_kernel(raygen_name)
+    sbt_manager.add_miss_kernels([miss_name])
+    hit_group_handles = []
     for closest_hit_name, any_hit_name, intersection_name in resolved_hit_groups:
-        hg_desc = optix.ProgramGroupDesc()
-        if closest_hit_name is not None:
-            hg_desc.hitgroupModuleCH = module
-            hg_desc.hitgroupEntryFunctionNameCH = closest_hit_name
-        if any_hit_name is not None:
-            hg_desc.hitgroupModuleAH = module
-            hg_desc.hitgroupEntryFunctionNameAH = any_hit_name
-        if intersection_name is not None:
-            hg_desc.hitgroupModuleIS = module
-            hg_desc.hitgroupEntryFunctionNameIS = intersection_name
-        hit_descs.append(hg_desc)
+        hit_group_handles.append(
+            sbt_manager.register_hit_shader_type(
+                HitKernel(closest_hit_name, any_hit_name, intersection_name)
+            )
+        )
 
-    groups_desc = [rg_desc, ms_desc, *hit_descs]
-
-    groups = []
-    if _optix_version_at_least(optix, 7, 4):
-        pg_options = optix.ProgramGroupOptions()
-        for desc in groups_desc:
-            groups.append(ctx.programGroupCreate([desc], pg_options)[0][0])
-    else:
-        for desc in groups_desc:
-            groups.append(ctx.programGroupCreate([desc])[0][0])
+    groups = sbt_manager.get_all_program_groups()
 
     link_options = optix.PipelineLinkOptions()
     link_options.maxTraceDepth = 1
     pipeline = ctx.pipelineCreate(pipeline_options, link_options, groups, "")
     _set_pipeline_stack_size(optix, pipeline, groups, link_options.maxTraceDepth, int(max_traversable_depth))
 
-    record_dtype = aligned_record_dtype(optix)
-    h_raygen = np.zeros(1, dtype=record_dtype)
-    h_miss = np.zeros(1, dtype=record_dtype)
-    h_hit = np.zeros(len(groups) - 2, dtype=record_dtype)
-    optix.sbtRecordPackHeader(groups[0], h_raygen)
-    optix.sbtRecordPackHeader(groups[1], h_miss)
-    for index, group in enumerate(groups[2:]):
-        optix.sbtRecordPackHeader(group, h_hit[index : index + 1])
-
-    d_raygen = to_device_bytes(h_raygen, device=device)
-    d_miss = to_device_bytes(h_miss, device=device)
-    d_hit = to_device_bytes(h_hit, device=device) if len(h_hit) else None
-    sbt = optix.ShaderBindingTable()
-    sbt.raygenRecord = d_raygen.ptr
-    sbt.missRecordBase = d_miss.ptr
-    sbt.missRecordStrideInBytes = h_miss.dtype.itemsize
-    sbt.missRecordCount = 1
-    if d_hit is not None:
-        sbt.hitgroupRecordBase = d_hit.ptr
-        sbt.hitgroupRecordStrideInBytes = h_hit.dtype.itemsize
-        sbt.hitgroupRecordCount = len(h_hit)
-    else:
-        sbt.hitgroupRecordBase = 0
-        sbt.hitgroupRecordStrideInBytes = 0
-        sbt.hitgroupRecordCount = 0
-
-    keepalive = {"module": module, "program_groups": groups, "records": [d_raygen, d_miss, d_hit]}
-    return pipeline, sbt, keepalive
+    sbt_resources = sbt_manager.build_sbt(device=device)
+    keepalive = {
+        "module": module,
+        "program_groups": groups,
+        "sbt": sbt_resources.keepalive,
+        "sbt_manager": sbt_manager,
+        "hit_group_handles": hit_group_handles,
+    }
+    return pipeline, sbt_resources.sbt, keepalive
