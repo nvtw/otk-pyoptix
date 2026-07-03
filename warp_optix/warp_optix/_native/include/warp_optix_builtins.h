@@ -151,6 +151,33 @@ inline CUDA_CALLABLE_DEVICE float optix_get_ray_tmin()
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE float optix_get_ray_time()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixGetRayTime();
+#else
+    return 0.0f;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_ray_flags()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetRayFlags());
+#else
+    return 0u;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_ray_visibility_mask()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetRayVisibilityMask());
+#else
+    return 0u;
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE float optix_get_ray_tmax()
 {
 #if defined(WP_ENABLE_OPTIX)
@@ -185,6 +212,60 @@ inline CUDA_CALLABLE_DEVICE uint32 optix_get_instance_id()
     return static_cast<uint32>(optixGetInstanceId());
 #else
     return 0u;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_instance_index()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetInstanceIndex());
+#else
+    return 0u;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_sbt_gas_index()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetSbtGASIndex());
+#else
+    return 0u;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_primitive_type()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetPrimitiveType());
+#else
+    return 0u;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint64 optix_get_gas_traversable_handle()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint64>(optixGetGASTraversableHandle());
+#else
+    return 0ull;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE bool optix_is_front_face_hit()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixIsFrontFaceHit();
+#else
+    return false;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE bool optix_is_back_face_hit()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixIsBackFaceHit();
+#else
+    return false;
 #endif
 }
 
@@ -224,6 +305,16 @@ inline CUDA_CALLABLE_DEVICE vec3 optix_transform_normal_from_object_to_world_spa
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE vec3 optix_transform_point_from_object_to_world_space(const vec3& point)
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 p = optixTransformPointFromObjectToWorldSpace(make_float3(point[0], point[1], point[2]));
+    return vec3(p.x, p.y, p.z);
+#else
+    return point;
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE vec3 optix_transform_vector_from_object_to_world_space(const vec3& vector)
 {
 #if defined(WP_ENABLE_OPTIX)
@@ -231,6 +322,36 @@ inline CUDA_CALLABLE_DEVICE vec3 optix_transform_vector_from_object_to_world_spa
     return vec3(v.x, v.y, v.z);
 #else
     return vector;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE vec3 optix_transform_point_from_world_to_object_space(const vec3& point)
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 p = optixTransformPointFromWorldToObjectSpace(make_float3(point[0], point[1], point[2]));
+    return vec3(p.x, p.y, p.z);
+#else
+    return point;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE vec3 optix_transform_vector_from_world_to_object_space(const vec3& vector)
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 v = optixTransformVectorFromWorldToObjectSpace(make_float3(vector[0], vector[1], vector[2]));
+    return vec3(v.x, v.y, v.z);
+#else
+    return vector;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE vec3 optix_transform_normal_from_world_to_object_space(const vec3& normal)
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 n = optixTransformNormalFromWorldToObjectSpace(make_float3(normal[0], normal[1], normal[2]));
+    return vec3(n.x, n.y, n.z);
+#else
+    return normal;
 #endif
 }
 

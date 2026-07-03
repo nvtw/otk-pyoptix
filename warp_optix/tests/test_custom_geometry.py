@@ -87,6 +87,21 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     assert "optix_get_ray_tmin" in registered_names
     assert "optix_get_hit_kind" in registered_names
     assert all(f"optix_get_attribute_{i}" in registered_names for i in range(8))
+    assert {
+        "optix_get_ray_time",
+        "optix_get_ray_flags",
+        "optix_get_ray_visibility_mask",
+        "optix_get_instance_index",
+        "optix_get_sbt_gas_index",
+        "optix_get_primitive_type",
+        "optix_get_gas_traversable_handle",
+        "optix_is_front_face_hit",
+        "optix_is_back_face_hit",
+        "optix_transform_point_from_object_to_world_space",
+        "optix_transform_point_from_world_to_object_space",
+        "optix_transform_vector_from_world_to_object_space",
+        "optix_transform_normal_from_world_to_object_space",
+    } <= registered_names
 
 
 class _Struct:

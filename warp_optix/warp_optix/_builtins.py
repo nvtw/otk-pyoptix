@@ -127,6 +127,23 @@ def register_addon_builtins() -> None:
     )
 
     add_builtin(
+        "optix_get_ray_time",
+        input_types={},
+        value_type=float,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    for _name in ("optix_get_ray_flags", "optix_get_ray_visibility_mask"):
+        add_builtin(
+            _name,
+            input_types={},
+            value_type=uint32,
+            group="Utility",
+            is_differentiable=False,
+        )
+
+    add_builtin(
         "optix_get_ray_tmax",
         input_types={},
         value_type=float,
@@ -158,6 +175,32 @@ def register_addon_builtins() -> None:
         is_differentiable=False,
     )
 
+    for _name in ("optix_get_instance_index", "optix_get_sbt_gas_index", "optix_get_primitive_type"):
+        add_builtin(
+            _name,
+            input_types={},
+            value_type=uint32,
+            group="Utility",
+            is_differentiable=False,
+        )
+
+    add_builtin(
+        "optix_get_gas_traversable_handle",
+        input_types={},
+        value_type=uint64,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    for _name in ("optix_is_front_face_hit", "optix_is_back_face_hit"):
+        add_builtin(
+            _name,
+            input_types={},
+            value_type=bool,
+            group="Utility",
+            is_differentiable=False,
+        )
+
     add_builtin(
         "optix_get_hit_kind",
         input_types={},
@@ -184,12 +227,33 @@ def register_addon_builtins() -> None:
     )
 
     add_builtin(
+        "optix_transform_point_from_object_to_world_space",
+        input_types={"point": vec3},
+        value_type=vec3,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
         "optix_transform_vector_from_object_to_world_space",
         input_types={"vector": vec3},
         value_type=vec3,
         group="Utility",
         is_differentiable=False,
     )
+
+    for _name, _argument in (
+        ("optix_transform_point_from_world_to_object_space", "point"),
+        ("optix_transform_vector_from_world_to_object_space", "vector"),
+        ("optix_transform_normal_from_world_to_object_space", "normal"),
+    ):
+        add_builtin(
+            _name,
+            input_types={_argument: vec3},
+            value_type=vec3,
+            group="Utility",
+            is_differentiable=False,
+        )
 
     add_builtin(
         "optix_terminate_ray",

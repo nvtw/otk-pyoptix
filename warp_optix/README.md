@@ -90,3 +90,10 @@ pipeline helper. It keeps records header-only, accepts decorated Warp kernels
 or explicit entry names, and returns opaque hit-group handles. Resolve a handle
 with `get_sbt_offset()` only when assigning an OptiX instance; users do not need
 to pack headers or calculate record strides.
+
+Warp kernels also expose the common OptiX hit context directly: ray time,
+flags and visibility mask; instance ID/index; primitive, SBT GAS and GAS
+handles; front/back-face tests; and point/vector/normal transforms in both
+directions. The names follow Warp's existing snake-case convention, for
+example `wp.optix_get_instance_index()` and
+`wp.optix_transform_point_from_world_to_object_space()`.
