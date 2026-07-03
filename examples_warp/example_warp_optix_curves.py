@@ -44,6 +44,22 @@ def _store_color(color: wp.vec3):
     wp.optix_set_payload_2(_to_u8(color[2]))
 
 
+@wp.func
+def _background(direction: wp.vec3) -> wp.vec3:
+    scale = 2.5 / wp.max(-direction[2], 0.001)
+    x = direction[0] * scale
+    y = direction[1] * scale
+    key = wp.exp(-0.85 * (0.65 * x * x + (y - 0.15) * (y - 0.15)))
+    fill = wp.exp(-2.8 * ((x + 0.95) * (x + 0.95) + (y - 0.6) * (y - 0.6)))
+    floor = wp.exp(-3.2 * (0.55 * x * x + (y + 0.9) * (y + 0.9)))
+    return (
+        wp.vec3(0.80, 0.825, 0.87)
+        + key * wp.vec3(0.18, 0.165, 0.115)
+        + fill * wp.vec3(0.025, 0.035, 0.06)
+        + floor * wp.vec3(0.04, 0.03, 0.012)
+    )
+
+
 @woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
 def raygen(params: LaunchParams):
     index = wp.optix_get_launch_index()
@@ -83,8 +99,7 @@ def raygen(params: LaunchParams):
 @woptix.optix_kernel(woptix.OptixKernelType.MISS)
 def miss(params: LaunchParams):
     direction = wp.normalize(wp.optix_get_world_ray_direction())
-    sky = 0.5 * (direction[1] + 1.0)
-    _store_color(wp.vec3(0.94, 0.955, 0.98) * (1.0 - sky) + wp.vec3(0.995, 0.997, 1.0) * sky)
+    _store_color(_background(direction))
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)

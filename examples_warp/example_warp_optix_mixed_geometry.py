@@ -50,6 +50,22 @@ def _shade(normal: wp.vec3, albedo: wp.vec3) -> wp.vec3:
     return albedo * intensity
 
 
+@wp.func
+def _background(direction: wp.vec3) -> wp.vec3:
+    scale = 2.5 / wp.max(-direction[2], 0.001)
+    x = direction[0] * scale
+    y = direction[1] * scale
+    key = wp.exp(-0.85 * (0.65 * x * x + (y - 0.15) * (y - 0.15)))
+    fill = wp.exp(-2.8 * ((x + 0.95) * (x + 0.95) + (y - 0.6) * (y - 0.6)))
+    floor = wp.exp(-3.2 * (0.55 * x * x + (y + 0.9) * (y + 0.9)))
+    return (
+        wp.vec3(0.80, 0.825, 0.87)
+        + key * wp.vec3(0.18, 0.165, 0.115)
+        + fill * wp.vec3(0.025, 0.035, 0.06)
+        + floor * wp.vec3(0.04, 0.03, 0.012)
+    )
+
+
 @woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
 def raygen(params: LaunchParams):
     index = wp.optix_get_launch_index()
@@ -94,22 +110,21 @@ def raygen(params: LaunchParams):
 @woptix.optix_kernel(woptix.OptixKernelType.MISS)
 def miss(params: LaunchParams):
     direction = wp.normalize(wp.optix_get_world_ray_direction())
-    sky = 0.5 * (direction[1] + 1.0)
-    _store_color(wp.vec3(0.94, 0.955, 0.98) * (1.0 - sky) + wp.vec3(0.995, 0.997, 1.0) * sky)
+    _store_color(_background(direction))
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
 def triangle_closest_hit(params: LaunchParams):
     barycentrics = wp.optix_get_triangle_barycentrics()
-    albedo = wp.vec3(0.95 + 0.02 * barycentrics[0], 0.965 + 0.015 * barycentrics[1], 0.99)
     vertices = wp.optix_get_triangle_vertex_data()
     v0 = wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2])
     v1 = wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2])
     v2 = wp.vec3(vertices[2, 0], vertices[2, 1], vertices[2, 2])
     object_normal = wp.normalize(wp.cross(v1 - v0, v2 - v0))
     normal = wp.optix_transform_normal_from_object_to_world_space(object_normal)
-    intensity = 0.94 + 0.06 * wp.max(wp.dot(wp.normalize(normal), wp.normalize(wp.vec3(-0.4, 0.8, 0.6))), 0.0)
-    _store_color(albedo * intensity)
+    light = wp.normalize(wp.vec3(-0.4, 0.8, 0.6))
+    panel = 0.955 + 0.012 * barycentrics[0] + 0.018 * wp.max(wp.dot(wp.normalize(normal), light), 0.0)
+    _store_color(_background(wp.normalize(wp.optix_get_world_ray_direction())) * panel)
 
 
 @wp.func
