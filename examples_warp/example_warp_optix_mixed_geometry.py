@@ -95,20 +95,21 @@ def raygen(params: LaunchParams):
 def miss(params: LaunchParams):
     direction = wp.normalize(wp.optix_get_world_ray_direction())
     sky = 0.5 * (direction[1] + 1.0)
-    _store_color(wp.vec3(0.03, 0.04, 0.07) * (1.0 - sky) + wp.vec3(0.12, 0.18, 0.28) * sky)
+    _store_color(wp.vec3(0.94, 0.955, 0.98) * (1.0 - sky) + wp.vec3(0.995, 0.997, 1.0) * sky)
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
 def triangle_closest_hit(params: LaunchParams):
     barycentrics = wp.optix_get_triangle_barycentrics()
-    albedo = wp.vec3(0.16 + 0.08 * barycentrics[0], 0.18 + 0.08 * barycentrics[1], 0.22)
+    albedo = wp.vec3(0.95 + 0.02 * barycentrics[0], 0.965 + 0.015 * barycentrics[1], 0.99)
     vertices = wp.optix_get_triangle_vertex_data()
     v0 = wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2])
     v1 = wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2])
     v2 = wp.vec3(vertices[2, 0], vertices[2, 1], vertices[2, 2])
     object_normal = wp.normalize(wp.cross(v1 - v0, v2 - v0))
     normal = wp.optix_transform_normal_from_object_to_world_space(object_normal)
-    _store_color(_shade(normal, albedo))
+    intensity = 0.94 + 0.06 * wp.max(wp.dot(wp.normalize(normal), wp.normalize(wp.vec3(-0.4, 0.8, 0.6))), 0.0)
+    _store_color(albedo * intensity)
 
 
 @wp.func

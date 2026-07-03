@@ -232,7 +232,8 @@ def tiny_raygen(params: TinyLaunchParams):
 
     hit_color = wp.vec3(float(payload.r_u8) / 255.0, float(payload.g_u8) / 255.0, float(payload.b_u8) / 255.0)
     sky_t = 0.5 * (ray_direction[1] + 1.0)
-    sky_color = wp.vec3(0.02, 0.025, 0.03) * (1.0 - sky_t) + wp.vec3(0.08, 0.11, 0.16) * sky_t
+    # Linear-space values that display as a subtle cool near-white gradient after gamma correction.
+    sky_color = wp.vec3(0.873, 0.904, 0.957) * (1.0 - sky_t) + wp.vec3(0.989, 0.993, 1.0) * sky_t
     color = hit_color if payload.hit == wp.uint32(1) else sky_color
 
     prev = params.accum[pixel_idx]

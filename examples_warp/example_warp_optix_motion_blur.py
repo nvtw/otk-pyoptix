@@ -98,12 +98,12 @@ def raygen(params: LaunchParams):
 def miss(params: LaunchParams):
     direction = wp.normalize(wp.optix_get_world_ray_direction())
     sky = 0.5 * (direction[1] + 1.0)
-    _store_color(wp.vec3(0.025, 0.035, 0.06) * (1.0 - sky) + wp.vec3(0.10, 0.16, 0.25) * sky)
+    _store_color(wp.vec3(0.94, 0.955, 0.98) * (1.0 - sky) + wp.vec3(0.995, 0.997, 1.0) * sky)
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
 def closest_hit(params: LaunchParams):
-    color = wp.vec3(0.88, 0.90, 0.96)
+    color = wp.vec3(0.18, 0.22, 0.30)
     if wp.optix_get_primitive_index() == wp.uint32(0):
         ray_time = wp.optix_get_ray_time()
         color = wp.vec3(0.05, 0.80, 1.0) * (1.0 - ray_time) + wp.vec3(1.0, 0.35, 0.04) * ray_time

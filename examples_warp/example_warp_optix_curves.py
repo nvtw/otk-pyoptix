@@ -84,7 +84,7 @@ def raygen(params: LaunchParams):
 def miss(params: LaunchParams):
     direction = wp.normalize(wp.optix_get_world_ray_direction())
     sky = 0.5 * (direction[1] + 1.0)
-    _store_color(wp.vec3(0.025, 0.035, 0.06) * (1.0 - sky) + wp.vec3(0.10, 0.16, 0.25) * sky)
+    _store_color(wp.vec3(0.94, 0.955, 0.98) * (1.0 - sky) + wp.vec3(0.995, 0.997, 1.0) * sky)
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
