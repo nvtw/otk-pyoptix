@@ -1027,7 +1027,7 @@ struct ProgramGroupDesc
         {
             program_group_desc.kind = OPTIX_PROGRAM_GROUP_KIND_CALLABLES;
             program_group_desc.callables.moduleDC = callablesModuleDC.module ? callablesModuleDC.module : nullptr;
-            program_group_desc.callables.moduleCC = callablesModuleDC.module ? callablesModuleCC.module : nullptr;
+            program_group_desc.callables.moduleCC = callablesModuleCC.module ? callablesModuleCC.module : nullptr;
         }
         else if( hitgroupModuleCH.module || hitgroupModuleAH.module || hitgroupModuleIS.module )
         {

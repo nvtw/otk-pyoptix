@@ -60,6 +60,11 @@ class SbtResources:
     keepalive: dict
 
 
+@dataclass(frozen=True)
+class _CallableHandle:
+    value: int
+
+
 class SbtKernelManager:
     """Builds raygen/miss/hit program groups and a Shader Binding Table."""
 
@@ -68,7 +73,9 @@ class SbtKernelManager:
         self.ctx = ctx
         self.module = module
         self.raygen_group = None
+        self.exception_group = None
         self.miss_groups = []
+        self.callable_groups = []
         self.hit_kernels = HitKernelManager(optix, ctx, module, num_ray_subtypes)
 
     @staticmethod
@@ -102,6 +109,43 @@ class SbtKernelManager:
             else:
                 pg = self.ctx.programGroupCreate([desc])[0][0]
             self.miss_groups.append(pg)
+
+    def set_exception_kernel(self, kernel_or_name) -> None:
+        from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
+
+        name = self._entry_name(kernel_or_name, OptixKernelType.EXCEPTION)
+        desc = self.optix.ProgramGroupDesc()
+        desc.exceptionModule = self.module
+        desc.exceptionEntryFunctionName = name
+        if tuple(self.optix.version()) >= (7, 4):
+            self.exception_group = self.ctx.programGroupCreate([desc], self.optix.ProgramGroupOptions())[0][0]
+        else:
+            self.exception_group = self.ctx.programGroupCreate([desc])[0][0]
+
+    def add_callable_kernel(self, kernel_or_name, *, continuation: bool = False):
+        from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
+
+        kernel_type = OptixKernelType.CONTINUATION_CALLABLE if continuation else OptixKernelType.DIRECT_CALLABLE
+        name = self._entry_name(kernel_or_name, kernel_type)
+        desc = self.optix.ProgramGroupDesc()
+        if continuation:
+            desc.callablesModuleCC = self.module
+            desc.callablesEntryFunctionNameCC = name
+        else:
+            desc.callablesModuleDC = self.module
+            desc.callablesEntryFunctionNameDC = name
+        if tuple(self.optix.version()) >= (7, 4):
+            group = self.ctx.programGroupCreate([desc], self.optix.ProgramGroupOptions())[0][0]
+        else:
+            group = self.ctx.programGroupCreate([desc])[0][0]
+        handle = _CallableHandle(len(self.callable_groups))
+        self.callable_groups.append(group)
+        return handle
+
+    def get_callable_index(self, handle) -> int:
+        if not isinstance(handle, _CallableHandle) or not 0 <= handle.value < len(self.callable_groups):
+            raise KeyError("Unknown callable handle")
+        return handle.value
 
     def register_hit_shader_type(self, *kernels: str | HitKernel):
         from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
@@ -141,8 +185,11 @@ class SbtKernelManager:
         groups = []
         if self.raygen_group is not None:
             groups.append(self.raygen_group)
+        if self.exception_group is not None:
+            groups.append(self.exception_group)
         groups.extend(self.miss_groups)
         groups.extend(self.hit_kernels.get_list())
+        groups.extend(self.callable_groups)
         return groups
 
     def build_sbt(self, device: str = "cuda") -> SbtResources:
@@ -153,18 +200,31 @@ class SbtKernelManager:
 
         record_dtype = _aligned_record_dtype(self.optix)
         host_raygen = _pack_headers(self.optix, [self.raygen_group], record_dtype)
+        host_exception = (
+            _pack_headers(self.optix, [self.exception_group], record_dtype)
+            if self.exception_group is not None
+            else None
+        )
         host_miss = _pack_headers(self.optix, self.miss_groups, record_dtype)
         hit_groups = self.hit_kernels.get_list()
         host_hit = (
             _pack_headers(self.optix, hit_groups, record_dtype) if hit_groups else np.zeros(0, dtype=record_dtype)
         )
+        host_callables = (
+            _pack_headers(self.optix, self.callable_groups, record_dtype)
+            if self.callable_groups
+            else np.zeros(0, dtype=record_dtype)
+        )
 
         device_raygen = _to_device_bytes(host_raygen, device=device)
+        device_exception = _to_device_bytes(host_exception, device=device) if host_exception is not None else None
         device_miss = _to_device_bytes(host_miss, device=device)
         device_hit = _to_device_bytes(host_hit, device=device) if len(host_hit) > 0 else None
+        device_callables = _to_device_bytes(host_callables, device=device) if len(host_callables) > 0 else None
 
         sbt = self.optix.ShaderBindingTable()
         sbt.raygenRecord = device_raygen.ptr
+        sbt.exceptionRecord = device_exception.ptr if device_exception is not None else 0
         sbt.missRecordBase = device_miss.ptr
         sbt.missRecordStrideInBytes = host_miss.dtype.itemsize
         sbt.missRecordCount = len(host_miss)
@@ -178,5 +238,20 @@ class SbtKernelManager:
             sbt.hitgroupRecordStrideInBytes = 0
             sbt.hitgroupRecordCount = 0
 
-        keepalive = {"d_rg": device_raygen, "d_ms": device_miss, "d_hg": device_hit}
+        if device_callables is not None:
+            sbt.callablesRecordBase = device_callables.ptr
+            sbt.callablesRecordStrideInBytes = host_callables.dtype.itemsize
+            sbt.callablesRecordCount = len(host_callables)
+        else:
+            sbt.callablesRecordBase = 0
+            sbt.callablesRecordStrideInBytes = 0
+            sbt.callablesRecordCount = 0
+
+        keepalive = {
+            "d_rg": device_raygen,
+            "d_ex": device_exception,
+            "d_ms": device_miss,
+            "d_hg": device_hit,
+            "d_cb": device_callables,
+        }
         return SbtResources(sbt=sbt, keepalive=keepalive)

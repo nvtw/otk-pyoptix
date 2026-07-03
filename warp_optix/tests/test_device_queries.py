@@ -19,6 +19,8 @@ import warp_optix as woptix  # noqa: E402
 class QueryParams:
     output: wp.array(dtype=wp.uint32)
     traversable: wp.uint64
+    direct_callable_index: wp.uint32
+    continuation_callable_index: wp.uint32
 
 
 @wp.struct
@@ -147,6 +149,34 @@ def curve_closest_hit(params: QueryParams):
     params.output[2] = wp.float_to_uint32(wp.optix_get_curve_parameter())
 
 
+@woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
+def callable_raygen(params: QueryParams):
+    wp.optix_direct_call(params.direct_callable_index)
+    wp.optix_continuation_call(params.continuation_callable_index)
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.DIRECT_CALLABLE)
+def direct_callable(params: QueryParams):
+    params.output[0] = wp.uint32(42)
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.CONTINUATION_CALLABLE)
+def continuation_callable(params: QueryParams):
+    params.output[1] = wp.uint32(84)
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
+def exception_raygen(params: QueryParams):
+    wp.optix_throw_exception(wp.int32(1234), wp.uint32(77), wp.uint32(88))
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.EXCEPTION)
+def exception_program(params: QueryParams):
+    params.output[0] = wp.uint32(wp.optix_get_exception_code())
+    params.output[1] = wp.optix_get_exception_detail_0()
+    params.output[2] = wp.optix_get_exception_detail_1()
+
+
 def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
     try:
         optix = woptix.require_optix()
@@ -243,6 +273,73 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
             dynamic_ias_buffers,
             params_buffer,
         )
+
+
+def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
+    try:
+        optix = woptix.require_optix()
+        wp.init()
+    except Exception as error:
+        pytest.skip(f"OptiX/Warp unavailable: {error}")
+    if not wp.is_cuda_available():
+        pytest.skip("CUDA device unavailable")
+
+    device_name = "cuda:0"
+    monkeypatch.setattr(wp.config, "kernel_cache_dir", str(tmp_path / "warp_cache"))
+    with wp.ScopedDevice(device_name):
+        device = wp.get_device(device_name)
+        cuda_context = device.context.value if hasattr(device.context, "value") else int(device.context)
+        context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+        ptx = woptix.compile_warp_module_to_ptx(
+            wp.get_module(__name__), "", "test_callables_exceptions", __file__, device=device_name
+        )
+
+        callable_pipeline, callable_sbt, callable_resources = woptix.create_pipeline_and_sbt(
+            optix,
+            context,
+            ptx,
+            callable_raygen,
+            query_miss,
+            None,
+            num_payload_values=1,
+            num_attribute_values=0,
+            device=device_name,
+            direct_callable_entries=[direct_callable],
+            continuation_callable_entries=[continuation_callable],
+        )
+        manager = callable_resources["sbt_manager"]
+        direct_handle = callable_resources["direct_callable_handles"][0]
+        continuation_handle = callable_resources["continuation_callable_handles"][0]
+
+        output = wp.zeros(12, dtype=wp.uint32, device=device_name)
+        params = QueryParams()
+        params.output = output
+        params.direct_callable_index = wp.uint32(manager.get_callable_index(direct_handle))
+        params.continuation_callable_index = wp.uint32(manager.get_callable_index(continuation_handle))
+        params_buffer = woptix.create_launch_params_buffer(QueryParams, device_name)
+        woptix.write_launch_params(params_buffer, params)
+        woptix.launch(optix, callable_pipeline, callable_sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        assert tuple(output.numpy()[:2]) == (42, 84)
+
+        exception_pipeline, exception_sbt, exception_resources = woptix.create_pipeline_and_sbt(
+            optix,
+            context,
+            ptx,
+            exception_raygen,
+            query_miss,
+            None,
+            num_payload_values=1,
+            num_attribute_values=0,
+            device=device_name,
+            exception_entry=exception_program,
+        )
+        output.zero_()
+        woptix.launch(optix, exception_pipeline, exception_sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        assert tuple(output.numpy()[:3]) == (1234, 77, 88)
+
+        _keepalive = (callable_resources, exception_resources, params_buffer)
 
 
 def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):

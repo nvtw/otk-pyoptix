@@ -19,6 +19,7 @@ bool = wp.bool  # noqa: A001
 float = wp.float32  # noqa: A001
 uint32 = wp.uint32
 uint64 = wp.uint64
+int32 = wp.int32
 vec2 = wp.vec2
 vec3 = wp.vec3
 vec3ui = wp.vec3ui
@@ -288,6 +289,50 @@ def register_addon_builtins() -> None:
         group="Utility",
         is_differentiable=False,
     )
+
+    add_builtin(
+        "optix_direct_call",
+        input_types={"sbt_index": uint32},
+        value_type=None,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
+        "optix_continuation_call",
+        input_types={"sbt_index": uint32},
+        value_type=None,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    add_builtin(
+        "optix_get_exception_code",
+        input_types={},
+        value_type=int32,
+        group="Utility",
+        is_differentiable=False,
+    )
+
+    for _detail_i in range(8):
+        add_builtin(
+            f"optix_get_exception_detail_{_detail_i}",
+            input_types={},
+            value_type=uint32,
+            group="Utility",
+            is_differentiable=False,
+        )
+
+    for _num_details in range(9):
+        _input_types = {"exception_code": int32}
+        _input_types.update({f"detail_{i}": uint32 for i in range(_num_details)})
+        add_builtin(
+            "optix_throw_exception",
+            input_types=_input_types,
+            value_type=None,
+            group="Utility",
+            is_differentiable=False,
+        )
 
     # OptiX accepts zero to eight 32-bit attributes when an intersection is
     # reported. Register each arity explicitly so Warp can type-check calls and

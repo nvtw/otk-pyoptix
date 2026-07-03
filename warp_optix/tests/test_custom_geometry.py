@@ -59,6 +59,7 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     fake_warp.float32 = np.float32
     fake_warp.uint32 = np.uint32
     fake_warp.uint64 = np.uint64
+    fake_warp.int32 = np.int32
     fake_warp.vec2 = type("vec2", (), {})
     fake_warp.vec3 = type("vec3", (), {})
     fake_warp.vec3ui = type("vec3ui", (), {})
@@ -89,6 +90,12 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     assert "optix_get_hit_kind" in registered_names
     assert "optix_get_triangle_vertex_data" in registered_names
     assert "optix_get_curve_parameter" in registered_names
+    assert "optix_direct_call" in registered_names
+    assert "optix_continuation_call" in registered_names
+    assert "optix_get_exception_code" in registered_names
+    assert all(f"optix_get_exception_detail_{i}" in registered_names for i in range(8))
+    exception_overloads = [kwargs for name, kwargs in calls if name == "optix_throw_exception"]
+    assert [len(call["input_types"]) for call in exception_overloads] == list(range(1, 10))
     assert all(f"optix_get_attribute_{i}" in registered_names for i in range(8))
     assert {
         "optix_get_ray_time",

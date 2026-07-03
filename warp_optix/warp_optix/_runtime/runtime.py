@@ -574,7 +574,15 @@ def create_instance_acceleration_structure(
     )
 
 
-def _set_pipeline_stack_size(optix, pipeline, program_groups, max_trace_depth: int, max_traversable_depth: int):
+def _set_pipeline_stack_size(
+    optix,
+    pipeline,
+    program_groups,
+    max_trace_depth: int,
+    max_traversable_depth: int,
+    max_continuation_callable_depth: int = 0,
+    max_direct_callable_depth: int = 0,
+):
     if hasattr(optix, "util") and hasattr(optix, "StackSizes"):
         stack_sizes = optix.StackSizes()
         for group in program_groups:
@@ -583,7 +591,10 @@ def _set_pipeline_stack_size(optix, pipeline, program_groups, max_trace_depth: i
             else:
                 optix.util.accumulateStackSizes(group, stack_sizes)
         direct_traversal, direct_state, continuation = optix.util.computeStackSizes(
-            stack_sizes, max_trace_depth, 0, 0
+            stack_sizes,
+            max_trace_depth,
+            max_continuation_callable_depth,
+            max_direct_callable_depth,
         )
         pipeline.setStackSize(
             direct_traversal, direct_state, continuation, max_traversable_depth
@@ -623,6 +634,10 @@ def create_pipeline_and_sbt(
     traversable_graph_flags: int | None = None,
     max_traversable_depth: int | None = None,
     uses_motion_blur: bool = False,
+    exception_entry: wp.Kernel | str | None = None,
+    direct_callable_entries=None,
+    continuation_callable_entries=None,
+    exception_flags: int | None = None,
 ):
     from warp_optix._codegen import OptixKernelType  # noqa: PLC0415
     from warp_optix._runtime.hit_kernels import HitKernel  # noqa: PLC0415
@@ -679,12 +694,15 @@ def create_pipeline_and_sbt(
             1 if int(traversable_graph_flags) == int(optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS) else 2
         )
 
+    if exception_flags is None:
+        exception_flags = optix.EXCEPTION_FLAG_USER if exception_entry is not None else optix.EXCEPTION_FLAG_NONE
+
     kwargs = {
         "usesMotionBlur": bool(uses_motion_blur),
         "traversableGraphFlags": int(traversable_graph_flags),
         "numPayloadValues": num_payload_values,
         "numAttributeValues": num_attribute_values,
-        "exceptionFlags": int(optix.EXCEPTION_FLAG_NONE),
+        "exceptionFlags": int(exception_flags),
         "pipelineLaunchParamsVariableName": "params",
     }
     if _optix_version_at_least(optix, 7, 2):
@@ -712,6 +730,8 @@ def create_pipeline_and_sbt(
 
     sbt_manager = SbtKernelManager(optix, ctx, module)
     sbt_manager.set_raygen_kernel(raygen_name)
+    if exception_entry is not None:
+        sbt_manager.set_exception_kernel(exception_entry)
     sbt_manager.add_miss_kernels([miss_name])
     hit_group_handles = []
     builtin_modules = []
@@ -736,12 +756,28 @@ def create_pipeline_and_sbt(
             )
         )
 
+    direct_callable_handles = [
+        sbt_manager.add_callable_kernel(entry) for entry in (direct_callable_entries or [])
+    ]
+    continuation_callable_handles = [
+        sbt_manager.add_callable_kernel(entry, continuation=True)
+        for entry in (continuation_callable_entries or [])
+    ]
+
     groups = sbt_manager.get_all_program_groups()
 
     link_options = optix.PipelineLinkOptions()
     link_options.maxTraceDepth = 1
     pipeline = ctx.pipelineCreate(pipeline_options, link_options, groups, "")
-    _set_pipeline_stack_size(optix, pipeline, groups, link_options.maxTraceDepth, int(max_traversable_depth))
+    _set_pipeline_stack_size(
+        optix,
+        pipeline,
+        groups,
+        link_options.maxTraceDepth,
+        int(max_traversable_depth),
+        max_continuation_callable_depth=1 if continuation_callable_handles else 0,
+        max_direct_callable_depth=1 if direct_callable_handles else 0,
+    )
 
     sbt_resources = sbt_manager.build_sbt(device=device)
     keepalive = {
@@ -751,5 +787,7 @@ def create_pipeline_and_sbt(
         "sbt_manager": sbt_manager,
         "hit_group_handles": hit_group_handles,
         "builtin_modules": builtin_modules,
+        "direct_callable_handles": direct_callable_handles,
+        "continuation_callable_handles": continuation_callable_handles,
     }
     return pipeline, sbt_resources.sbt, keepalive

@@ -1,6 +1,6 @@
 """OptiX kernel-type helpers.
 
-``OptixKernelType`` maps the five OptiX program kinds to the name prefix
+``OptixKernelType`` maps supported OptiX program kinds to the name prefix
 that Warp's codegen attaches to the generated CUDA entry point. The
 companion :func:`optix_kernel` decorator selects Warp's external constant
 params ABI and stores the kind for runtime entry-name lookup.
@@ -18,6 +18,9 @@ class OptixKernelType(enum.Enum):
     CLOSEST_HIT = "__closesthit__"
     ANY_HIT = "__anyhit__"
     INTERSECTION = "__intersection__"
+    EXCEPTION = "__exception__"
+    DIRECT_CALLABLE = "__direct_callable__"
+    CONTINUATION_CALLABLE = "__continuation_callable__"
 
 
 F = TypeVar("F", bound=Callable[..., Any])

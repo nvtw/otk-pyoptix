@@ -413,6 +413,61 @@ inline CUDA_CALLABLE_DEVICE void optix_ignore_intersection()
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE void optix_direct_call(uint32 sbt_index)
+{
+#if defined(WP_ENABLE_OPTIX)
+    optixDirectCall<void>(sbt_index);
+#else
+    (void)sbt_index;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE void optix_continuation_call(uint32 sbt_index)
+{
+#if defined(WP_ENABLE_OPTIX)
+    optixContinuationCall<void>(sbt_index);
+#else
+    (void)sbt_index;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE int32 optix_get_exception_code()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<int32>(optixGetExceptionCode());
+#else
+    return 0;
+#endif
+}
+
+#define WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(I)                  \
+    inline CUDA_CALLABLE_DEVICE uint32 optix_get_exception_detail_##I() \
+    {                                                                 \
+        return static_cast<uint32>(optixGetExceptionDetail_##I());    \
+    }
+
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(0)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(1)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(2)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(3)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(4)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(5)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(6)
+WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR(7)
+
+#undef WP_DEFINE_OPTIX_EXCEPTION_DETAIL_ACCESSOR
+
+template <typename... Details>
+inline CUDA_CALLABLE_DEVICE void optix_throw_exception(int32 exception_code, Details... details)
+{
+    static_assert(sizeof...(Details) <= 8, "optixThrowException accepts at most eight details");
+#if defined(WP_ENABLE_OPTIX)
+    optixThrowException(exception_code, static_cast<uint32>(details)...);
+#else
+    (void)exception_code;
+#endif
+}
+
 template <typename... Attributes>
 inline CUDA_CALLABLE_DEVICE bool optix_report_intersection(float hit_t, uint32 hit_kind, Attributes... attributes)
 {

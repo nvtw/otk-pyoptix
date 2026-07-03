@@ -143,3 +143,19 @@ Bezier curves. Associate its hit record with OptiX's built-in intersector by
 setting `HitKernel(builtin_intersection_type=curve_type)`. Curve shaders can
 read the current parameter with `wp.optix_get_curve_parameter()`. Curve vertex
 and width arrays may also contain motion keys.
+
+Exception, direct-callable, and continuation-callable programs use the same
+`optix_kernel()` decorator as other stages. Pass them through
+`exception_entry`, `direct_callable_entries`, or
+`continuation_callable_entries` when creating the pipeline. The helper packs
+their SBT records and computes the additional stack requirements. Callable
+handles resolve through `SbtKernelManager.get_callable_index()`.
+
+Callables intentionally use a no-argument, void interface:
+`wp.optix_direct_call(index)` or `wp.optix_continuation_call(index)`. They can
+read launch parameters and write referenced Warp arrays. Arbitrary typed
+callable arguments and returns are outside Warp's current external entry ABI
+and are therefore not exposed. Exception programs can use
+`wp.optix_get_exception_code()` and detail accessors; user code can raise an
+exception with `wp.optix_throw_exception()` and up to eight `wp.uint32`
+details.
