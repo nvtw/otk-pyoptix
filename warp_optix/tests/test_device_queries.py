@@ -181,6 +181,20 @@ def exception_program(params: QueryParams):
     params.output[2] = wp.optix_get_exception_detail_1()
 
 
+def test_optix_kernel_uses_full_kernel_name():
+    @woptix.optix_kernel(
+        woptix.OptixKernelType.RAYGEN,
+        name="custom_raygen",
+        module="unique",
+        module_options={"strip_hash": True},
+    )
+    def named_raygen(params: QueryParams):
+        _ = params.output
+
+    assert named_raygen.key == "__raygen__custom_raygen"
+    assert woptix.get_entry_name(named_raygen) == "__raygen__custom_raygen"
+
+
 def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
     try:
         optix = woptix.require_optix()

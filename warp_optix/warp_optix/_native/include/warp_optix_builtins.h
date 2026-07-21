@@ -12,7 +12,7 @@
 
 #pragma once
 
-// This header is injected through `wp.ModuleBuildOptions.extra_device_preamble`
+// This header is injected through `wp.ModuleBuildOptions.extra_cuda_preamble`
 // before warp's own `cuda_module_header`, so we must declare `WP_NO_CRT`
 // ourselves before pulling
 // in `builtin.h` — otherwise `crt.h` tries to `#include <assert.h>` which is

@@ -138,10 +138,10 @@ def get_optix_entry_name(kernel_or_entry, expected_kernel_type=None) -> str:
     if expected_kernel_type is not None and kernel_type is not expected_kernel_type:
         raise TypeError(f"kernel '{kernel_or_entry.key}' has type {kernel_type}, expected {expected_kernel_type}")
 
-    return f"{kernel_type.value}{kernel_or_entry.get_mangled_name()}"
+    return kernel_or_entry.get_mangled_name()
 
 
-def _prepend_device_preamble(build_options: wp.ModuleBuildOptions, preamble: str) -> wp.ModuleBuildOptions:
+def _prepend_cuda_preamble(build_options: wp.ModuleBuildOptions, preamble: str) -> wp.ModuleBuildOptions:
     if not preamble:
         return build_options
 
@@ -149,10 +149,9 @@ def _prepend_device_preamble(build_options: wp.ModuleBuildOptions, preamble: str
         preamble += "\n"
 
     return wp.ModuleBuildOptions(
-        extra_include_dirs=build_options.extra_include_dirs,
         extra_cuda_include_dirs=build_options.extra_cuda_include_dirs,
         extra_cpu_include_dirs=build_options.extra_cpu_include_dirs,
-        extra_device_preamble=preamble + build_options.extra_device_preamble,
+        extra_cuda_preamble=preamble + build_options.extra_cuda_preamble,
         extra_cpu_preamble=build_options.extra_cpu_preamble,
     )
 
@@ -164,20 +163,20 @@ def compile_warp_module_to_ptx(
     script_dir: str,
     device: str = "cuda",
 ) -> bytes:
-    if not hasattr(wp, "compile_module_to_ptx"):
-        raise RuntimeError("warp_optix requires a Warp build with wp.compile_module_to_ptx()")
-
     del script_dir  # Preserved for backward-compatible call sites.
 
     old_build_options = module.options.get("extra_build_options")
     build_options = get_module_build_options(wp, old_build_options)
-    module.options["extra_build_options"] = _prepend_device_preamble(build_options, launch_preamble)
+    module.options["extra_build_options"] = _prepend_cuda_preamble(build_options, launch_preamble)
+    module.mark_modified()
     try:
         wp.get_device(device)
         module_dir = os.path.join(wp.config.kernel_cache_dir, "optix", module_tag)
-        return wp.compile_module_to_ptx(module, device=device, module_dir=module_dir)
+        artifacts = wp.compile_aot_module(module, device=device, module_dir=module_dir, use_ptx=True)
+        return artifacts[0].read_bytes()
     finally:
         module.options["extra_build_options"] = old_build_options
+        module.mark_modified()
 
 
 class AccelResources(dict):

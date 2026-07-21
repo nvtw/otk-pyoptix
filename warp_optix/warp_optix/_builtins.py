@@ -1,8 +1,9 @@
 """OptiX builtin registrations for warp.
 
 This module was extracted from ``warp/_src/builtins.py``; importing it
-calls ``warp.add_builtin(...)`` for every OptiX-related builtin so that the rest
-of warp can codegen against them. ``warp_optix._addon`` triggers the import.
+registers every OptiX-related builtin through Warp's private builtin helper so
+that the rest of Warp can codegen against them. ``warp_optix._addon`` triggers
+the import.
 
 Source extracted on migration from warp branch ``dev/tw/add_minimal_optix_supprt``.
 """
@@ -12,8 +13,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 import warp as wp
-
-add_builtin = wp.add_builtin
+from warp._src.context import add_builtin
 
 bool = wp.bool  # noqa: A001
 float = wp.float32  # noqa: A001
