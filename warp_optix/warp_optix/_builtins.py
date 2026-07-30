@@ -1,19 +1,19 @@
-"""OptiX builtin registrations for warp.
+"""OptiX builtin registrations for Warp.
 
 This module was extracted from ``warp/_src/builtins.py``; importing it
-registers every OptiX-related builtin through Warp's private builtin helper so
-that the rest of Warp can codegen against them. ``warp_optix._addon`` triggers
-the import.
+registers every OptiX-related builtin through Warp's public extension API.
+``warp_optix._addon`` triggers the import.
 
 Source extracted on migration from warp branch ``dev/tw/add_minimal_optix_supprt``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
 
 import warp as wp
-from warp._src.context import add_builtin
+
+add_builtin = wp.build.add_builtin
 
 bool = wp.bool  # noqa: A001
 float = wp.float32  # noqa: A001
@@ -34,106 +34,66 @@ def register_addon_builtins() -> None:
     is new so the registrations don't run as a side-effect of merely importing
     this module's symbols.
     """
-    def optix_trace_payload_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Any]):
-        func_args = (
-            args["traversable"],
-            args["ray_origin"],
-            args["ray_direction"],
-            args["tmin"],
-            args["tmax"],
-            args["ray_time"],
-            args["visibility_mask"],
-            args["ray_flags"],
-            args["sbt_offset"],
-            args["sbt_stride"],
-            args["miss_sbt_index"],
-            args["payload"],
-        )
-        return (func_args, ())
-
-    def optix_load_payload_dispatch_func(input_types: Mapping[str, type], return_type: Any, args: Mapping[str, Any]):
-        return ((args["payload"],), ())
-
     add_builtin(
         "float_to_uint32",
         input_types={"x": float},
         value_type=uint32,
-        group="Utility",
         doc="Reinterpret the bits of a float as a uint32 (bit-cast, no conversion).",
-        is_differentiable=False,
     )
 
     add_builtin(
         "uint32_to_float",
         input_types={"u": uint32},
         value_type=float,
-        group="Utility",
         doc="Reinterpret the bits of a uint32 as a float (bit-cast, no conversion).",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_launch_index",
         input_types={},
         value_type=vec3ui,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_launch_dimensions",
         input_types={},
         value_type=vec3ui,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_world_ray_origin",
         input_types={},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_world_ray_direction",
         input_types={},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_object_ray_origin",
         input_types={},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_object_ray_direction",
         input_types={},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_ray_tmin",
         input_types={},
         value_type=float,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_ray_time",
         input_types={},
         value_type=float,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _name in ("optix_get_ray_flags", "optix_get_ray_visibility_mask"):
@@ -141,57 +101,43 @@ def register_addon_builtins() -> None:
             _name,
             input_types={},
             value_type=uint32,
-            group="Utility",
-            is_differentiable=False,
         )
 
     add_builtin(
         "optix_get_ray_tmax",
         input_types={},
         value_type=float,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_triangle_barycentrics",
         input_types={},
         value_type=vec2,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_triangle_vertex_data",
         input_types={},
         value_type=mat33,
-        group="Utility",
         doc="Return the current triangle's three object-space vertices as rows of a mat33.",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_curve_parameter",
         input_types={},
         value_type=float,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_primitive_index",
         input_types={},
         value_type=uint32,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_instance_id",
         input_types={},
         value_type=uint32,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _name in ("optix_get_instance_index", "optix_get_sbt_gas_index", "optix_get_primitive_type"):
@@ -199,16 +145,12 @@ def register_addon_builtins() -> None:
             _name,
             input_types={},
             value_type=uint32,
-            group="Utility",
-            is_differentiable=False,
         )
 
     add_builtin(
         "optix_get_gas_traversable_handle",
         input_types={},
         value_type=uint64,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _name in ("optix_is_front_face_hit", "optix_is_back_face_hit"):
@@ -216,16 +158,12 @@ def register_addon_builtins() -> None:
             _name,
             input_types={},
             value_type=bool,
-            group="Utility",
-            is_differentiable=False,
         )
 
     add_builtin(
         "optix_get_hit_kind",
         input_types={},
         value_type=uint32,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _attribute_i in range(8):
@@ -233,32 +171,24 @@ def register_addon_builtins() -> None:
             f"optix_get_attribute_{_attribute_i}",
             input_types={},
             value_type=uint32,
-            group="Utility",
-            is_differentiable=False,
         )
 
     add_builtin(
         "optix_transform_normal_from_object_to_world_space",
         input_types={"normal": vec3},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_transform_point_from_object_to_world_space",
         input_types={"point": vec3},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_transform_vector_from_object_to_world_space",
         input_types={"vector": vec3},
         value_type=vec3,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _name, _argument in (
@@ -270,48 +200,36 @@ def register_addon_builtins() -> None:
             _name,
             input_types={_argument: vec3},
             value_type=vec3,
-            group="Utility",
-            is_differentiable=False,
         )
 
     add_builtin(
         "optix_terminate_ray",
         input_types={},
         value_type=None,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_ignore_intersection",
         input_types={},
         value_type=None,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_direct_call",
         input_types={"sbt_index": uint32},
         value_type=None,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_continuation_call",
         input_types={"sbt_index": uint32},
         value_type=None,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_get_exception_code",
         input_types={},
         value_type=int32,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _detail_i in range(8):
@@ -319,8 +237,6 @@ def register_addon_builtins() -> None:
             f"optix_get_exception_detail_{_detail_i}",
             input_types={},
             value_type=uint32,
-            group="Utility",
-            is_differentiable=False,
         )
 
     for _num_details in range(9):
@@ -330,8 +246,6 @@ def register_addon_builtins() -> None:
             "optix_throw_exception",
             input_types=_input_types,
             value_type=None,
-            group="Utility",
-            is_differentiable=False,
         )
 
     # OptiX accepts zero to eight 32-bit attributes when an intersection is
@@ -344,9 +258,7 @@ def register_addon_builtins() -> None:
             "optix_report_intersection",
             input_types=_input_types,
             value_type=bool,
-            group="Utility",
             doc="Report a custom-primitive intersection with up to eight 32-bit attributes.",
-            is_differentiable=False,
         )
 
     add_builtin(
@@ -366,29 +278,18 @@ def register_addon_builtins() -> None:
             "payload": Any,
         },
         value_type=None,
-        dispatch_func=optix_trace_payload_dispatch_func,
-        export=False,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_load_payload",
         input_types={"payload": Any},
         value_type=None,
-        dispatch_func=optix_load_payload_dispatch_func,
-        export=False,
-        group="Utility",
-        is_differentiable=False,
     )
 
     add_builtin(
         "optix_store_payload",
         input_types={"payload": Any},
         value_type=None,
-        export=False,
-        group="Utility",
-        is_differentiable=False,
     )
 
     for _payload_i in range(32):
@@ -396,13 +297,9 @@ def register_addon_builtins() -> None:
             f"optix_get_payload_{_payload_i}",
             input_types={},
             value_type=uint32,
-            group="Utility",
-            is_differentiable=False,
         )
         add_builtin(
             f"optix_set_payload_{_payload_i}",
             input_types={"value": uint32},
             value_type=None,
-            group="Utility",
-            is_differentiable=False,
         )

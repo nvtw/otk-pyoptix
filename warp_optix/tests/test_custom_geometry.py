@@ -54,7 +54,7 @@ class _FakeWarp:
 def test_custom_primitive_builtins_register_all_attribute_arities():
     calls = []
     fake_warp = ModuleType("warp")
-    fake_warp.add_builtin = lambda name, **kwargs: calls.append((name, kwargs))
+    fake_warp.build = SimpleNamespace(add_builtin=lambda name, **kwargs: calls.append((name, kwargs)))
     fake_warp.bool = bool
     fake_warp.float32 = np.float32
     fake_warp.uint32 = np.uint32

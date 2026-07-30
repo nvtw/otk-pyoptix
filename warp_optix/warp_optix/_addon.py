@@ -28,6 +28,11 @@ def _addon_cuda_preamble() -> str:
     return '#include "warp_optix_builtins.h"\n'
 
 
+def _addon_build_dependencies() -> list[str]:
+    here = Path(__file__).resolve().parent
+    return [str(here / "_native" / "include" / "warp_optix_builtins.h")]
+
+
 def get_module_build_options(wp, existing=None):
     """Return module build options with warp_optix headers and preamble appended."""
     if existing is None:
@@ -50,11 +55,17 @@ def get_module_build_options(wp, existing=None):
             extra_cuda_preamble += "\n"
         extra_cuda_preamble += addon_preamble
 
+    extra_build_dependencies = list(existing.extra_build_dependencies)
+    for dependency in _addon_build_dependencies():
+        if dependency not in extra_build_dependencies:
+            extra_build_dependencies.append(dependency)
+
     return wp.ModuleBuildOptions(
         extra_cuda_include_dirs=extra_cuda_include_dirs,
         extra_cpu_include_dirs=existing.extra_cpu_include_dirs,
         extra_cuda_preamble=extra_cuda_preamble,
         extra_cpu_preamble=existing.extra_cpu_preamble,
+        extra_build_dependencies=extra_build_dependencies,
     )
 
 

@@ -153,6 +153,7 @@ def _prepend_cuda_preamble(build_options: wp.ModuleBuildOptions, preamble: str) 
         extra_cpu_include_dirs=build_options.extra_cpu_include_dirs,
         extra_cuda_preamble=preamble + build_options.extra_cuda_preamble,
         extra_cpu_preamble=build_options.extra_cpu_preamble,
+        extra_build_dependencies=build_options.extra_build_dependencies,
     )
 
 
@@ -165,18 +166,19 @@ def compile_warp_module_to_ptx(
 ) -> bytes:
     del script_dir  # Preserved for backward-compatible call sites.
 
-    old_build_options = module.options.get("extra_build_options")
+    old_build_options = wp.get_module_options(module).get("extra_build_options")
     build_options = get_module_build_options(wp, old_build_options)
-    module.options["extra_build_options"] = _prepend_cuda_preamble(build_options, launch_preamble)
-    module.mark_modified()
+    wp.set_module_options(
+        {"extra_build_options": _prepend_cuda_preamble(build_options, launch_preamble)},
+        module=module,
+    )
     try:
         wp.get_device(device)
         module_dir = os.path.join(wp.config.kernel_cache_dir, "optix", module_tag)
         artifacts = wp.compile_aot_module(module, device=device, module_dir=module_dir, use_ptx=True)
         return artifacts[0].read_bytes()
     finally:
-        module.options["extra_build_options"] = old_build_options
-        module.mark_modified()
+        wp.set_module_options({"extra_build_options": old_build_options}, module=module)
 
 
 class AccelResources(dict):

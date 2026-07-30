@@ -9,6 +9,7 @@ runtime validation.
 from __future__ import annotations
 
 import enum
+import re
 from typing import Any, Callable, TypeVar
 
 
@@ -24,6 +25,11 @@ class OptixKernelType(enum.Enum):
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _qualified_kernel_name(fn: Callable[..., Any]) -> str:
+    """Return Warp's stable identifier spelling for a Python function."""
+    return re.sub("[^0-9a-zA-Z_]+", "", fn.__qualname__.replace(".", "__"))
 
 
 def optix_kernel(kind: "OptixKernelType", **kernel_kwargs: Any) -> Callable[[F], Any]:
@@ -45,7 +51,7 @@ def optix_kernel(kind: "OptixKernelType", **kernel_kwargs: Any) -> Callable[[F],
         # this on the addon side so Warp's @wp.kernel stays agnostic.
         kwargs.setdefault("enable_backward", False)
         kwargs.setdefault("entry_point_abi", "external_constant_params")
-        kernel_name = kwargs.pop("name", wp._src.codegen.make_full_qualified_name(fn))
+        kernel_name = kwargs.pop("name", _qualified_kernel_name(fn))
 
         k = wp.kernel(name=f"{kind.value}{kernel_name}", **kwargs)(fn)
         k.options["optix_kernel_type"] = kind
