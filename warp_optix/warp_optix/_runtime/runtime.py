@@ -26,6 +26,7 @@ import numpy as np
 import warp as wp
 
 from warp_optix._addon import get_module_build_options
+from warp_optix._compat import compile_module_to_ptx, has_public_addon_hooks
 
 
 def require_optix():
@@ -165,6 +166,9 @@ def compile_warp_module_to_ptx(
     device: str = "cuda",
 ) -> bytes:
     del script_dir  # Preserved for backward-compatible call sites.
+
+    if not has_public_addon_hooks(wp):
+        return compile_module_to_ptx(wp, module, launch_preamble, module_tag, device)
 
     old_build_options = wp.get_module_options(module).get("extra_build_options")
     build_options = get_module_build_options(wp, old_build_options)

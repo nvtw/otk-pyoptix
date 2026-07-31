@@ -33,12 +33,19 @@ The `optix` Python module (the pyoptix C++ binding) must also be installed:
 pip install -e optix/
 ```
 
+`warp_optix` uses Warp's public addon hooks when they are available. With
+vanilla `warp-lang>=1.15`, it falls back to a version-checked private API
+adapter for builtin registration, OptiX entry-point generation, and PTX
+compilation. The fallback changes only the active Python process; it does not
+patch or overwrite the installed Warp package.
+
 ## Layout
 
 - `warp_optix/__init__.py` — public re-exports of the runtime API.
 - `warp_optix/_runtime/` — pyoptix-side runtime helpers (formerly `warp/_src/render/optix_*.py`).
 - `warp_optix/_builtins.py` — OptiX `add_builtin(...)` registrations.
 - `warp_optix/_codegen.py` — `OptixKernelType` enum and codegen entry-point specs.
+- `warp_optix/_compat.py` — vanilla Warp private-API fallback.
 - `warp_optix/_native/include/warp_optix_builtins.h` — device-side C++ wrappers.
 - `warp_optix/_addon.py` — runs on import; wires the above into warp.
 

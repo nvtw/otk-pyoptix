@@ -5,6 +5,7 @@ warp_optix/__init__.pyi
 warp_optix/_addon.py
 warp_optix/_builtins.py
 warp_optix/_codegen.py
+warp_optix/_compat.py
 warp_optix.egg-info/PKG-INFO
 warp_optix.egg-info/SOURCES.txt
 warp_optix.egg-info/dependency_links.txt

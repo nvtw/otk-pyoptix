@@ -43,6 +43,10 @@ def optix_kernel(kind: "OptixKernelType", **kernel_kwargs: Any) -> Callable[[F],
     function is dispatched by the OptiX pipeline, not by ``wp.launch``.
     """
     import warp as wp  # noqa: PLC0415
+    from warp_optix._compat import (  # noqa: PLC0415
+        create_external_kernel,
+        has_public_addon_hooks,
+    )
 
     def _wrap(fn: F) -> Any:
         kwargs = dict(kernel_kwargs)
@@ -53,7 +57,18 @@ def optix_kernel(kind: "OptixKernelType", **kernel_kwargs: Any) -> Callable[[F],
         kwargs.setdefault("entry_point_abi", "external_constant_params")
         kernel_name = kwargs.pop("name", _qualified_kernel_name(fn))
 
-        k = wp.kernel(name=f"{kind.value}{kernel_name}", **kwargs)(fn)
+        full_name = f"{kind.value}{kernel_name}"
+        if has_public_addon_hooks(wp):
+            k = wp.kernel(name=full_name, **kwargs)(fn)
+        else:
+            entry_point_abi = kwargs.pop("entry_point_abi")
+            k = create_external_kernel(
+                wp,
+                fn,
+                name=full_name,
+                entry_point_abi=entry_point_abi,
+                kernel_kwargs=kwargs,
+            )
         k.options["optix_kernel_type"] = kind
         return k
 

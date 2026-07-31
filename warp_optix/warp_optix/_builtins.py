@@ -13,7 +13,9 @@ from typing import Any
 
 import warp as wp
 
-add_builtin = wp.build.add_builtin
+from warp_optix._compat import get_add_builtin
+
+add_builtin = get_add_builtin(wp)
 
 bool = wp.bool  # noqa: A001
 float = wp.float32  # noqa: A001
