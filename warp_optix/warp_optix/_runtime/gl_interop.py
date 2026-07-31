@@ -50,6 +50,9 @@ class OptixGLInteropViewer:
         title: str = "Warp OptiX Tiny Raytracer",
         fps: int = 60,
         on_resize: Callable[[int, int], None] | None = None,
+        on_draw_overlay: Callable[[], None] | None = None,
+        vsync: bool = True,
+        fallback_to_copy: bool = True,
     ):
         import pyglet
         from pyglet import gl
@@ -65,9 +68,11 @@ class OptixGLInteropViewer:
         self.closed = False
         self._render_callback: Callable[[wp.array, int, float], None] | None = None
         self._on_resize_callback = on_resize
+        self._on_draw_overlay = on_draw_overlay
+        self._fallback_to_copy = bool(fallback_to_copy)
 
         self.window = pyglet.window.Window(
-            width=width, height=height, caption=title, vsync=False, resizable=True
+            width=width, height=height, caption=title, vsync=bool(vsync), resizable=True
         )
         self.window.push_handlers(
             on_draw=self._on_draw, on_close=self._on_close, on_resize=self._on_resize
@@ -105,7 +110,7 @@ class OptixGLInteropViewer:
             int(self.pbo.value),
             device=self.device,
             flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
-            fallback_to_copy=False,
+            fallback_to_copy=self._fallback_to_copy,
         )
         gl.glViewport(0, 0, self.width, self.height)
 
@@ -175,6 +180,8 @@ class OptixGLInteropViewer:
         gl.glBindTexture(self.texture.target, 0)
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         self.sprite.draw()
+        if self._on_draw_overlay is not None:
+            self._on_draw_overlay()
 
     def _on_close(self):
         if self.closed:

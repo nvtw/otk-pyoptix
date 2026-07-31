@@ -6,3 +6,11 @@ numpy
 imageio>=2.31
 Pillow>=9
 pyglet<3,>=2.1
+
+[recording]
+imageio>=2.31
+imageio-ffmpeg>=0.5
+
+[ui]
+imgui-bundle>=1.92
+PyOpenGL>=3.1

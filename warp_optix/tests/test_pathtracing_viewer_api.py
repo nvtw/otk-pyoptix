@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from warp_optix.pathtracing import PathTracingViewerBackend
 
 
@@ -27,6 +28,8 @@ class _FakePathTracerAPI:
         self.build_count = 0
         self.refit_count = 0
         self.render_count = 0
+        self.debug_mode = 0
+        self.dlss_enabled = True
 
     def initialize(self):
         return True
@@ -76,6 +79,12 @@ class _FakePathTracerAPI:
 
     def render_frame(self):
         self.render_count += 1
+
+    def get_frame_uint8(self):
+        return np.full((2, 3, 4), 127, dtype=np.uint8)
+
+    def set_debug_buffer_mode(self, mode):
+        self.debug_mode = int(mode)
 
     def clear_scene(self):
         self.scene = _FakeScene()
@@ -160,7 +169,7 @@ def test_instance_visibility_and_cached_material_updates():
     )
     viewer.log_instances("batch", "triangle", xforms, None, None, None)
     viewer.end_frame()
-    viewer.log_instances("batch", "triangle", xforms[:1], None, None, None)
+    viewer.update_instance_transforms("batch", xforms[:1])
     viewer.end_frame()
 
     assert api.build_count == 1
@@ -168,3 +177,137 @@ def test_instance_visibility_and_cached_material_updates():
     assert api.scene._instances[0].visible is True
     assert api.scene._instances[1].visible is False
     assert api.scene.uploaded_material_ids is not None
+
+
+class _FakePicking:
+    def __init__(self, model, pick_stiffness, pick_damping):
+        self.model = model
+        self.settings = (pick_stiffness, pick_damping)
+        self.active = False
+        self.applied = []
+        self.picked = None
+        self.updated = None
+
+    def is_picking(self):
+        return self.active
+
+    def _apply_picking_force(self, state):
+        self.applied.append(state)
+
+    def pick(self, state, origin, direction):
+        self.active = True
+        self.picked = (state, tuple(origin), tuple(direction))
+
+    def update(self, origin, direction):
+        self.updated = (tuple(origin), tuple(direction))
+
+    def release(self):
+        self.active = False
+
+
+class _FakeVideoWriter:
+    def __init__(self):
+        self.frames = []
+        self.closed = False
+
+    def append_data(self, frame):
+        self.frames.append(np.asarray(frame).copy())
+
+    def close(self):
+        self.closed = True
+
+
+def test_optional_picking_uses_physics_camera_ray_and_applies_forces():
+    api = _FakePathTracerAPI()
+    created = []
+
+    def factory(*args, **kwargs):
+        picking = _FakePicking(*args, **kwargs)
+        created.append(picking)
+        return picking
+
+    viewer = PathTracingViewerBackend(
+        device="cpu", headless=True, api=api, up_axis="Z", picking_factory=factory
+    )
+    model = SimpleNamespace(up_axis=2)
+    viewer.set_model(model)
+    picking = created[0]
+    assert picking.settings == (10000.0, 1000.0)
+
+    state = object()
+    origin, direction = viewer._get_ray_from_mouse(viewer.width / 2, viewer.height / 2)
+    np.testing.assert_allclose(origin, viewer._camera_position)
+    np.testing.assert_allclose(direction, viewer._physics_camera_front(), atol=1.0e-6)
+    picking.pick(state, origin, direction)
+    viewer.log_state(state)
+    viewer.apply_forces(state)
+    assert picking.applied == [state, state]
+
+
+def test_recording_debug_and_bridge_transform_compatibility(tmp_path):
+    api = _FakePathTracerAPI()
+    writer = _FakeVideoWriter()
+    viewer = PathTracingViewerBackend(
+        device="cpu",
+        headless=True,
+        api=api,
+        recording_writer_factory=lambda *_args, **_kwargs: writer,
+    )
+
+    viewer.set_debug_buffer_mode(7)
+    assert api.debug_mode == 7
+    key = SimpleNamespace(
+        SPACE=10,
+        ESCAPE=11,
+        R=12,
+        T=13,
+        _0=20,
+        _1=21,
+        _2=22,
+        _3=23,
+        _4=24,
+        _5=25,
+        _6=26,
+        _7=27,
+        _8=28,
+        BACKSPACE=29,
+    )
+    viewer._presenter = SimpleNamespace(
+        pyglet=SimpleNamespace(window=SimpleNamespace(key=key))
+    )
+    viewer.on_key_press(key._1, None)
+    assert api.debug_mode == 2
+    viewer.on_key_press(key._1, None)
+    assert api.debug_mode == 0
+    viewer._presenter = None
+    path = viewer.start_recording(tmp_path / "capture.mp4", frame_skip=2)
+    assert path.endswith("capture.mp4")
+    viewer.end_frame()
+    viewer.end_frame()
+    viewer.end_frame()
+    viewer.stop_recording()
+
+    assert len(writer.frames) == 2
+    assert writer.frames[0].shape == (2, 3, 3)
+    assert writer.closed
+    assert viewer.get_instance_transform_gl_buffer() == 0
+    assert viewer.get_instance_transform_capacity() == 10000
+    assert not viewer.is_gpu_transform_available()
+
+
+def test_instance_capacity_is_enforced():
+    api = _FakePathTracerAPI()
+    viewer = PathTracingViewerBackend(
+        device="cpu", headless=True, api=api, max_instances=1
+    )
+    points, indices = _triangle()
+    viewer.log_mesh("triangle", points, indices)
+    xforms = np.array(
+        (
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),
+        ),
+        dtype=np.float32,
+    )
+    with pytest.raises(RuntimeError, match="instance capacity"):
+        viewer.log_instances("batch", "triangle", xforms, None, None, None)

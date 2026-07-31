@@ -8,14 +8,15 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import warp as wp
 
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer
-from warp_optix._runtime.transform_utils import build_transform_matrix
 
 from .pathtracer_api import PathTracerAPI
 
@@ -96,6 +97,13 @@ class PathTracingViewerBackend:
         up_axis: str | int = "Y",
         camera_speed: float = 4.0,
         api: PathTracerAPI | None = None,
+        vsync: bool = True,
+        max_instances: int = 10000,
+        enable_imgui: bool = True,
+        enable_picking: bool = True,
+        picking_factory: Callable | None = None,
+        fallback_to_copy: bool = True,
+        recording_writer_factory: Callable | None = None,
     ):
         try:
             super().__init__()
@@ -120,6 +128,34 @@ class PathTracingViewerBackend:
         self._materials_dirty = False
         self._last_wall_time = time.perf_counter()
         self._warned_texture = False
+        self._warned_transform_vbo = False
+        self.model = getattr(self, "model", None)
+        self.picking_enabled = bool(enable_picking)
+        self._picking_factory = picking_factory
+        self._picking = None
+        self._last_state = None
+        self._mouse_x = 0.0
+        self._mouse_y = 0.0
+        self._mouse_buttons: set[int] = set()
+
+        self._max_instances = max(1, int(max_instances))
+        self._ui_callbacks: list[tuple[Callable, str]] = []
+        self._imgui_enabled = bool(enable_imgui)
+        self._imgui = None
+        self._imgui_impl = None
+        self._debug_buffer_mode = 0
+        self._current_fps = 0.0
+        self._fps_frame_count = 0
+        self._fps_window_start = time.perf_counter()
+
+        self.recording_fps = 60
+        self.recording_bitrate_mbps = 20
+        self.recording_frame_skip = 1
+        self.recording_output_path: str | None = None
+        self._recording_writer = None
+        self._recording_writer_factory = recording_writer_factory
+        self._recording_frame_index = 0
+        self._recording_path: Path | None = None
 
         self._api = api or PathTracerAPI(
             width=self.width,
@@ -136,8 +172,13 @@ class PathTracingViewerBackend:
                 title=title,
                 fps=self.fps,
                 on_resize=self._on_resize,
+                on_draw_overlay=self._draw_imgui,
+                vsync=vsync,
+                fallback_to_copy=fallback_to_copy,
             )
             self._presenter.window.push_handlers(self)
+            if self._imgui_enabled:
+                self._init_imgui()
 
         self._mesh_ids: dict[str, int] = {}
         self._batches: dict[str, _InstanceBatch] = {}
@@ -224,6 +265,62 @@ class PathTracingViewerBackend:
         parent = getattr(super(), "set_model", None)
         if callable(parent):
             parent(model)
+        else:
+            self.model = model
+        self._initialize_picking(model)
+
+    def _initialize_picking(self, model):
+        self._picking = None
+        if not self.picking_enabled or model is None:
+            return
+
+        factory = self._picking_factory
+        if factory is None:
+            try:
+                from newton._src.viewer.picking import Picking
+            except ImportError:
+                return
+            factory = Picking
+
+        try:
+            self._picking = factory(model, pick_stiffness=10000.0, pick_damping=1000.0)
+            if hasattr(self._picking, "world_offsets"):
+                self._picking.world_offsets = getattr(self, "world_offsets", None)
+            if hasattr(self._picking, "visible_worlds_mask"):
+                self._picking.visible_worlds_mask = getattr(
+                    self, "_visible_worlds_mask", None
+                )
+        except (TypeError, ValueError) as error:
+            logger.warning("Newton picking is unavailable: %s", error)
+
+    def set_world_offsets(self, spacing):
+        parent = getattr(super(), "set_world_offsets", None)
+        if not callable(parent):
+            raise TypeError("World offsets require a simulation viewer base")
+        result = parent(spacing)
+        if self._picking is not None and hasattr(self._picking, "world_offsets"):
+            self._picking.world_offsets = getattr(self, "world_offsets", None)
+        return result
+
+    def set_visible_worlds(self, worlds):
+        parent = getattr(super(), "set_visible_worlds", None)
+        if not callable(parent):
+            raise TypeError("Visible worlds require a simulation viewer base")
+        result = parent(worlds)
+        if self._picking is not None and hasattr(self._picking, "visible_worlds_mask"):
+            self._picking.visible_worlds_mask = getattr(
+                self, "_visible_worlds_mask", None
+            )
+        return result
+
+    def log_state(self, state):
+        """Cache simulation state for picking, then use the framework logger."""
+        self._last_state = state
+        if self._picking is not None and self._picking.is_picking():
+            self._picking._apply_picking_force(state)
+        parent = getattr(super(), "log_state", None)
+        if callable(parent):
+            parent(state)
 
     def _get_or_create_material(self, color, material) -> int:
         color_key = tuple(round(float(v), 2) for v in color[:3])
@@ -305,11 +402,23 @@ class PathTracingViewerBackend:
         scales_np = _broadcast_rows(
             _as_numpy(scales, np.float32), len(xforms_np), 3, (1.0, 1.0, 1.0)
         )
-        matrices = np.empty((len(xforms_np), 4, 4), dtype=np.float32)
-        for index, (xform, scale) in enumerate(zip(xforms_np, scales_np)):
-            local = build_transform_matrix(xform[:3], xform[3:7], scale)
-            matrices[index] = self._global_transform @ local
-        return matrices
+        count = len(xforms_np)
+        matrices = np.zeros((count, 4, 4), dtype=np.float32)
+        matrices[:, 3, 3] = 1.0
+        matrices[:, :3, 3] = xforms_np[:, :3]
+
+        x, y, z, w = (xforms_np[:, index] for index in range(3, 7))
+        matrices[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
+        matrices[:, 0, 1] = 2.0 * (x * y - w * z)
+        matrices[:, 0, 2] = 2.0 * (x * z + w * y)
+        matrices[:, 1, 0] = 2.0 * (x * y + w * z)
+        matrices[:, 1, 1] = 1.0 - 2.0 * (x * x + z * z)
+        matrices[:, 1, 2] = 2.0 * (y * z - w * x)
+        matrices[:, 2, 0] = 2.0 * (x * z - w * y)
+        matrices[:, 2, 1] = 2.0 * (y * z + w * x)
+        matrices[:, 2, 2] = 1.0 - 2.0 * (x * x + y * y)
+        matrices[:, :3, :3] *= scales_np[:, None, :]
+        return np.matmul(self._global_transform[None, :, :], matrices)
 
     def log_instances(
         self,
@@ -347,6 +456,10 @@ class PathTracingViewerBackend:
             self._scene_dirty = True
 
         while len(batch.instance_ids) < count:
+            if len(self._api.scene._instances) >= self._max_instances:
+                raise RuntimeError(
+                    f"Viewer instance capacity exceeded ({self._max_instances})"
+                )
             batch.instance_ids.append(self._api.create_instance(batch.mesh_id))
             self._scene_dirty = True
 
@@ -384,6 +497,22 @@ class PathTracingViewerBackend:
     ):
         self.log_instances(name, mesh, xforms, scales, colors, materials, hidden=hidden)
 
+    def update_instance_transforms(self, name: str, xforms, scales=None):
+        """Update an existing batch from Warp arrays without resupplying materials."""
+        qualified_name = self._qualify_name(name)
+        batch = self._batches.get(qualified_name)
+        if batch is None:
+            raise KeyError(f"Unknown instance batch {qualified_name!r}")
+        self.log_instances(
+            qualified_name,
+            batch.mesh_name,
+            xforms,
+            scales,
+            None,
+            None,
+            hidden=False,
+        )
+
     def log_lines(
         self, name, starts, ends, colors, width: float = 0.01, hidden: bool = False
     ):
@@ -401,8 +530,10 @@ class PathTracingViewerBackend:
         del name, value, clear, smoothing
 
     def apply_forces(self, state):
-        """No-op hook; an integration wrapper may add interactive picking."""
-        del state
+        """Apply the optional Newton picking force to a simulation state."""
+        self._last_state = state
+        if self._picking is not None:
+            self._picking._apply_picking_force(state)
 
     def _flush_scene(self):
         if self._scene_dirty:
@@ -465,6 +596,8 @@ class PathTracingViewerBackend:
         else:
             self._presenter.render_once(self._render_to_mapped_buffer)
         self.frame_index += 1
+        self._update_fps()
+        self._record_frame()
         if self.num_frames is not None and self.frame_index >= self.num_frames:
             self.close()
 
@@ -491,6 +624,13 @@ class PathTracingViewerBackend:
 
     def close(self):
         self._closed = True
+        self.stop_recording()
+        if self._imgui_impl is not None:
+            try:
+                self._imgui_impl.shutdown()
+            except (AttributeError, RuntimeError):
+                pass
+            self._imgui_impl = None
         self._api.close()
         if self._presenter is not None:
             self._presenter.close()
@@ -578,11 +718,39 @@ class PathTracingViewerBackend:
             self._sync_camera()
 
     def on_key_press(self, symbol, _modifiers):
-        if (
-            self._presenter is not None
-            and symbol == self._presenter.pyglet.window.key.SPACE
-        ):
+        if self._presenter is None:
+            return
+        key = self._presenter.pyglet.window.key
+        if self._ui_wants_keyboard():
+            return
+        if symbol == key.SPACE:
             self.paused = not self.paused
+        elif symbol == key.ESCAPE:
+            self.close()
+            return
+        elif symbol == key.R:
+            if not self.is_recording():
+                self.start_recording()
+        elif symbol == key.T:
+            self.stop_recording()
+        else:
+            debug_keys = {
+                key._1: 2,  # Depth
+                key._2: 3,  # Motion
+                key._3: 4,  # Normals
+                key._4: 6,  # Diffuse
+                key._5: 7,  # Specular
+                key._6: 1,  # Noisy radiance
+                key._7: 8,  # Specular hit distance
+                key._8: 5,  # Roughness (OptiX-specific extra)
+            }
+            if symbol in debug_keys:
+                mode = debug_keys[symbol]
+                self.set_debug_buffer_mode(
+                    0 if self._debug_buffer_mode == mode else mode
+                )
+            elif symbol in (key._0, key.BACKSPACE):
+                self.set_debug_buffer_mode(0)
         self._keys_down.add(symbol)
 
     def on_key_release(self, symbol, _modifiers):
@@ -591,7 +759,10 @@ class PathTracingViewerBackend:
     def on_mouse_drag(self, _x, _y, dx, dy, buttons, _modifiers):
         if self._presenter is None:
             return
-        if buttons & self._presenter.pyglet.window.mouse.LEFT:
+        if self._ui_wants_mouse():
+            return
+        mouse = self._presenter.pyglet.window.mouse
+        if buttons & mouse.LEFT:
             self._camera_yaw -= float(dx) * self._look_sensitivity
             self._camera_pitch = float(
                 np.clip(
@@ -600,18 +771,336 @@ class PathTracingViewerBackend:
             )
             self._user_camera_control = True
             self._sync_camera()
+        if (
+            buttons & mouse.RIGHT
+            and self.picking_enabled
+            and self._picking is not None
+            and self._picking.is_picking()
+        ):
+            origin, direction = self._get_ray_from_mouse(_x, _y)
+            self._picking.update(wp.vec3(*origin), wp.vec3(*direction))
+
+    def on_mouse_press(self, x, y, button, _modifiers):
+        self._mouse_buttons.add(button)
+        if self._presenter is None or self._ui_wants_mouse():
+            return
+        mouse = self._presenter.pyglet.window.mouse
+        if (
+            button == mouse.RIGHT
+            and self.picking_enabled
+            and self._picking is not None
+            and self._last_state is not None
+        ):
+            origin, direction = self._get_ray_from_mouse(x, y)
+            self._picking.pick(self._last_state, wp.vec3(*origin), wp.vec3(*direction))
+
+    def on_mouse_release(self, _x, _y, button, _modifiers):
+        self._mouse_buttons.discard(button)
+        if self._presenter is None:
+            return
+        if (
+            button == self._presenter.pyglet.window.mouse.RIGHT
+            and self._picking is not None
+        ):
+            self._picking.release()
+
+    def on_mouse_motion(self, x, y, _dx, _dy):
+        self._mouse_x = float(x)
+        self._mouse_y = float(y)
 
     def on_mouse_scroll(self, _x, _y, _scroll_x, scroll_y):
+        if self._ui_wants_mouse():
+            return
         self._camera_fov = float(
             np.clip(self._camera_fov - float(scroll_y) * 2.0, 10.0, 120.0)
         )
         self._user_camera_control = True
         self._sync_camera()
 
+    def _get_ray_from_mouse(self, x: float, y: float) -> tuple[np.ndarray, np.ndarray]:
+        """Construct a world-space picking ray in the physics coordinate system."""
+        width = max(1.0, float(self.width))
+        height = max(1.0, float(self.height))
+        ndc_x = 2.0 * float(x) / width - 1.0
+        ndc_y = 2.0 * float(y) / height - 1.0
+
+        front = self._physics_camera_front()
+        front /= max(float(np.linalg.norm(front)), 1.0e-8)
+        world_up = np.zeros(3, dtype=np.float32)
+        world_up[self._up_axis] = 1.0
+        right = np.cross(front, world_up)
+        right /= max(float(np.linalg.norm(right)), 1.0e-8)
+        camera_up = np.cross(right, front)
+        camera_up /= max(float(np.linalg.norm(camera_up)), 1.0e-8)
+
+        half_height = math.tan(math.radians(self._camera_fov) * 0.5)
+        direction = (
+            front
+            + right * ndc_x * (width / height) * half_height
+            + camera_up * ndc_y * half_height
+        )
+        direction /= max(float(np.linalg.norm(direction)), 1.0e-8)
+        return self._camera_position.copy(), direction.astype(np.float32)
+
     def _on_resize(self, width: int, height: int):
         self.width = int(width)
         self.height = int(height)
         self._api.resize(self.width, self.height)
+
+    def _update_fps(self):
+        self._fps_frame_count += 1
+        now = time.perf_counter()
+        elapsed = now - self._fps_window_start
+        if elapsed >= 1.0:
+            self._current_fps = self._fps_frame_count / elapsed
+            self._fps_frame_count = 0
+            self._fps_window_start = now
+
+    def get_fps(self) -> float:
+        return float(self._current_fps)
+
+    def register_ui_callback(self, callback: Callable, position: str = "options"):
+        """Register an ImGui callback, matching the hybrid viewer API."""
+        self._ui_callbacks.append((callback, str(position)))
+
+    def enable_imgui(self, enabled: bool = True):
+        self._imgui_enabled = bool(enabled)
+        if self._imgui_enabled and self._imgui_impl is None:
+            self._init_imgui()
+
+    def _init_imgui(self):
+        if self._presenter is None or self._imgui_impl is not None:
+            return
+        try:
+            from imgui_bundle import imgui
+            from imgui_bundle.python_backends import pyglet_backend
+        except ImportError:
+            logger.info(
+                "ImGui overlay unavailable; install warp_optix[ui] to enable it"
+            )
+            return
+
+        try:
+            imgui.create_context()
+            self._imgui_impl = pyglet_backend.create_renderer(self._presenter.window)
+            self._imgui = imgui
+            imgui.style_colors_dark()
+        except (AttributeError, RuntimeError) as error:
+            logger.warning("Failed to initialize ImGui overlay: %s", error)
+            self._imgui = None
+            self._imgui_impl = None
+
+    def _ui_wants_mouse(self) -> bool:
+        if self._imgui is None or self._imgui_impl is None:
+            return False
+        try:
+            return bool(self._imgui.get_io().want_capture_mouse)
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _ui_wants_keyboard(self) -> bool:
+        if self._imgui is None or self._imgui_impl is None:
+            return False
+        try:
+            return bool(self._imgui.get_io().want_capture_keyboard)
+        except (AttributeError, RuntimeError):
+            return False
+
+    def _draw_imgui(self):
+        if not self._imgui_enabled or self._imgui_impl is None:
+            return
+        imgui = self._imgui
+        try:
+            self._imgui_impl.process_inputs()
+            imgui.new_frame()
+            imgui.set_next_window_pos((10.0, 10.0), imgui.Cond_.appearing)
+            imgui.set_next_window_size((310.0, 0.0), imgui.Cond_.appearing)
+            visible = imgui.begin("OptiX Path Tracing Viewer")
+            if isinstance(visible, tuple):
+                visible = visible[0]
+            if visible:
+                imgui.text(f"FPS: {self._current_fps:.1f}")
+                imgui.text(f"Meshes: {len(self._mesh_ids)}")
+                imgui.text(
+                    f"Instances: {sum(len(batch.instance_ids) for batch in self._batches.values())}"
+                )
+                imgui.text(f"Materials: {len(self._material_ids)}")
+                imgui.text(
+                    "DLSS RR: active" if self._api.dlss_enabled else "DLSS RR: inactive"
+                )
+
+                changed, paused = imgui.checkbox("Pause", self.paused)
+                if changed:
+                    self.paused = paused
+                if hasattr(self, "picking_enabled"):
+                    changed, picking = imgui.checkbox(
+                        "Enable Picking", self.picking_enabled
+                    )
+                    if changed:
+                        self.picking_enabled = picking
+                        if not picking and self._picking is not None:
+                            self._picking.release()
+
+                visualization_flags = (
+                    ("show_joints", "Show Joints"),
+                    ("show_contacts", "Show Contacts"),
+                    ("show_particles", "Show Particles"),
+                    ("show_springs", "Show Springs"),
+                    ("show_com", "Show Center of Mass"),
+                    ("show_collision", "Show Collision"),
+                    ("show_visual", "Show Visual"),
+                )
+                for attribute, label in visualization_flags:
+                    if hasattr(self, attribute):
+                        changed, value = imgui.checkbox(
+                            label, bool(getattr(self, attribute))
+                        )
+                        if changed:
+                            setattr(self, attribute, value)
+
+                if self.model is not None:
+                    if hasattr(self.model, "world_count"):
+                        imgui.text(f"Worlds: {self.model.world_count}")
+                    elif hasattr(self.model, "num_worlds"):
+                        imgui.text(f"Worlds: {self.model.num_worlds}")
+
+                mode_names = [
+                    "Final",
+                    "Radiance",
+                    "Depth",
+                    "Motion",
+                    "Normal",
+                    "Roughness",
+                    "Diffuse",
+                    "Specular",
+                    "Specular Hit Distance",
+                ]
+                changed, mode = imgui.combo(
+                    "Debug Buffer", self._debug_buffer_mode, mode_names
+                )
+                if changed:
+                    self.set_debug_buffer_mode(mode)
+
+                changed, fov = imgui.slider_float("FOV", self._camera_fov, 20.0, 120.0)
+                if changed:
+                    self._camera_fov = float(fov)
+                    self._sync_camera()
+                imgui.text(
+                    "Camera: "
+                    f"({self._camera_position[0]:.2f}, "
+                    f"{self._camera_position[1]:.2f}, "
+                    f"{self._camera_position[2]:.2f})"
+                )
+                imgui.text(
+                    f"Yaw {self._camera_yaw:.1f}  Pitch {self._camera_pitch:.1f}"
+                )
+
+                if self.is_recording():
+                    imgui.text(f"Recording: {self._recording_path}")
+                    if imgui.button("Stop Recording"):
+                        self.stop_recording()
+                elif imgui.button("Start Recording"):
+                    self.start_recording()
+
+                for callback, _position in self._ui_callbacks:
+                    callback(imgui)
+            imgui.end()
+            imgui.render()
+            self._imgui_impl.render(imgui.get_draw_data())
+        except (AttributeError, RuntimeError, TypeError) as error:
+            logger.warning("Disabling ImGui overlay after rendering error: %s", error)
+            self._imgui_enabled = False
+
+    def start_recording(
+        self,
+        output_path: str | None = None,
+        fps: int | None = None,
+        bitrate_mbps: int | None = None,
+        frame_skip: int | None = None,
+    ) -> str:
+        """Start MP4 recording using the current tonemapped output."""
+        if self._recording_writer is not None:
+            return str(self._recording_path)
+        writer_factory = self._recording_writer_factory
+        if writer_factory is None:
+            try:
+                import imageio.v2 as imageio
+            except ImportError as error:
+                raise RuntimeError(
+                    "Recording requires the warp_optix[pathtracing] dependencies"
+                ) from error
+            writer_factory = imageio.get_writer
+
+        actual_fps = max(1, int(fps or self.recording_fps))
+        actual_bitrate = max(1, int(bitrate_mbps or self.recording_bitrate_mbps))
+        self.recording_frame_skip = max(1, int(frame_skip or self.recording_frame_skip))
+        path = Path(
+            output_path
+            or self.recording_output_path
+            or time.strftime("pathtracing_recording_%Y%m%d_%H%M%S.mp4")
+        ).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self._recording_writer = writer_factory(
+                str(path),
+                fps=actual_fps,
+                codec="libx264",
+                bitrate=f"{actual_bitrate}M",
+                macro_block_size=1,
+            )
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            raise RuntimeError(
+                "Unable to start video recording; install warp_optix[recording]"
+            ) from error
+        self._recording_path = path.resolve()
+        self._recording_frame_index = 0
+        logger.info("Recording started: %s", self._recording_path)
+        return str(self._recording_path)
+
+    def _record_frame(self):
+        if self._recording_writer is None:
+            return
+        frame_number = self._recording_frame_index
+        self._recording_frame_index += 1
+        if frame_number % self.recording_frame_skip != 0:
+            return
+        frame = self._api.get_frame_uint8()
+        if frame.shape[-1] == 4:
+            frame = frame[..., :3]
+        self._recording_writer.append_data(np.ascontiguousarray(frame))
+
+    def stop_recording(self):
+        if self._recording_writer is None:
+            return
+        writer = self._recording_writer
+        self._recording_writer = None
+        try:
+            writer.close()
+        finally:
+            logger.info("Recording stopped: %s", self._recording_path)
+
+    def is_recording(self) -> bool:
+        return self._recording_writer is not None
+
+    def get_instance_transform_gl_buffer(self) -> int:
+        """Compatibility API; OptiX uses CUDA arrays instead of a transform VBO."""
+        return 0
+
+    def get_instance_transform_capacity(self) -> int:
+        return self._max_instances
+
+    def notify_transforms_updated(self, count: int = -1):
+        """Compatibility hook for the old bridge-specific transform VBO API."""
+        del count
+        if not self._warned_transform_vbo:
+            logger.warning(
+                "No transform GL buffer is exposed; update Warp transforms with log_instances()"
+            )
+            self._warned_transform_vbo = True
+
+    def is_gpu_transform_available(self) -> bool:
+        """The old Vulkan-backed GL transform buffer is not used by this backend."""
+        return False
 
     def set_sun_direction(self, x: float, y: float, z: float, intensity: float = 1.0):
         self._ensure_initialized()
@@ -796,6 +1285,8 @@ class PathTracingViewerBackend:
         self._api.set_environment_color(color)
 
     def set_debug_buffer_mode(self, mode: int):
+        mode = int(np.clip(mode, 0, 8))
+        self._debug_buffer_mode = mode
         self._api.set_debug_buffer_mode(mode)
 
 

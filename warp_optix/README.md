@@ -63,6 +63,26 @@ class ViewerOptix(PathTracingViewerBackend, ViewerBase):
     pass
 ```
 
+The optional interactive features are installed separately:
+
+```bash
+pip install -e "warp_optix[pathtracing,ui,recording]"
+```
+
+The viewer follows the earlier hybrid viewer controls:
+
+- WASD or arrow keys move the camera; Q/E move along the model up axis.
+- Left drag looks around and the scroll wheel changes field of view.
+- Right click and drag picks Newton bodies when Newton is installed.
+- Space pauses, Escape closes, and 0-8 select path-tracing debug buffers.
+- R starts MP4 recording and T stops it.
+
+`register_ui_callback()` adds application controls to the optional ImGui panel.
+The panel also exposes rendering statistics, DLSS state, visualization flags,
+camera state, debug buffers, picking, pause, and recording controls. Picking is
+loaded dynamically from Newton when `set_model()` is called, so importing and
+using the standalone viewer does not add a Newton dependency.
+
 The backend accepts Warp arrays for meshes, transforms, colors, and material
 parameters. It handles Newton's X/Y/Z up-axis conversion, mesh and instance
 caching, visibility updates, and roughness/metallic PBR materials. Its default
@@ -75,6 +95,14 @@ The framework-neutral class can also be driven directly through
 glTF scenes remain available through `PathTracerAPI`; the framework `log_mesh`
 adapter currently maps vertex colors and PBR values but does not ingest its
 optional texture argument.
+
+The old hybrid viewer's Vulkan-backed OpenGL transform VBO was specific to its
+C# bridge. Compatibility queries remain available, but return unavailable;
+dynamic Newton transforms instead use Warp arrays through `log_instances()`
+or `update_instance_transforms()` and trigger an OptiX TLAS refit. Transform
+matrix construction is vectorized before the retained OptiX instance buffer is
+updated. Window presentation uses CUDA/OpenGL interop with Warp's copy fallback
+when direct registration is unavailable.
 
 ## Layout
 
