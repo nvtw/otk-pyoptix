@@ -29,11 +29,15 @@ class OptixGLInteropViewer:
     def _create_texture_2d_compat(pyglet_module, gl_module, width: int, height: int):
         try:
             # pyglet 2.x style (legacy rectangle arg still accepted on some versions)
-            return pyglet_module.image.Texture.create(width=width, height=height, rectangle=False)
+            return pyglet_module.image.Texture.create(
+                width=width, height=height, rectangle=False
+            )
         except TypeError:
             try:
                 # pyglet compatibility path used by the working viewer implementation
-                return pyglet_module.image.Texture.create(width=width, height=height, target=gl_module.GL_TEXTURE_2D)
+                return pyglet_module.image.Texture.create(
+                    width=width, height=height, target=gl_module.GL_TEXTURE_2D
+                )
             except TypeError:
                 # fallback for older pyglet variants
                 return pyglet_module.image.Texture.create(width=width, height=height)
@@ -47,8 +51,8 @@ class OptixGLInteropViewer:
         fps: int = 60,
         on_resize: Callable[[int, int], None] | None = None,
     ):
-        import pyglet  # noqa: PLC0415
-        from pyglet import gl  # noqa: PLC0415
+        import pyglet
+        from pyglet import gl
 
         self.width = width
         self.height = height
@@ -58,11 +62,16 @@ class OptixGLInteropViewer:
         self.frame_index = 0
         self.start_time = time.perf_counter()
         self.max_frames = 0
+        self.closed = False
         self._render_callback: Callable[[wp.array, int, float], None] | None = None
         self._on_resize_callback = on_resize
 
-        self.window = pyglet.window.Window(width=width, height=height, caption=title, vsync=False, resizable=True)
-        self.window.push_handlers(on_draw=self._on_draw, on_close=self._on_close, on_resize=self._on_resize)
+        self.window = pyglet.window.Window(
+            width=width, height=height, caption=title, vsync=False, resizable=True
+        )
+        self.window.push_handlers(
+            on_draw=self._on_draw, on_close=self._on_close, on_resize=self._on_resize
+        )
         self._recreate_gl_resources()
         pyglet.clock.schedule_interval(self._update, 1.0 / float(max(1, fps)))
 
@@ -74,7 +83,9 @@ class OptixGLInteropViewer:
         if hasattr(self, "pbo") and self.pbo is not None:
             gl.glDeleteBuffers(1, self.pbo)
 
-        self.texture = self._create_texture_2d_compat(self.pyglet, gl, self.width, self.height)
+        self.texture = self._create_texture_2d_compat(
+            self.pyglet, gl, self.width, self.height
+        )
         self.texture.min_filter = gl.GL_NEAREST
         self.texture.mag_filter = gl.GL_NEAREST
         self.sprite = self.pyglet.sprite.Sprite(self.texture, x=0, y=0)
@@ -82,24 +93,54 @@ class OptixGLInteropViewer:
         self.pbo = gl.GLuint()
         gl.glGenBuffers(1, self.pbo)
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, self.pbo)
-        gl.glBufferData(gl.GL_PIXEL_UNPACK_BUFFER, self.width * self.height * 4, None, gl.GL_DYNAMIC_DRAW)
+        gl.glBufferData(
+            gl.GL_PIXEL_UNPACK_BUFFER,
+            self.width * self.height * 4,
+            None,
+            gl.GL_DYNAMIC_DRAW,
+        )
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
 
         self.cuda_gl = wp.RegisteredGLBuffer(
-            int(self.pbo.value), device=self.device, flags=wp.RegisteredGLBuffer.WRITE_DISCARD, fallback_to_copy=False
+            int(self.pbo.value),
+            device=self.device,
+            flags=wp.RegisteredGLBuffer.WRITE_DISCARD,
+            fallback_to_copy=False,
         )
         gl.glViewport(0, 0, self.width, self.height)
 
-    def run(self, render_callback: Callable[[wp.array, int, float], None], max_frames: int = 0):
+    def run(
+        self,
+        render_callback: Callable[[wp.array, int, float], None],
+        max_frames: int = 0,
+    ):
         self._render_callback = render_callback
         self.max_frames = max_frames
         self.pyglet.app.run()
 
+    def render_once(
+        self, render_callback: Callable[[wp.array, int, float], None] | None = None
+    ):
+        """Render and present one frame without entering pyglet's event loop."""
+        if self.closed:
+            return
+        if render_callback is not None:
+            self._render_callback = render_callback
+        self.window.dispatch_events()
+        if self.closed:
+            return
+        self._render_frame()
+
     def _update(self, _dt):
+        self._render_frame()
+
+    def _render_frame(self):
         if self._render_callback is None:
             return
         with wp.ScopedDevice(self.device):
-            mapped = self.cuda_gl.map(dtype=wp.uint32, shape=(self.width * self.height,))
+            mapped = self.cuda_gl.map(
+                dtype=wp.uint32, shape=(self.width * self.height,)
+            )
             elapsed = time.perf_counter() - self.start_time
             self._render_callback(mapped, self.frame_index, elapsed)
             wp.synchronize_device(self.device)
@@ -136,8 +177,26 @@ class OptixGLInteropViewer:
         self.sprite.draw()
 
     def _on_close(self):
-        self.gl.glDeleteBuffers(1, self.pbo)
+        if self.closed:
+            return
+        self.closed = True
+        if self.cuda_gl is not None:
+            self.cuda_gl = None
+        if self.pbo is not None:
+            self.gl.glDeleteBuffers(1, self.pbo)
+            self.pbo = None
+        self.pyglet.app.exit()
+
+    def close(self):
+        """Release presentation resources and close the window."""
+        if self.closed:
+            return
+        self._on_close()
         self.window.close()
+
+    def is_running(self) -> bool:
+        """Return whether the presentation window remains open."""
+        return not self.closed and not self.window.has_exit
 
     def _on_resize(self, width: int, height: int):
         if width <= 0 or height <= 0:

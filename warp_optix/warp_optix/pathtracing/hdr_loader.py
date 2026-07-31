@@ -8,6 +8,8 @@
 
 """Load Radiance RGBE (.hdr) files with reference-compatible behavior."""
 
+from __future__ import annotations
+
 import re
 from pathlib import Path
 

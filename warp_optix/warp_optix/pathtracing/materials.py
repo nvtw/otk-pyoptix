@@ -18,6 +18,8 @@ Material management for path tracing viewer.
 Provides PBR material creation and GPU buffer management.
 """
 
+from __future__ import annotations
+
 import numpy as np
 
 import warp as wp

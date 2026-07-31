@@ -29,7 +29,7 @@ import numpy as np
 
 import warp as wp
 import warp_optix as woptix
-from pathtracing import PathTracerAPI
+from warp_optix.pathtracing import PathTracerAPI
 
 
 @wp.kernel

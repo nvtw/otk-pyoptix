@@ -7,8 +7,12 @@ License: Apache-2.0
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
 Requires-Dist: warp-lang>=1.15
-Requires-Dist: optix
+Requires-Dist: pyoptix>=9.1
 Requires-Dist: numpy
+Provides-Extra: pathtracing
+Requires-Dist: imageio>=2.31; extra == "pathtracing"
+Requires-Dist: Pillow>=9; extra == "pathtracing"
+Requires-Dist: pyglet<3,>=2.1; extra == "pathtracing"
 
 # warp_optix
 
@@ -25,7 +29,7 @@ import warp_optix as wo  # registers OptiX builtins, headers, and entry-point sp
 Once imported, you can decorate kernels with the OptiX entry-point kinds:
 
 ```python
-@wp.kernel(entry_point=wo.RAYGEN)
+@wo.optix_kernel(wo.OptixKernelType.RAYGEN)
 def raygen_program():
     idx = wo.optix_get_launch_index()
     ...
@@ -45,11 +49,176 @@ The `optix` Python module (the pyoptix C++ binding) must also be installed:
 pip install -e optix/
 ```
 
+`warp_optix` uses Warp's public addon hooks when they are available. With
+vanilla `warp-lang>=1.15`, it falls back to a version-checked private API
+adapter for builtin registration, OptiX entry-point generation, and PTX
+compilation. The fallback changes only the active Python process; it does not
+patch or overwrite the installed Warp package.
+
+## Path-tracing viewer
+
+The example path tracer is also installed as `warp_optix.pathtracing`. Install
+its windowing and image extras with:
+
+```bash
+pip install -e "warp_optix[pathtracing]"
+```
+
+`PathTracingViewer` is a standalone OptiX path-tracing viewer with DLSS Ray
+Reconstruction. `PathTracingViewerBackend` exposes a renderer-facing `log_*`
+API without importing Newton or any other simulation framework. A framework
+can add its own inheritance in a thin wrapper; with current Newton development
+branches that wrapper is:
+
+```python
+from newton.viewer import ViewerBase
+from warp_optix.pathtracing import PathTracingViewerBackend
+
+
+class ViewerOptix(PathTracingViewerBackend, ViewerBase):
+    pass
+```
+
+The backend accepts Warp arrays for meshes, transforms, colors, and material
+parameters. It handles Newton's X/Y/Z up-axis conversion, mesh and instance
+caching, visibility updates, and roughness/metallic PBR materials. Its default
+physical-sky values and sRGB-to-linear color conversion intentionally match
+the earlier hybrid viewer, including the light ground, slight haze, and soft
+horizon used for untextured simulation geometry.
+
+The framework-neutral class can also be driven directly through
+`log_mesh()`, `log_instances()`, `begin_frame()`, and `end_frame()`. Textured
+glTF scenes remain available through `PathTracerAPI`; the framework `log_mesh`
+adapter currently maps vertex colors and PBR values but does not ingest its
+optional texture argument.
+
 ## Layout
 
 - `warp_optix/__init__.py` — public re-exports of the runtime API.
 - `warp_optix/_runtime/` — pyoptix-side runtime helpers (formerly `warp/_src/render/optix_*.py`).
 - `warp_optix/_builtins.py` — OptiX `add_builtin(...)` registrations.
 - `warp_optix/_codegen.py` — `OptixKernelType` enum and codegen entry-point specs.
+- `warp_optix/_compat.py` — vanilla Warp private-API fallback.
 - `warp_optix/_native/include/warp_optix_builtins.h` — device-side C++ wrappers.
 - `warp_optix/_addon.py` — runs on import; wires the above into warp.
+
+## Custom primitives
+
+Custom geometry uses OptiX AABBs plus a Warp intersection program. The runtime
+helper accepts either `(N, 6)` AABBs or `(N, 2, 3)` min/max pairs:
+
+```python
+gas, gas_buffers = wo.create_custom_primitive_gas(
+    optix,
+    context,
+    aabbs,
+    device="cuda",
+)
+
+pipeline, sbt, pipeline_resources = wo.create_pipeline_and_sbt(
+    optix,
+    context,
+    ptx,
+    raygen_program,
+    miss_program,
+    closest_hit_program,
+    num_payload_values=2,
+    num_attribute_values=3,
+    device="cuda",
+    intersection_entry=intersection_program,
+)
+```
+
+See `examples_warp/example_warp_optix_motion_blur.py` for temporal sampling
+across a two-key triangle deformation.
+
+Inside an `INTERSECTION` kernel, use `wp.optix_get_object_ray_origin()`,
+`wp.optix_get_object_ray_direction()`, and `wp.optix_report_intersection()`.
+The latter accepts a hit distance, hit kind, and zero to eight `wp.uint32`
+attributes. Closest-hit and any-hit kernels can retrieve them with
+`wp.optix_get_attribute_0()` through `wp.optix_get_attribute_7()`.
+
+Keep the dictionaries returned by both helpers alive for as long as the GAS,
+pipeline, and SBT are in use; they own the corresponding device allocations.
+
+For mixed geometry, build one GAS per geometry type, place them under an IAS
+with `create_instance_acceleration_structure()`, and pass one `HitKernel` per
+SBT record through `hit_groups`. The pipeline helper infers combined primitive
+flags and stores all hit records contiguously. See
+`examples_warp/example_warp_optix_mixed_geometry.py` for triangle, native curve,
+and analytical custom geometry sharing one pipeline.
+
+`SbtKernelManager` is the single low-level SBT builder used by the convenience
+pipeline helper. It keeps records header-only, accepts decorated Warp kernels
+or explicit entry names, and returns opaque hit-group handles. Resolve a handle
+with `get_sbt_offset()` only when assigning an OptiX instance; users do not need
+to pack headers or calculate record strides.
+
+Warp kernels also expose the common OptiX hit context directly: ray time,
+flags and visibility mask; instance ID/index; primitive, SBT GAS and GAS
+handles; front/back-face tests; and point/vector/normal transforms in both
+directions. The names follow Warp's existing snake-case convention, for
+example `wp.optix_get_instance_index()` and
+`wp.optix_transform_point_from_world_to_object_space()`.
+
+Triangle any-hit and closest-hit kernels can call
+`wp.optix_get_triangle_vertex_data()`. It returns a `wp.mat33` whose rows are
+the three object-space vertices of the current triangle; this current-hit form
+does not require random vertex access or extra launch-parameter arrays.
+
+Acceleration-structure builders accept `compact=True` for static data and a
+normal OptiX `build_flags` value for advanced use. For dynamic geometry, build
+with `BUILD_FLAG_ALLOW_UPDATE`, update the retained Warp buffer, then refit in
+place:
+
+```python
+gas, gas_resources = wo.create_triangle_gas(
+    optix,
+    context,
+    vertices,
+    indices,
+    "cuda",
+    build_flags=optix.BUILD_FLAG_ALLOW_UPDATE,
+)
+gas_resources["d_vertices"].assign(updated_vertices)
+gas = wo.refit_acceleration_structure(optix, context, gas_resources)
+```
+
+Compaction and update are deliberately mutually exclusive in these helpers:
+compaction targets immutable geometry, while update retains the original output
+capacity required by OptiX refits.
+
+For vertex motion blur, pass triangle vertices as `(K, N, 3)` motion keys and
+enable motion on the pipeline:
+
+```python
+gas, gas_resources = wo.create_triangle_gas(
+    optix, context, vertex_keys, indices, "cuda", motion_time_range=(0.0, 1.0)
+)
+pipeline, sbt, pipeline_resources = wo.create_pipeline_and_sbt(
+    ...,
+    uses_motion_blur=True,
+)
+```
+
+`create_curve_gas()` builds native round linear, B-spline, Catmull-Rom, and
+Bezier curves. Associate its hit record with OptiX's built-in intersector by
+setting `HitKernel(builtin_intersection_type=curve_type)`. Curve shaders can
+read the current parameter with `wp.optix_get_curve_parameter()`. Curve vertex
+and width arrays may also contain motion keys.
+
+Exception, direct-callable, and continuation-callable programs use the same
+`optix_kernel()` decorator as other stages. Pass them through
+`exception_entry`, `direct_callable_entries`, or
+`continuation_callable_entries` when creating the pipeline. The helper packs
+their SBT records and computes the additional stack requirements. Callable
+handles resolve through `SbtKernelManager.get_callable_index()`.
+
+Callables intentionally use a no-argument, void interface:
+`wp.optix_direct_call(index)` or `wp.optix_continuation_call(index)`. They can
+read launch parameters and write referenced Warp arrays. Arbitrary typed
+callable arguments and returns are outside Warp's current external entry ABI
+and are therefore not exposed. Exception programs can use
+`wp.optix_get_exception_code()` and detail accessors; user code can raise an
+exception with `wp.optix_throw_exception()` and up to eight `wp.uint32`
+details.

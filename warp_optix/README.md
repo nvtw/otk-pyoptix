@@ -39,6 +39,43 @@ adapter for builtin registration, OptiX entry-point generation, and PTX
 compilation. The fallback changes only the active Python process; it does not
 patch or overwrite the installed Warp package.
 
+## Path-tracing viewer
+
+The example path tracer is also installed as `warp_optix.pathtracing`. Install
+its windowing and image extras with:
+
+```bash
+pip install -e "warp_optix[pathtracing]"
+```
+
+`PathTracingViewer` is a standalone OptiX path-tracing viewer with DLSS Ray
+Reconstruction. `PathTracingViewerBackend` exposes a renderer-facing `log_*`
+API without importing Newton or any other simulation framework. A framework
+can add its own inheritance in a thin wrapper; with current Newton development
+branches that wrapper is:
+
+```python
+from newton.viewer import ViewerBase
+from warp_optix.pathtracing import PathTracingViewerBackend
+
+
+class ViewerOptix(PathTracingViewerBackend, ViewerBase):
+    pass
+```
+
+The backend accepts Warp arrays for meshes, transforms, colors, and material
+parameters. It handles Newton's X/Y/Z up-axis conversion, mesh and instance
+caching, visibility updates, and roughness/metallic PBR materials. Its default
+physical-sky values and sRGB-to-linear color conversion intentionally match
+the earlier hybrid viewer, including the light ground, slight haze, and soft
+horizon used for untextured simulation geometry.
+
+The framework-neutral class can also be driven directly through
+`log_mesh()`, `log_instances()`, `begin_frame()`, and `end_frame()`. Textured
+glTF scenes remain available through `PathTracerAPI`; the framework `log_mesh`
+adapter currently maps vertex colors and PBR values but does not ingest its
+optional texture argument.
+
 ## Layout
 
 - `warp_optix/__init__.py` — public re-exports of the runtime API.

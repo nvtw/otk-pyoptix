@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from ._compat import _find_cuda_include_dir
 
 _REGISTERED = False
 
@@ -15,17 +16,31 @@ def _addon_include_dirs() -> list[str]:
     here = Path(__file__).resolve().parent
     include_dirs = [str(here / "_native" / "include")]
     try:
-        import optix  # noqa: PLC0415
+        import optix
 
-        include_dirs.append(optix.get_optix_include_dir())
-    except Exception:
+        optix_include_dir = optix.get_optix_include_dir()
+    except (ImportError, AttributeError, OSError):
         # otk-pyoptix may be imported before its extension package is available.
-        pass
+        optix_include_dir = None
+    if optix_include_dir is not None:
+        include_dirs.append(optix_include_dir)
+    if cuda_include_dir := _find_cuda_include_dir():
+        include_dirs.append(str(cuda_include_dir))
     return include_dirs
 
 
 def _addon_cuda_preamble() -> str:
-    return '#include "warp_optix_builtins.h"\n'
+    # Warp's generated source defines function-like ``float`` and ``int``
+    # macros before injecting addon preambles. CUDA's half headers declare
+    # conversion operators with those names, so suspend the macros while the
+    # OptiX headers are parsed and restore them for Warp-generated code.
+    return (
+        "#undef float\n"
+        "#undef int\n"
+        '#include "warp_optix_builtins.h"\n'
+        "#define float(x) cast_float(x)\n"
+        "#define int(x) cast_int(x)\n"
+    )
 
 
 def _addon_build_dependencies() -> list[str]:
@@ -76,6 +91,6 @@ def register_with_warp() -> None:
         return
     _REGISTERED = True
 
-    from warp_optix._builtins import register_addon_builtins  # noqa: PLC0415
+    from warp_optix._builtins import register_addon_builtins
 
     register_addon_builtins()

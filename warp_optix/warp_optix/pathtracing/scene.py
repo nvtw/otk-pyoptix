@@ -18,11 +18,13 @@ Scene management for path tracing viewer.
 Handles mesh loading, BLAS/TLAS construction, and instance management.
 """
 
+from __future__ import annotations
+
 import logging
 
 import numpy as np
-
 import warp as wp
+
 from warp_optix._runtime.transform_utils import mat4_to_optix_transform12
 
 from .color_utils import srgb_to_linear_rgb
@@ -100,7 +102,9 @@ def _build_optix_instance_dtype() -> np.dtype:
     ]
     formats = [("f4", (12,)), "u4", "u4", "u4", "u4", "u8"]
     offsets = [0, 48, 52, 56, 60, 64]
-    return np.dtype({"names": names, "formats": formats, "offsets": offsets, "itemsize": 80})
+    return np.dtype(
+        {"names": names, "formats": formats, "offsets": offsets, "itemsize": 80}
+    )
 
 
 class Mesh:
@@ -142,7 +146,9 @@ class Mesh:
         self.material_id = material_id
 
         # Tangents for normal mapping (computed from UVs; used when normalTexIndex >= 0)
-        self.tangents = self._compute_tangents(self.vertices, self.indices, self.normals, self.texcoords)
+        self.tangents = self._compute_tangents(
+            self.vertices, self.indices, self.normals, self.texcoords
+        )
 
         # GPU buffers (created on build)
         self.d_vertices = None
@@ -210,10 +216,14 @@ class Mesh:
         fallback_x = np.tile(np.array([1.0, 0.0, 0.0], dtype=np.float32), (n_verts, 1))
         fallback_y = np.tile(np.array([0.0, 1.0, 0.0], dtype=np.float32), (n_verts, 1))
         use_y = np.abs(n[:, 0]) > 0.9
-        tangent[~good] = np.where(use_y[~good, None], fallback_y[~good], fallback_x[~good])
+        tangent[~good] = np.where(
+            use_y[~good, None], fallback_y[~good], fallback_x[~good]
+        )
 
         cross_nt = np.cross(n, tangent)
-        handedness = np.where(np.sum(cross_nt * tan2, axis=1) < 0.0, -1.0, 1.0).astype(np.float32)
+        handedness = np.where(np.sum(cross_nt * tan2, axis=1) < 0.0, -1.0, 1.0).astype(
+            np.float32
+        )
 
         tangents[:, :3] = tangent
         tangents[:, 3] = handedness
@@ -242,12 +252,24 @@ class Mesh:
 
     def upload_to_gpu(self):
         """Upload mesh data to GPU."""
-        self.d_vertices = wp.array(self.vertices.flatten(), dtype=wp.float32, device="cuda")
-        self.d_indices = wp.array(self.indices.flatten(), dtype=wp.uint32, device="cuda")
-        self.d_normals = wp.array(self.normals.flatten(), dtype=wp.float32, device="cuda")
-        self.d_tangents = wp.array(self.tangents.flatten(), dtype=wp.float32, device="cuda")
-        self.d_texcoords = wp.array(self.texcoords.flatten(), dtype=wp.float32, device="cuda")
-        self.d_texcoords1 = wp.array(self.texcoords1.flatten(), dtype=wp.float32, device="cuda")
+        self.d_vertices = wp.array(
+            self.vertices.flatten(), dtype=wp.float32, device="cuda"
+        )
+        self.d_indices = wp.array(
+            self.indices.flatten(), dtype=wp.uint32, device="cuda"
+        )
+        self.d_normals = wp.array(
+            self.normals.flatten(), dtype=wp.float32, device="cuda"
+        )
+        self.d_tangents = wp.array(
+            self.tangents.flatten(), dtype=wp.float32, device="cuda"
+        )
+        self.d_texcoords = wp.array(
+            self.texcoords.flatten(), dtype=wp.float32, device="cuda"
+        )
+        self.d_texcoords1 = wp.array(
+            self.texcoords1.flatten(), dtype=wp.float32, device="cuda"
+        )
 
         # Per-triangle material IDs
         num_triangles = len(self.indices)
@@ -258,7 +280,13 @@ class Mesh:
 class Instance:
     """Represents an instance of a mesh with a transform."""
 
-    def __init__(self, mesh_index: int, transform: np.ndarray = None):
+    def __init__(
+        self,
+        mesh_index: int,
+        transform: np.ndarray = None,
+        material_id: int | None = None,
+        visible: bool = True,
+    ):
         """
         Create an instance.
 
@@ -267,6 +295,8 @@ class Instance:
             transform: 4x4 transformation matrix (identity if None)
         """
         self.mesh_index = mesh_index
+        self.material_id = material_id
+        self.visible = bool(visible)
         if transform is None:
             transform = np.eye(4, dtype=np.float32)
         self.transform = np.ascontiguousarray(transform, dtype=np.float32)
@@ -346,7 +376,11 @@ class Scene:
     @property
     def instance_material_ids_address(self) -> int:
         """Get device address of per-instance material id buffer."""
-        return self._instance_material_ids.ptr if self._instance_material_ids is not None else 0
+        return (
+            self._instance_material_ids.ptr
+            if self._instance_material_ids is not None
+            else 0
+        )
 
     @property
     def compact_materials_address(self) -> int:
@@ -366,7 +400,11 @@ class Scene:
     @property
     def instance_render_prim_ids_address(self) -> int:
         """Get device address of per-instance render primitive id buffer."""
-        return self._instance_render_prim_ids.ptr if self._instance_render_prim_ids is not None else 0
+        return (
+            self._instance_render_prim_ids.ptr
+            if self._instance_render_prim_ids is not None
+            else 0
+        )
 
     @property
     def texture_descs_address(self) -> int:
@@ -402,7 +440,9 @@ class Scene:
 
     def set_compact_material_bytes(self, compact_bytes: np.ndarray):
         """Upload compact material table bytes to GPU."""
-        self._compact_materials = wp.array(np.asarray(compact_bytes, dtype=np.uint8), dtype=wp.uint8, device="cuda")
+        self._compact_materials = wp.array(
+            np.asarray(compact_bytes, dtype=np.uint8), dtype=wp.uint8, device="cuda"
+        )
 
     def set_gltf_textures(
         self,
@@ -437,9 +477,17 @@ class Scene:
         self._meshes.append(mesh)
         return len(self._meshes) - 1
 
-    def add_instance(self, mesh_index: int, transform: np.ndarray = None) -> int:
+    def add_instance(
+        self,
+        mesh_index: int,
+        transform: np.ndarray = None,
+        material_id: int | None = None,
+        visible: bool = True,
+    ) -> int:
         """Add an instance of a mesh and return its index."""
-        instance = Instance(mesh_index, transform)
+        instance = Instance(
+            mesh_index, transform, material_id=material_id, visible=visible
+        )
         self._instances.append(instance)
         return len(self._instances) - 1
 
@@ -449,6 +497,16 @@ class Scene:
             inst = self._instances[instance_index]
             inst.prev_transform = inst.transform.copy()
             inst.transform = np.ascontiguousarray(transform, dtype=np.float32)
+
+    def set_instance_material(self, instance_index: int, material_id: int | None):
+        """Override the material used by one instance."""
+        if 0 <= instance_index < len(self._instances):
+            self._instances[instance_index].material_id = material_id
+
+    def set_instance_visible(self, instance_index: int, visible: bool):
+        """Control whether one instance participates in traversal."""
+        if 0 <= instance_index < len(self._instances):
+            self._instances[instance_index].visible = bool(visible)
 
     def create_cornell_box(self):
         """Create a Cornell Box scene."""
@@ -484,15 +542,17 @@ class Scene:
         clear_existing: bool = True,
     ) -> bool:
         """Load a glTF/GLB scene into this scene."""
-        from .asset_loaders import load_scene_from_gltf  # noqa: PLC0415
+        from .asset_loaders import load_scene_from_gltf
 
         if clear_existing:
             self.clear()
-        return bool(load_scene_from_gltf(self, gltf_path, root_transform=root_transform))
+        return bool(
+            load_scene_from_gltf(self, gltf_path, root_transform=root_transform)
+        )
 
     def load_from_obj(self, obj_path: str) -> bool:
         """Load an OBJ scene into this scene."""
-        from .asset_loaders import load_scene_from_obj  # noqa: PLC0415
+        from .asset_loaders import load_scene_from_obj
 
         self.clear()
         return bool(load_scene_from_obj(self, obj_path))
@@ -679,7 +739,18 @@ class Scene:
             logger.info("No meshes to build.")
             return
 
-        logger.info("Building scene with %d meshes and %d instances.", len(self._meshes), len(self._instances))
+        # A full build may be requested again after prototypes or instances
+        # are added. Drop the previous acceleration-structure references so
+        # the mesh and instance indices stay aligned.
+        self._gas_handles.clear()
+        self._gas_buffers.clear()
+        self._keepalive.clear()
+
+        logger.info(
+            "Building scene with %d meshes and %d instances.",
+            len(self._meshes),
+            len(self._instances),
+        )
 
         # Upload meshes to GPU
         for mesh in self._meshes:
@@ -696,7 +767,9 @@ class Scene:
 
         total_verts = sum(len(m.vertices) for m in self._meshes)
         total_tris = sum(len(m.indices) for m in self._meshes)
-        logger.info("Scene build complete: %d vertices, %d triangles.", total_verts, total_tris)
+        logger.info(
+            "Scene build complete: %d vertices, %d triangles.", total_verts, total_tris
+        )
 
     def rebuild_tlas(self):
         """Rebuild only TLAS after instance transform updates."""
@@ -763,7 +836,9 @@ class Scene:
         count = len(self._instances)
         if self._instance_np_capacity < count:
             self._instance_np_capacity = max(count, 1, self._instance_np_capacity * 2)
-            self._instance_np_cache = np.zeros(self._instance_np_capacity, dtype=inst_dtype)
+            self._instance_np_cache = np.zeros(
+                self._instance_np_capacity, dtype=inst_dtype
+            )
         inst_np = self._instance_np_cache[:count]
 
         for i, inst in enumerate(self._instances):
@@ -771,13 +846,18 @@ class Scene:
             inst_np["transform"][i] = mat4_to_optix_transform12(inst.transform)
             inst_np["instanceId"][i] = np.uint32(i)
             inst_np["sbtOffset"][i] = np.uint32(0)
-            inst_np["visibilityMask"][i] = np.uint32(0xFF)
+            inst_np["visibilityMask"][i] = np.uint32(0xFF if inst.visible else 0)
             inst_np["flags"][i] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
             inst_np["traversableHandle"][i] = np.uint64(gas_handle)
 
         inst_bytes = inst_np.view(np.uint8).reshape(-1)
-        if self._instance_buffer is None or self._instance_buffer.shape[0] != inst_bytes.shape[0]:
-            self._instance_buffer = wp.empty(inst_bytes.shape[0], dtype=wp.uint8, device="cuda")
+        if (
+            self._instance_buffer is None
+            or self._instance_buffer.shape[0] != inst_bytes.shape[0]
+        ):
+            self._instance_buffer = wp.empty(
+                inst_bytes.shape[0], dtype=wp.uint8, device="cuda"
+            )
         self._instance_buffer.assign(inst_bytes)
 
         accel_options = optix.AccelBuildOptions(
@@ -798,10 +878,16 @@ class Scene:
         # changes by a small amount.
         if self._tlas_temp_buffer is None or self._tlas_temp_capacity < required_temp:
             self._tlas_temp_capacity = max(required_temp, int(required_temp * 1.25))
-            self._tlas_temp_buffer = wp.empty(self._tlas_temp_capacity, dtype=wp.uint8, device="cuda")
+            self._tlas_temp_buffer = wp.empty(
+                self._tlas_temp_capacity, dtype=wp.uint8, device="cuda"
+            )
         if self._ias_buffer is None or self._tlas_output_capacity < required_output:
-            self._tlas_output_capacity = max(required_output, int(required_output * 1.25))
-            self._ias_buffer = wp.empty(self._tlas_output_capacity, dtype=wp.uint8, device="cuda")
+            self._tlas_output_capacity = max(
+                required_output, int(required_output * 1.25)
+            )
+            self._ias_buffer = wp.empty(
+                self._tlas_output_capacity, dtype=wp.uint8, device="cuda"
+            )
 
         self._ias_handle = self._ctx.accelBuild(
             0,
@@ -843,7 +929,9 @@ class Scene:
             flat_tangents = mesh.tangents.reshape(-1)
             flat_tex0 = mesh.texcoords.reshape(-1)
             flat_tex1 = mesh.texcoords1.reshape(-1)
-            tri_material_ids = np.full(len(mesh.indices), mesh.material_id, dtype=np.uint32)
+            tri_material_ids = np.full(
+                len(mesh.indices), mesh.material_id, dtype=np.uint32
+            )
 
             rp["indexOffset"] = np.uint32(index_offset)
             rp["materialIdOffset"] = np.uint32(material_offset)
@@ -875,13 +963,25 @@ class Scene:
 
         rp_bytes = render_primitives.view(np.uint8).reshape(-1)
         self._render_primitives = wp.array(rp_bytes, dtype=wp.uint8, device="cuda")
-        self._packed_indices = wp.array(np.concatenate(packed_indices), dtype=wp.uint32, device="cuda")
-        self._packed_normals = wp.array(np.concatenate(packed_normals), dtype=wp.float32, device="cuda")
-        self._packed_tangents = wp.array(np.concatenate(packed_tangents), dtype=wp.float32, device="cuda")
-        self._packed_texcoords0 = wp.array(np.concatenate(packed_texcoords0), dtype=wp.float32, device="cuda")
-        self._packed_texcoords1 = wp.array(np.concatenate(packed_texcoords1), dtype=wp.float32, device="cuda")
+        self._packed_indices = wp.array(
+            np.concatenate(packed_indices), dtype=wp.uint32, device="cuda"
+        )
+        self._packed_normals = wp.array(
+            np.concatenate(packed_normals), dtype=wp.float32, device="cuda"
+        )
+        self._packed_tangents = wp.array(
+            np.concatenate(packed_tangents), dtype=wp.float32, device="cuda"
+        )
+        self._packed_texcoords0 = wp.array(
+            np.concatenate(packed_texcoords0), dtype=wp.float32, device="cuda"
+        )
+        self._packed_texcoords1 = wp.array(
+            np.concatenate(packed_texcoords1), dtype=wp.float32, device="cuda"
+        )
         self._packed_prev_positions = None
-        self._packed_material_ids = wp.array(np.concatenate(packed_material_ids), dtype=wp.uint32, device="cuda")
+        self._packed_material_ids = wp.array(
+            np.concatenate(packed_material_ids), dtype=wp.uint32, device="cuda"
+        )
 
         # Build RenderNode array
         rn_dtype = _create_render_node_dtype()
@@ -913,10 +1013,19 @@ class Scene:
         instance_material_ids = np.zeros(len(self._instances), dtype=np.uint32)
         instance_render_prim_ids = np.zeros(len(self._instances), dtype=np.uint32)
         for i, inst in enumerate(self._instances):
-            instance_material_ids[i] = np.uint32(self._meshes[inst.mesh_index].material_id)
+            material_id = (
+                self._meshes[inst.mesh_index].material_id
+                if inst.material_id is None
+                else inst.material_id
+            )
+            instance_material_ids[i] = np.uint32(material_id)
             instance_render_prim_ids[i] = np.uint32(inst.mesh_index)
-        self._instance_material_ids = wp.array(instance_material_ids, dtype=wp.uint32, device="cuda")
-        self._instance_render_prim_ids = wp.array(instance_render_prim_ids, dtype=wp.uint32, device="cuda")
+        self._instance_material_ids = wp.array(
+            instance_material_ids, dtype=wp.uint32, device="cuda"
+        )
+        self._instance_render_prim_ids = wp.array(
+            instance_render_prim_ids, dtype=wp.uint32, device="cuda"
+        )
 
         # Build compact material table for robust device-side lookup.
         compact_dt = np.dtype(
@@ -975,13 +1084,21 @@ class Scene:
             compact[i]["diffuseTransmissionFactor"] = mat["diffuseTransmissionFactor"]
             compact[i]["diffuseTransmissionColor"] = mat["diffuseTransmissionColor"]
             compact[i]["isThinWalled"] = 1 if mat["thicknessFactor"] == 0.0 else 0
-            compact[i]["clearcoatNormalTexIndex"] = mat["clearcoatNormalTexture"]["index"]
-            compact[i]["clearcoatNormalTexCoord"] = mat["clearcoatNormalTexture"]["texCoord"]
+            compact[i]["clearcoatNormalTexIndex"] = mat["clearcoatNormalTexture"][
+                "index"
+            ]
+            compact[i]["clearcoatNormalTexCoord"] = mat["clearcoatNormalTexture"][
+                "texCoord"
+            ]
             compact[i]["opacity"] = mat["pbrBaseColorFactor"][3]
             compact[i]["baseColorTexIndex"] = mat["pbrBaseColorTexture"]["index"]
             compact[i]["baseColorTexCoord"] = mat["pbrBaseColorTexture"]["texCoord"]
-            compact[i]["metallicRoughnessTexIndex"] = mat["pbrMetallicRoughnessTexture"]["index"]
-            compact[i]["metallicRoughnessTexCoord"] = mat["pbrMetallicRoughnessTexture"]["texCoord"]
+            compact[i]["metallicRoughnessTexIndex"] = mat[
+                "pbrMetallicRoughnessTexture"
+            ]["index"]
+            compact[i]["metallicRoughnessTexCoord"] = mat[
+                "pbrMetallicRoughnessTexture"
+            ]["texCoord"]
             compact[i]["normalTexIndex"] = mat["normalTexture"]["index"]
             compact[i]["normalTexCoord"] = mat["normalTexture"]["texCoord"]
             compact[i]["emissiveTexIndex"] = mat["emissiveTexture"]["index"]
@@ -1056,8 +1173,12 @@ class Scene:
             desc_bytes = desc.view(np.uint8).reshape(-1)
             self._texture_descs = wp.array(desc_bytes, dtype=wp.uint8, device="cuda")
 
-            texels = np.concatenate(packed_texels, axis=0).astype(np.float32, copy=False)
-            self._texture_data = wp.array(texels.reshape(-1), dtype=wp.float32, device="cuda")
+            texels = np.concatenate(packed_texels, axis=0).astype(
+                np.float32, copy=False
+            )
+            self._texture_data = wp.array(
+                texels.reshape(-1), dtype=wp.float32, device="cuda"
+            )
         else:
             self._texture_descs = None
             self._texture_data = None

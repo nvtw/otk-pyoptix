@@ -26,7 +26,7 @@ import numpy as np
 
 from warp_optix._runtime.transform_utils import build_transform_matrix
 
-from .pathtracing_viewer import PathTracingViewer
+from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .ptx_compiler import get_optix_include_dir
 from .scene import Mesh
 
@@ -43,7 +43,7 @@ class PathTracerAPI:
     ):
         self.width = int(width)
         self.height = int(height)
-        self._viewer = PathTracingViewer(
+        self._viewer = PathTracingRenderer(
             width=self.width,
             height=self.height,
             scene_setup=lambda _scene: None,
@@ -70,12 +70,22 @@ class PathTracerAPI:
         )
 
     @property
-    def viewer(self) -> PathTracingViewer:
+    def viewer(self) -> PathTracingRenderer:
         return self._viewer
 
     @property
     def scene(self):
         return self._viewer._scene  # internal, initialized by build()
+
+    @property
+    def dlss_enabled(self) -> bool:
+        """Return whether DLSS Ray Reconstruction initialized successfully."""
+        return bool(self._viewer._dlss_enabled)
+
+    @property
+    def dlss_init_error(self) -> str | None:
+        """Return the DLSS initialization error, if Ray Reconstruction fell back."""
+        return self._viewer._dlss_init_error
 
     def _require_scene(self):
         """Ensure an initialized scene is available or raise a clear error."""
@@ -191,6 +201,12 @@ class PathTracerAPI:
     def create_instance(self, mesh_id: int) -> int:
         return int(self._require_scene().add_instance(int(mesh_id)))
 
+    def set_instance_material(self, instance_id: int, material_id: int | None):
+        self._require_scene().set_instance_material(int(instance_id), material_id)
+
+    def set_instance_visible(self, instance_id: int, visible: bool):
+        self._require_scene().set_instance_visible(int(instance_id), bool(visible))
+
     def create_instance_with_transform(
         self,
         mesh_id: int,
@@ -199,7 +215,9 @@ class PathTracerAPI:
         scale: float | Iterable[float] = 1.0,
     ) -> int:
         transform = build_transform_matrix(position, rotation_xyzw, scale)
-        return int(self._require_scene().add_instance(int(mesh_id), transform=transform))
+        return int(
+            self._require_scene().add_instance(int(mesh_id), transform=transform)
+        )
 
     def set_instance_transform(
         self,
@@ -215,7 +233,9 @@ class PathTracerAPI:
         m = np.asarray(matrix, dtype=np.float32).reshape(4, 4)
         self._require_scene().set_instance_transform(int(instance_id), m)
 
-    def set_instance_transforms_batch(self, instance_ids: Iterable[int], transforms_flat: np.ndarray):
+    def set_instance_transforms_batch(
+        self, instance_ids: Iterable[int], transforms_flat: np.ndarray
+    ):
         self.initialize()
         ids = list(instance_ids)
         arr = np.asarray(transforms_flat, dtype=np.float32).reshape(-1, 8)
@@ -231,15 +251,31 @@ class PathTracerAPI:
             )
 
     def create_diffuse_material(self, color: Iterable[float]) -> int:
-        return int(self._require_scene().materials.add_diffuse(tuple(float(v) for v in color)))
+        return int(
+            self._require_scene().materials.add_diffuse(tuple(float(v) for v in color))
+        )
 
-    def create_metallic_material(self, color: Iterable[float], roughness: float = 0.1) -> int:
-        return int(self._require_scene().materials.add_metal(tuple(float(v) for v in color), float(roughness)))
+    def create_metallic_material(
+        self, color: Iterable[float], roughness: float = 0.1
+    ) -> int:
+        return int(
+            self._require_scene().materials.add_metal(
+                tuple(float(v) for v in color), float(roughness)
+            )
+        )
 
-    def create_emissive_material(self, color: Iterable[float], intensity: float = 1.0) -> int:
-        return int(self._require_scene().materials.add_emissive(tuple(float(v) for v in color), float(intensity)))
+    def create_emissive_material(
+        self, color: Iterable[float], intensity: float = 1.0
+    ) -> int:
+        return int(
+            self._require_scene().materials.add_emissive(
+                tuple(float(v) for v in color), float(intensity)
+            )
+        )
 
-    def create_pbr_material(self, color: Iterable[float], roughness: float, metallic: float) -> int:
+    def create_pbr_material(
+        self, color: Iterable[float], roughness: float, metallic: float
+    ) -> int:
         scene = self._require_scene()
         return int(
             scene.materials.add_pbr(
@@ -249,14 +285,20 @@ class PathTracerAPI:
             )
         )
 
-    def add_box(self, min_pt: Iterable[float], max_pt: Iterable[float], material_id: int) -> int:
+    def add_box(
+        self, min_pt: Iterable[float], max_pt: Iterable[float], material_id: int
+    ) -> int:
         return int(
             self._require_scene().add_box(
-                tuple(float(v) for v in min_pt), tuple(float(v) for v in max_pt), int(material_id)
+                tuple(float(v) for v in min_pt),
+                tuple(float(v) for v in max_pt),
+                int(material_id),
             )
         )
 
-    def add_sphere(self, center: Iterable[float], radius: float, segments: int, material_id: int) -> int:
+    def add_sphere(
+        self, center: Iterable[float], radius: float, segments: int, material_id: int
+    ) -> int:
         return int(
             self._require_scene().add_sphere(
                 tuple(float(v) for v in center),
@@ -315,7 +357,11 @@ class PathTracerAPI:
         nrm = np.linalg.norm(direction)
         if nrm > 0.0:
             direction = direction / nrm
-        self._viewer.sky_sun_direction = (float(direction[0]), float(direction[1]), float(direction[2]))
+        self._viewer.sky_sun_direction = (
+            float(direction[0]),
+            float(direction[1]),
+            float(direction[2]),
+        )
         self._viewer.sky_multiplier = float(intensity)
 
     def set_sky_parameters(

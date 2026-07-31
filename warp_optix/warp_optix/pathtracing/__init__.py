@@ -24,22 +24,26 @@ Components:
     - materials: PBR material management
     - scene: Mesh and acceleration structure management
     - tonemap: HDR to LDR tonemapping
-    - pathtracing_viewer: Main viewer integrating all components
+    - pathtracing_viewer: OptiX/DLSS rendering engine
+    - viewer: Standalone and framework-compatible viewer API
 """
 
 from .camera import Camera
 from .materials import MaterialManager
 from .pathtracer_api import PathTracerAPI
-from .pathtracing_viewer import PathTracingViewer
+from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .scene import Mesh, Scene
 from .tonemap import Tonemapper
+from .viewer import PathTracingViewer, PathTracingViewerBackend
 
 __all__ = [
     "Camera",
     "MaterialManager",
     "Mesh",
     "PathTracerAPI",
+    "PathTracingRenderer",
     "PathTracingViewer",
+    "PathTracingViewerBackend",
     "Scene",
     "Tonemapper",
 ]

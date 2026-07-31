@@ -1,3 +1,8 @@
 warp-lang>=1.15
-optix
+pyoptix>=9.1
 numpy
+
+[pathtracing]
+imageio>=2.31
+Pillow>=9
+pyglet<3,>=2.1

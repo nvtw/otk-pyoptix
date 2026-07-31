@@ -21,6 +21,8 @@ This viewer renders a scene using OptiX ray tracing with PBR materials,
 displaying raw buffers (radiance, normals, depth, etc.) for debugging.
 """
 
+from __future__ import annotations
+
 import logging
 import sys
 from pathlib import Path
