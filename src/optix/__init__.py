@@ -6,6 +6,7 @@
 
 import os
 import sys
+import sysconfig
 from pathlib import Path
 
 __version__ = "0.1.0"
@@ -35,10 +36,23 @@ def _add_dll_directories():
 
 def get_optix_include_dir():
     """Return the packaged OptiX header directory."""
-    include_dir = Path(__file__).resolve().parent / "include"
-    if not (include_dir / "optix.h").exists():
-        raise FileNotFoundError(f"Packaged OptiX headers were not found at '{include_dir}'.")
-    return str(include_dir)
+    package_include = Path(__file__).resolve().parent / "include"
+    include_dirs = [package_include]
+
+    # Editable installs execute this source-tree __init__.py while CMake places
+    # generated/fetched package data in the environment's platform library.
+    # Check that location as well so get_optix_include_dir() behaves identically
+    # for editable and wheel installs.
+    platlib_include = Path(sysconfig.get_path("platlib")) / "optix" / "include"
+    if platlib_include != package_include:
+        include_dirs.append(platlib_include)
+
+    for include_dir in include_dirs:
+        if (include_dir / "optix.h").is_file():
+            return str(include_dir)
+
+    searched = "\n  - ".join(str(path) for path in include_dirs)
+    raise FileNotFoundError(f"Packaged OptiX headers were not found in:\n  - {searched}")
 
 
 _add_dll_directories()

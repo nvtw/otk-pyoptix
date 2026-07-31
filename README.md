@@ -31,8 +31,8 @@ Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) version 10.0
 **Note**: OptiX headers are automatically fetched during build. You do NOT need to install the OptiX SDK separately to build the `optix` Python module.  However, the SDK will need to be installed to run the examples.
 
 #### DLSS SDK (Ray Reconstruction)
-By default, the build also downloads DLSS SDK version `310.6.0` into
-`third_party/dlss-310.6.0` and enables CUDA/OptiX DLSS RR bindings.
+By default, the build also downloads DLSS SDK version `310.5.3` into
+`third_party/dlss-310.5.3` and enables CUDA/OptiX DLSS RR bindings.
 No Vulkan integration is used or exposed by these bindings.
 
 #### Build system requirements:
@@ -54,7 +54,7 @@ pip install .
 directly as environment variables:
 
 - `DLSS_ROOT`: use a local DLSS SDK instead of downloading it
-- `PYOPTIX_DLSS_VERSION`: override the DLSS SDK version (default `310.6.0`)
+- `PYOPTIX_DLSS_VERSION`: override the DLSS SDK version (default `310.5.3`)
 - `PYOPTIX_AUTO_DOWNLOAD_DLSS`: set to `OFF` to disable automatic download
 - `PYOPTIX_ENABLE_DLSS`: set to `OFF` to build without DLSS bindings
 

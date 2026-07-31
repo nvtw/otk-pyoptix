@@ -51,6 +51,8 @@ class _InstanceBatch:
     instance_ids: list[int]
     colors: np.ndarray
     materials: np.ndarray
+    hidden: bool = False
+    active_count: int = 0
 
 
 def _as_numpy(value: Any, dtype=None) -> np.ndarray | None:
@@ -87,23 +89,28 @@ class PathTracingViewerBackend:
         width: int = 1280,
         height: int = 720,
         title: str = "Warp OptiX Path Tracing",
-        fps: int = 60,
+        fps: int = 0,
         device: str = "cuda",
         headless: bool = False,
         paused: bool = False,
+        render_when_paused: bool = False,
         num_frames: int | None = None,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
         up_axis: str | int = "Y",
         camera_speed: float = 4.0,
         api: PathTracerAPI | None = None,
-        vsync: bool = True,
+        vsync: bool = False,
         max_instances: int = 10000,
         enable_imgui: bool = True,
         enable_picking: bool = True,
         picking_factory: Callable | None = None,
         fallback_to_copy: bool = True,
         recording_writer_factory: Callable | None = None,
+        default_ior: float = 1.5,
+        default_specular: float = 1.0,
+        default_clearcoat: float = 0.0,
+        default_clearcoat_roughness: float = 0.1,
     ):
         try:
             super().__init__()
@@ -115,9 +122,10 @@ class PathTracingViewerBackend:
         self.width = int(width)
         self.height = int(height)
         self.device = wp.get_device(device)
-        self.fps = max(1, int(fps))
+        self.fps = max(0, int(fps))
         self.headless = bool(headless)
         self.paused = bool(paused)
+        self.render_when_paused = bool(render_when_paused)
         self.num_frames = num_frames
         self.frame_index = 0
         self.time = 0.0
@@ -182,10 +190,16 @@ class PathTracingViewerBackend:
 
         self._mesh_ids: dict[str, int] = {}
         self._batches: dict[str, _InstanceBatch] = {}
-        self._material_ids: dict[tuple[float, float, float, float, float], int] = {}
+        self._material_ids: dict[tuple[float, ...], int] = {}
         self._default_color = (0.8, 0.8, 0.8)
         self._default_material = (0.5, 0.0, 0.0, 0.0)
 
+        self._default_ior = max(1.0, float(default_ior))
+        self._default_specular = float(np.clip(default_specular, 0.0, 1.0))
+        self._default_clearcoat = float(np.clip(default_clearcoat, 0.0, 1.0))
+        self._default_clearcoat_roughness = float(
+            np.clip(default_clearcoat_roughness, 0.001, 1.0)
+        )
         self._camera_position = np.array((0.0, 2.0, 8.0), dtype=np.float32)
         self._camera_yaw = 180.0
         self._camera_pitch = 0.0
@@ -206,27 +220,49 @@ class PathTracingViewerBackend:
             return channel / 12.92
         return ((channel + 0.055) / 1.055) ** 2.4
 
+    @classmethod
+    def srgb_to_linear_rgb(cls, color) -> tuple[float, float, float]:
+        """Convert an authored sRGB color to path-tracer linear RGB."""
+        return tuple(cls.srgb_to_linear(channel) for channel in color[:3])
+
+    @property
+    def tonemap_exposure(self) -> float:
+        """Return the linear exposure multiplier."""
+        return self._api.tonemap_exposure
+
+    @tonemap_exposure.setter
+    def tonemap_exposure(self, value: float) -> None:
+        """Set the nonnegative linear exposure multiplier."""
+        self._api.tonemap_exposure = value
+
+    @property
+    def tonemap_contrast(self) -> float:
+        """Return the display contrast multiplier."""
+        return self._api.tonemap_contrast
+
+    @tonemap_contrast.setter
+    def tonemap_contrast(self, value: float) -> None:
+        """Set the nonnegative display contrast multiplier."""
+        self._api.tonemap_contrast = value
+
+    @property
+    def tonemap_saturation(self) -> float:
+        """Return the display saturation multiplier."""
+        return self._api.tonemap_saturation
+
+    @tonemap_saturation.setter
+    def tonemap_saturation(self, value: float) -> None:
+        """Set the nonnegative display saturation multiplier."""
+        self._api.tonemap_saturation = value
+
     def _ensure_initialized(self):
         if self._initialized:
             return
         if not self._api.initialize():
             raise RuntimeError("Failed to initialize the OptiX path tracer")
 
-        # Defaults carried over from the hybrid viewer. The lighter ground,
-        # slight haze, and soft horizon are important for Newton's untextured
-        # simulation geometry.
+        # Keep the neutral lighting defaults used by the reference path-tracing example.
         self._api.set_use_procedural_sky(True)
-        self._api.set_sky_parameters(
-            sun_direction=(-0.3, 0.7, 0.5),
-            multiplier=1.5,
-            saturation=1.0,
-            haze=0.03,
-            ground_color=(0.7, 0.7, 0.75),
-            horizon_blur=0.3,
-            sun_disk_intensity=1.0,
-            sun_glow_intensity=0.8,
-            y_is_up=1,
-        )
         self._initialized = True
         self._sync_camera()
 
@@ -316,8 +352,6 @@ class PathTracingViewerBackend:
     def log_state(self, state):
         """Cache simulation state for picking, then use the framework logger."""
         self._last_state = state
-        if self._picking is not None and self._picking.is_picking():
-            self._picking._apply_picking_force(state)
         parent = getattr(super(), "log_state", None)
         if callable(parent):
             parent(state)
@@ -326,13 +360,27 @@ class PathTracingViewerBackend:
         color_key = tuple(round(float(v), 2) for v in color[:3])
         roughness = round(float(np.clip(material[0], 0.0, 1.0)), 3)
         metallic = round(float(np.clip(material[1], 0.0, 1.0)), 3)
-        key = (*color_key, roughness, metallic)
+        key = (
+            *color_key,
+            roughness,
+            metallic,
+            self._default_ior,
+            self._default_specular,
+            self._default_clearcoat,
+            self._default_clearcoat_roughness,
+        )
         if key in self._material_ids:
             return self._material_ids[key]
 
-        linear_color = tuple(self.srgb_to_linear(channel) for channel in color_key)
+        linear_color = self.srgb_to_linear_rgb(color_key)
         material_id = self._api.create_pbr_material(
-            linear_color, roughness=roughness, metallic=metallic
+            linear_color,
+            roughness=roughness,
+            metallic=metallic,
+            ior=self._default_ior,
+            specular=self._default_specular,
+            clearcoat=self._default_clearcoat,
+            clearcoat_roughness=self._default_clearcoat_roughness,
         )
         self._material_ids[key] = material_id
         self._scene_dirty = True
@@ -455,6 +503,7 @@ class PathTracingViewerBackend:
                 self._api.scene._instances[instance_id].mesh_index = batch.mesh_id
             self._scene_dirty = True
 
+        previous_count = len(batch.instance_ids)
         while len(batch.instance_ids) < count:
             if len(self._api.scene._instances) >= self._max_instances:
                 raise RuntimeError(
@@ -462,34 +511,47 @@ class PathTracingViewerBackend:
                 )
             batch.instance_ids.append(self._api.create_instance(batch.mesh_id))
             self._scene_dirty = True
+        instances_added = len(batch.instance_ids) != previous_count
 
+        appearance_changed = False
         if colors is not None or len(batch.colors) != count:
-            batch.colors = _broadcast_rows(
+            updated_colors = _broadcast_rows(
                 _as_numpy(colors, np.float32), count, 3, self._default_color
             )
+            if updated_colors.shape != batch.colors.shape or not np.array_equal(updated_colors, batch.colors):
+                batch.colors = updated_colors
+                appearance_changed = True
         if materials is not None or len(batch.materials) != count:
-            batch.materials = _broadcast_rows(
+            updated_materials = _broadcast_rows(
                 _as_numpy(materials, np.float32), count, 4, self._default_material
             )
+            if updated_materials.shape != batch.materials.shape or not np.array_equal(updated_materials, batch.materials):
+                batch.materials = updated_materials
+                appearance_changed = True
+
+        active_ids = batch.instance_ids[:count]
+        inactive_ids = batch.instance_ids[count:]
+        visibility_changed = instances_added or hidden != batch.hidden or count != batch.active_count
+        if visibility_changed:
+            self._api.set_instances_visible(active_ids, not hidden)
+            self._api.set_instances_visible(inactive_ids, False)
+            batch.hidden = bool(hidden)
+            batch.active_count = count
 
         if xforms is not None:
             matrices = self._instance_matrices(xforms, scales)
-            for index, instance_id in enumerate(batch.instance_ids):
-                active = index < count and not hidden
-                self._api.set_instance_visible(instance_id, active)
-                if index < count:
-                    self._api.set_instance_transform_matrix(
-                        instance_id, matrices[index]
-                    )
-                    material_id = self._get_or_create_material(
-                        batch.colors[index], batch.materials[index]
-                    )
-                    self._api.set_instance_material(instance_id, material_id)
+            self._api.set_instance_transform_matrices(active_ids, matrices)
             self._transforms_dirty = True
+
+        if appearance_changed or instances_added:
+            for index, instance_id in enumerate(active_ids):
+                material_id = self._get_or_create_material(
+                    batch.colors[index], batch.materials[index]
+                )
+                self._api.set_instance_material(instance_id, material_id)
             self._materials_dirty = True
-        else:
-            for instance_id in batch.instance_ids:
-                self._api.set_instance_visible(instance_id, not hidden)
+
+        if visibility_changed:
             self._transforms_dirty = True
 
     def log_capsules(
@@ -582,9 +644,9 @@ class PathTracingViewerBackend:
     def end_frame(self):
         if self._closed:
             return
-        if self.paused and self._presenter is not None:
+        if self.paused and not self.render_when_paused and self._presenter is not None:
             self._presenter.window.dispatch_events()
-        if self.paused:
+        if self.paused and not self.render_when_paused:
             return
         self._ensure_initialized()
         self._flush_scene()
@@ -1109,8 +1171,16 @@ class PathTracingViewerBackend:
         )
         self._api.set_sun_direction(*direction, intensity=float(intensity))
 
+    def reset_temporal_history(self):
+        """Discard DLSS reconstruction history after a discontinuous scene change."""
+        self._api.reset_temporal_history()
+
     def set_sky_parameters(self, **kwargs):
         self._ensure_initialized()
+        kwargs = dict(kwargs)
+        for name in ("ground_color", "night_color"):
+            if name in kwargs:
+                kwargs[name] = self.srgb_to_linear_rgb(kwargs[name])
         self._api.set_sky_parameters(**kwargs)
 
     @staticmethod
@@ -1269,9 +1339,9 @@ class PathTracingViewerBackend:
             haze=haze,
             red_blue_shift=shift,
             saturation=saturation,
-            ground_color=ground,
+            ground_color=self.srgb_to_linear_rgb(ground),
             horizon_blur=blur,
-            night_color=night,
+            night_color=self.srgb_to_linear_rgb(night),
             sun_disk_intensity=disk,
             sun_disk_scale=scale,
             sun_glow_intensity=glow,
@@ -1282,7 +1352,7 @@ class PathTracingViewerBackend:
         self._api.set_environment_hdr(hdr_path, scaling)
 
     def set_environment_color(self, color):
-        self._api.set_environment_color(color)
+        self._api.set_environment_color(self.srgb_to_linear_rgb(color))
 
     def set_debug_buffer_mode(self, mode: int):
         mode = int(np.clip(mode, 0, 8))

@@ -27,6 +27,7 @@ TONEMAP_CLIP = 2
 TONEMAP_ACES = 3
 TONEMAP_AGX = 4
 TONEMAP_KHRONOS_PBR = 5
+TONEMAP_ACES_SRGB = 6
 
 # Debug output modes (match pathtracing_viewer.py enums)
 OUTPUT_FINAL = 0
@@ -173,6 +174,18 @@ def tonemap_khronos_pbr(color: wp.vec3) -> wp.vec3:
     return to_srgb(c)
 
 
+@wp.func
+def tonemap_aces_srgb(color: wp.vec3) -> wp.vec3:
+    """Apply hue-preserving ACES highlight rolloff and encode as sRGB."""
+    peak = wp.max(color[0], wp.max(color[1], color[2]))
+    mapped_peak = peak * (2.51 * peak + 0.03) / (
+        peak * (2.43 * peak + 0.59) + 0.14
+    )
+    scale = wp.clamp(mapped_peak, 0.0, 1.0) / wp.max(peak, 1.0e-6)
+    mapped = wp.vec3(color[0] * scale, color[1] * scale, color[2] * scale)
+    return to_srgb(mapped)
+
+
 @wp.kernel
 def tonemap_kernel(
     hdr_input: wp.array2d(dtype=wp.vec4),
@@ -230,6 +243,8 @@ def tonemap_kernel(
             color = tonemap_agx(color)
         elif method == TONEMAP_KHRONOS_PBR:
             color = tonemap_khronos_pbr(color)
+        elif method == TONEMAP_ACES_SRGB:
+            color = tonemap_aces_srgb(color)
         else:
             color = tonemap_filmic_hejl(color)
 
@@ -357,7 +372,7 @@ class Tonemapper:
         self.width = width
         self.height = height
         self.exposure = 1.0
-        self.method = TONEMAP_FILMIC
+        self.method = TONEMAP_ACES_SRGB
         self.is_active = True
         self.brightness = 1.0
         self.contrast = 1.0

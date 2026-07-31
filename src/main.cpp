@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <stdexcept>
@@ -2184,23 +2185,47 @@ static std::wstring toWideString( const std::string& value )
     return std::wstring( value.begin(), value.end() );
 }
 
+static void NVSDK_CONV dlssLogCallback( const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature )
+{
+    if( message )
+        std::clog << "[NGX] " << message << std::endl;
+}
+
 void dlssRRContextInit(
     pyoptix::DlssRRContext& context,
     const std::string& applicationDataPath,
     const std::string& projectId,
-    const std::string& engineVersion
+    const std::string& engineVersion,
+    const std::string& featureSearchPath,
+    bool enableLogging
 )
 {
     if( context.initialized )
         return;
 
     const std::wstring appPath = applicationDataPath.empty() ? std::filesystem::current_path().wstring() : toWideString( applicationDataPath );
+    const std::wstring featurePath = toWideString( featureSearchPath );
+    const wchar_t* featurePathValue = featurePath.c_str();
+    NVSDK_NGX_FeatureCommonInfo featureInfo = {};
+    if( !featurePath.empty() )
+    {
+        featureInfo.PathListInfo.Path = &featurePathValue;
+        featureInfo.PathListInfo.Length = 1;
+    }
+    if( enableLogging )
+    {
+        featureInfo.LoggingInfo.LoggingCallback = dlssLogCallback;
+        featureInfo.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+    }
+    const NVSDK_NGX_FeatureCommonInfo* featureInfoPtr =
+        featurePath.empty() && !enableLogging ? nullptr : &featureInfo;
     PYDLSS_CHECK(
         NVSDK_NGX_CUDA_Init_with_ProjectID(
             projectId.c_str(),
             NVSDK_NGX_ENGINE_TYPE_CUSTOM,
             engineVersion.c_str(),
-            appPath.c_str()
+            appPath.c_str(),
+            featureInfoPtr
         )
     );
     PYDLSS_CHECK( NVSDK_NGX_CUDA_GetCapabilityParameters( &context.ngxParams ) );
@@ -2238,7 +2263,7 @@ bool dlssRRContextIsAvailable( const pyoptix::DlssRRContext& context )
         return false;
 
     PYDLSS_CHECK( context.ngxParams->Get( NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult, &initResult ) );
-    return initResult != 0;
+    return NVSDK_NGX_SUCCEED( static_cast<NVSDK_NGX_Result>( initResult ) );
 }
 
 py::tuple dlssRRContextGetMinDriverVersion( const pyoptix::DlssRRContext& context )
@@ -3164,7 +3189,9 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
             &pyoptix::dlssRRContextInit,
             py::arg( "applicationDataPath" ) = "",
             py::arg( "projectId" ) = "dddbee68-a452-4fab-9371-f9575480a154",
-            py::arg( "engineVersion" ) = "1.0.0"
+            py::arg( "engineVersion" ) = "1.0.0",
+            py::arg( "featureSearchPath" ) = "",
+            py::arg( "enableLogging" ) = false
         )
         .def( "deinit", &pyoptix::dlssRRContextDeinit )
         .def( "isDlssRRAvailable", &pyoptix::dlssRRContextIsAvailable )

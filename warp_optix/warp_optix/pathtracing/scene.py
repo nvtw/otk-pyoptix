@@ -25,8 +25,6 @@ import logging
 import numpy as np
 import warp as wp
 
-from warp_optix._runtime.transform_utils import mat4_to_optix_transform12
-
 from .color_utils import srgb_to_linear_rgb
 from .materials import MaterialManager
 
@@ -348,6 +346,9 @@ class Scene:
         self._instance_buffer = None
         self._instance_np_cache = None
         self._instance_np_capacity = 0
+        self._instance_transform_cache = np.empty((0, 4, 4), dtype=np.float32)
+        self._instance_visibility_cache = np.empty(0, dtype=np.bool_)
+        self._instance_cache_capacity = 0
         self._tlas_temp_buffer = None
         self._tlas_temp_capacity = 0
         self._tlas_output_capacity = 0
@@ -477,6 +478,20 @@ class Scene:
         self._meshes.append(mesh)
         return len(self._meshes) - 1
 
+    def _ensure_instance_cache_capacity(self, count: int):
+        """Grow contiguous host-side instance state without per-frame allocation."""
+        if self._instance_cache_capacity >= count:
+            return
+        capacity = max(count, 1, self._instance_cache_capacity * 2)
+        transforms = np.empty((capacity, 4, 4), dtype=np.float32)
+        visibility = np.empty(capacity, dtype=np.bool_)
+        if self._instance_cache_capacity:
+            transforms[: self._instance_cache_capacity] = self._instance_transform_cache
+            visibility[: self._instance_cache_capacity] = self._instance_visibility_cache
+        self._instance_transform_cache = transforms
+        self._instance_visibility_cache = visibility
+        self._instance_cache_capacity = capacity
+
     def add_instance(
         self,
         mesh_index: int,
@@ -489,7 +504,11 @@ class Scene:
             mesh_index, transform, material_id=material_id, visible=visible
         )
         self._instances.append(instance)
-        return len(self._instances) - 1
+        instance_index = len(self._instances) - 1
+        self._ensure_instance_cache_capacity(instance_index + 1)
+        self._instance_transform_cache[instance_index] = instance.transform
+        self._instance_visibility_cache[instance_index] = instance.visible
+        return instance_index
 
     def set_instance_transform(self, instance_index: int, transform: np.ndarray):
         """Update an instance's transform."""
@@ -497,6 +516,19 @@ class Scene:
             inst = self._instances[instance_index]
             inst.prev_transform = inst.transform.copy()
             inst.transform = np.ascontiguousarray(transform, dtype=np.float32)
+            self._instance_transform_cache[instance_index] = inst.transform
+
+    def set_instance_transforms_batch(self, instance_indices, transforms: np.ndarray):
+        """Update a batch of instance transforms with one NumPy assignment."""
+        indices = np.asarray(instance_indices, dtype=np.intp)
+        matrices = np.asarray(transforms, dtype=np.float32).reshape(-1, 4, 4)
+        if len(indices) != len(matrices):
+            raise ValueError("instance_indices and transforms must have equal length")
+        if len(indices) == 0:
+            return
+        if int(indices.min()) < 0 or int(indices.max()) >= len(self._instances):
+            raise IndexError("instance index is out of range")
+        self._instance_transform_cache[indices] = matrices
 
     def set_instance_material(self, instance_index: int, material_id: int | None):
         """Override the material used by one instance."""
@@ -506,7 +538,18 @@ class Scene:
     def set_instance_visible(self, instance_index: int, visible: bool):
         """Control whether one instance participates in traversal."""
         if 0 <= instance_index < len(self._instances):
-            self._instances[instance_index].visible = bool(visible)
+            value = bool(visible)
+            self._instances[instance_index].visible = value
+            self._instance_visibility_cache[instance_index] = value
+
+    def set_instances_visible_batch(self, instance_indices, visible: bool):
+        """Set visibility for a batch with one host-array assignment."""
+        indices = np.asarray(instance_indices, dtype=np.intp)
+        if len(indices) == 0:
+            return
+        if int(indices.min()) < 0 or int(indices.max()) >= len(self._instances):
+            raise IndexError("instance index is out of range")
+        self._instance_visibility_cache[indices] = bool(visible)
 
     def create_cornell_box(self):
         """Create a Cornell Box scene."""
@@ -707,6 +750,9 @@ class Scene:
         self._instance_buffer = None
         self._instance_np_cache = None
         self._instance_np_capacity = 0
+        self._instance_transform_cache = np.empty((0, 4, 4), dtype=np.float32)
+        self._instance_visibility_cache = np.empty(0, dtype=np.bool_)
+        self._instance_cache_capacity = 0
         self._tlas_temp_buffer = None
         self._tlas_temp_capacity = 0
         self._tlas_output_capacity = 0
@@ -792,6 +838,7 @@ class Scene:
             operation=optix.BUILD_OPERATION_BUILD,
         )
 
+        stream = int(wp.get_stream("cuda").cuda_stream)
         for i, mesh in enumerate(self._meshes):
             tri = optix.BuildInputTriangleArray()
             tri.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
@@ -810,7 +857,7 @@ class Scene:
             d_gas = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device="cuda")
 
             handle = self._ctx.accelBuild(
-                0,
+                stream,
                 [accel_options],
                 [tri],
                 d_temp.ptr,
@@ -840,15 +887,17 @@ class Scene:
                 self._instance_np_capacity, dtype=inst_dtype
             )
         inst_np = self._instance_np_cache[:count]
-
-        for i, inst in enumerate(self._instances):
-            gas_handle = self._gas_handles[inst.mesh_index]
-            inst_np["transform"][i] = mat4_to_optix_transform12(inst.transform)
-            inst_np["instanceId"][i] = np.uint32(i)
-            inst_np["sbtOffset"][i] = np.uint32(0)
-            inst_np["visibilityMask"][i] = np.uint32(0xFF if inst.visible else 0)
-            inst_np["flags"][i] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
-            inst_np["traversableHandle"][i] = np.uint64(gas_handle)
+        mesh_indices = np.fromiter(
+            (inst.mesh_index for inst in self._instances), dtype=np.intp, count=count
+        )
+        inst_np["transform"] = self._instance_transform_cache[:count, :3, :].reshape(count, 12)
+        inst_np["instanceId"] = np.arange(count, dtype=np.uint32)
+        inst_np["sbtOffset"] = np.uint32(0)
+        inst_np["visibilityMask"] = np.where(
+            self._instance_visibility_cache[:count], 0xFF, 0
+        ).astype(np.uint32)
+        inst_np["flags"] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
+        inst_np["traversableHandle"] = np.asarray(self._gas_handles, dtype=np.uint64)[mesh_indices]
 
         inst_bytes = inst_np.view(np.uint8).reshape(-1)
         if (
@@ -890,7 +939,7 @@ class Scene:
             )
 
         self._ias_handle = self._ctx.accelBuild(
-            0,
+            int(wp.get_stream("cuda").cuda_stream),
             [accel_options],
             [ias_input],
             self._tlas_temp_buffer.ptr,
@@ -987,12 +1036,14 @@ class Scene:
         rn_dtype = _create_render_node_dtype()
         render_nodes = np.zeros(len(self._instances), dtype=rn_dtype)
 
-        for i, inst in enumerate(self._instances):
-            rn = render_nodes[i]
-            rn["objectToWorld"] = inst.transform
-            rn["worldToObject"] = np.linalg.inv(inst.transform)
-            rn["materialID"] = -1  # Use per-triangle materials
-            rn["renderPrimID"] = inst.mesh_index
+        count = len(self._instances)
+        transforms = self._instance_transform_cache[:count]
+        render_nodes["objectToWorld"] = transforms
+        render_nodes["worldToObject"] = np.linalg.inv(transforms)
+        render_nodes["materialID"] = -1  # Use per-triangle materials
+        render_nodes["renderPrimID"] = np.fromiter(
+            (inst.mesh_index for inst in self._instances), dtype=np.int32, count=count
+        )
 
         rn_bytes = render_nodes.view(np.uint8).reshape(-1)
         self._render_nodes = wp.array(rn_bytes, dtype=wp.uint8, device="cuda")

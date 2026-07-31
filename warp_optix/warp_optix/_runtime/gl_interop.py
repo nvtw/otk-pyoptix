@@ -48,10 +48,10 @@ class OptixGLInteropViewer:
         height: int,
         device: str,
         title: str = "Warp OptiX Tiny Raytracer",
-        fps: int = 60,
+        fps: int = 0,
         on_resize: Callable[[int, int], None] | None = None,
         on_draw_overlay: Callable[[], None] | None = None,
-        vsync: bool = True,
+        vsync: bool = False,
         fallback_to_copy: bool = True,
     ):
         import pyglet
@@ -66,9 +66,12 @@ class OptixGLInteropViewer:
         self.start_time = time.perf_counter()
         self.max_frames = 0
         self.closed = False
+        self._update_scheduled = False
+        self._update_interval = None if fps <= 0 else 1.0 / float(fps)
         self._render_callback: Callable[[wp.array, int, float], None] | None = None
         self._on_resize_callback = on_resize
         self._on_draw_overlay = on_draw_overlay
+        self._dispatching_events = False
         self._fallback_to_copy = bool(fallback_to_copy)
 
         self.window = pyglet.window.Window(
@@ -78,7 +81,6 @@ class OptixGLInteropViewer:
             on_draw=self._on_draw, on_close=self._on_close, on_resize=self._on_resize
         )
         self._recreate_gl_resources()
-        pyglet.clock.schedule_interval(self._update, 1.0 / float(max(1, fps)))
 
     def _recreate_gl_resources(self):
         # Recreate texture + PBO + CUDA interop for current resolution.
@@ -121,7 +123,16 @@ class OptixGLInteropViewer:
     ):
         self._render_callback = render_callback
         self.max_frames = max_frames
-        self.pyglet.app.run()
+        if self._update_interval is None:
+            self.pyglet.clock.schedule(self._update)
+        else:
+            self.pyglet.clock.schedule_interval(self._update, self._update_interval)
+        self._update_scheduled = True
+        try:
+            self.pyglet.app.run()
+        finally:
+            self.pyglet.clock.unschedule(self._update)
+            self._update_scheduled = False
 
     def render_once(
         self, render_callback: Callable[[wp.array, int, float], None] | None = None
@@ -131,7 +142,11 @@ class OptixGLInteropViewer:
             return
         if render_callback is not None:
             self._render_callback = render_callback
-        self.window.dispatch_events()
+        self._dispatching_events = True
+        try:
+            self.window.dispatch_events()
+        finally:
+            self._dispatching_events = False
         if self.closed:
             return
         self._render_frame()
@@ -154,7 +169,7 @@ class OptixGLInteropViewer:
         # Drive presentation explicitly each update so rendering does not depend
         # on backend-specific on_draw invalidation behavior.
         self.window.switch_to()
-        self.window.dispatch_event("on_draw")
+        self._on_draw()
         self.window.flip()
 
         self.frame_index += 1
@@ -180,7 +195,7 @@ class OptixGLInteropViewer:
         gl.glBindTexture(self.texture.target, 0)
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, 0)
         self.sprite.draw()
-        if self._on_draw_overlay is not None:
+        if self._on_draw_overlay is not None and not self._dispatching_events:
             self._on_draw_overlay()
 
     def _on_close(self):
@@ -199,6 +214,9 @@ class OptixGLInteropViewer:
         if self.closed:
             return
         self._on_close()
+        if self._update_scheduled:
+            self.pyglet.clock.unschedule(self._update)
+            self._update_scheduled = False
         self.window.close()
 
     def is_running(self) -> bool:

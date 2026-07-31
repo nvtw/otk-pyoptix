@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from warp_optix.pathtracing import PathTracingViewerBackend
+from warp_optix.pathtracing import PathTracerAPI, PathTracingViewerBackend
+from warp_optix.pathtracing.scene import Scene
 
 
 class _FakeScene:
@@ -30,6 +31,9 @@ class _FakePathTracerAPI:
         self.render_count = 0
         self.debug_mode = 0
         self.dlss_enabled = True
+        self.tonemap_exposure = 1.0
+        self.tonemap_contrast = 1.0
+        self.tonemap_saturation = 1.0
 
     def initialize(self):
         return True
@@ -43,8 +47,27 @@ class _FakePathTracerAPI:
     def set_camera_look_at(self, position, target, up, fov):
         self.camera = (np.asarray(position), np.asarray(target), tuple(up), fov)
 
-    def create_pbr_material(self, color, roughness, metallic):
-        self.materials.append((tuple(color), roughness, metallic))
+    def create_pbr_material(
+        self,
+        color,
+        roughness,
+        metallic,
+        ior=1.5,
+        specular=1.0,
+        clearcoat=0.0,
+        clearcoat_roughness=0.1,
+    ):
+        self.materials.append(
+            (
+                tuple(color),
+                roughness,
+                metallic,
+                ior,
+                specular,
+                clearcoat,
+                clearcoat_roughness,
+            )
+        )
         return len(self.materials) - 1
 
     def create_mesh(self, positions, indices, normals, uvs, material_id):
@@ -68,6 +91,14 @@ class _FakePathTracerAPI:
     def set_instance_transform_matrix(self, instance_id, matrix):
         self.scene._instances[instance_id].transform = np.asarray(matrix).copy()
 
+    def set_instance_transform_matrices(self, instance_ids, matrices):
+        for instance_id, matrix in zip(instance_ids, matrices, strict=True):
+            self.scene._instances[instance_id].transform = np.asarray(matrix).copy()
+
+    def set_instances_visible(self, instance_ids, visible):
+        for instance_id in instance_ids:
+            self.scene._instances[instance_id].visible = bool(visible)
+
     def set_instance_material(self, instance_id, material_id):
         self.scene._instances[instance_id].material_id = material_id
 
@@ -86,6 +117,9 @@ class _FakePathTracerAPI:
     def set_debug_buffer_mode(self, mode):
         self.debug_mode = int(mode)
 
+    def set_environment_color(self, color):
+        self.environment_color = tuple(color)
+
     def clear_scene(self):
         self.scene = _FakeScene()
 
@@ -100,7 +134,20 @@ def _triangle():
     )
 
 
-def test_hybrid_sky_and_srgb_material_mapping():
+
+def test_scene_batches_instance_transforms_and_visibility():
+    scene = Scene(None)
+    instance_ids = [scene.add_instance(0) for _ in range(3)]
+    transforms = np.repeat(np.eye(4, dtype=np.float32)[None], 3, axis=0)
+    transforms[:, 0, 3] = (1.0, 2.0, 3.0)
+
+    scene.set_instance_transforms_batch(instance_ids, transforms)
+    scene.set_instances_visible_batch(instance_ids[1:], False)
+
+    np.testing.assert_array_equal(scene._instance_transform_cache[:3], transforms)
+    np.testing.assert_array_equal(scene._instance_visibility_cache[:3], (True, False, False))
+
+def test_reference_sky_and_srgb_color_mapping():
     api = _FakePathTracerAPI()
     viewer = PathTracingViewerBackend(device="cpu", headless=True, api=api)
     points, indices = _triangle()
@@ -115,16 +162,49 @@ def test_hybrid_sky_and_srgb_material_mapping():
     )
 
     assert api.procedural_sky is True
-    assert api.sky["sun_direction"] == (-0.3, 0.7, 0.5)
-    assert api.sky["multiplier"] == 1.5
-    assert api.sky["haze"] == 0.03
-    assert api.sky["ground_color"] == (0.7, 0.7, 0.75)
-    assert api.sky["horizon_blur"] == 0.3
-    assert api.sky["sun_glow_intensity"] == 0.8
+    assert api.sky is None
     np.testing.assert_allclose(
         api.materials[0][0], (0.60382736, 0.60382736, 0.60382736), rtol=1.0e-6
     )
-    assert api.materials[0][1:] == (0.25, 0.75)
+    assert api.materials[0][1:3] == (0.25, 0.75)
+    assert api.materials[0][3:] == (1.5, 1.0, 0.0, 0.1)
+
+    viewer.set_sky_parameters(
+        sun_direction=(0.0, 1.0, 0.0),
+        ground_color=(0.5, 0.25, 0.75),
+        night_color=(0.2, 0.4, 0.6),
+    )
+    viewer.set_environment_color((0.1, 0.5, 0.9))
+    viewer.tonemap_saturation = 1.25
+    viewer.tonemap_contrast = 1.1
+    viewer.tonemap_exposure = 0.75
+    assert viewer.tonemap_exposure == 0.75
+    assert viewer.tonemap_saturation == 1.25
+    assert viewer.tonemap_contrast == 1.1
+
+    np.testing.assert_allclose(
+        api.sky["ground_color"], (0.21404114, 0.05087609, 0.52252155), rtol=1.0e-6
+    )
+    np.testing.assert_allclose(
+        api.sky["night_color"], (0.03310477, 0.13286832, 0.31854678), rtol=1.0e-6
+    )
+    np.testing.assert_allclose(
+        api.environment_color, (0.01002283, 0.21404114, 0.78741229), rtol=1.0e-6
+    )
+
+
+def test_sky_parameters_normalize_sun_direction():
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace()
+    api.initialize = lambda: True
+
+    api.set_sky_parameters((0.0, 2.0, 1.0))
+
+    np.testing.assert_allclose(
+        api._viewer.sky_sun_direction, (0.0, 0.8944272, 0.4472136), rtol=1.0e-6
+    )
+    with pytest.raises(ValueError, match="nonzero"):
+        api.set_sky_parameters((0.0, 0.0, 0.0))
 
 
 def test_logged_instances_apply_up_axis_materials_and_frame_lifecycle():
@@ -146,7 +226,8 @@ def test_logged_instances_apply_up_axis_materials_and_frame_lifecycle():
         instance.transform[:3, :3], ((2, 0, 0), (0, 0, 4), (0, -3, 0))
     )
     assert instance.visible is True
-    assert api.materials[instance.material_id][1:] == (0.2, 0.6)
+    assert api.materials[instance.material_id][1:3] == (0.2, 0.6)
+    assert api.materials[instance.material_id][3:] == (1.5, 1.0, 0.0, 0.1)
 
     viewer.end_frame()
 
@@ -241,7 +322,7 @@ def test_optional_picking_uses_physics_camera_ray_and_applies_forces():
     picking.pick(state, origin, direction)
     viewer.log_state(state)
     viewer.apply_forces(state)
-    assert picking.applied == [state, state]
+    assert picking.applied == [state]
 
 
 def test_recording_debug_and_bridge_transform_compatibility(tmp_path):
@@ -311,3 +392,57 @@ def test_instance_capacity_is_enforced():
     )
     with pytest.raises(RuntimeError, match="instance capacity"):
         viewer.log_instances("batch", "triangle", xforms, None, None, None)
+
+
+def test_tlas_refit_preserves_temporal_sequence():
+    class _Scene:
+        def __init__(self):
+            self.refit_count = 0
+
+        def rebuild_tlas(self):
+            self.refit_count += 1
+
+    scene = _Scene()
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(
+        _scene=scene,
+        sample_index=17,
+        frame_index=9,
+    )
+
+    api.rebuild_tlas()
+
+    assert scene.refit_count == 1
+    assert api._viewer.sample_index == 17
+    assert api._viewer.frame_index == 9
+
+
+def test_scene_rebuild_resets_temporal_history():
+    class _Scene:
+        def build(self, optix):
+            self.optix = optix
+
+    scene = _Scene()
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(
+        _scene=scene,
+        _optix=object(),
+        _dlss_reset_history=False,
+        _prev_instance_transforms_valid=True,
+        sample_index=17,
+        frame_index=9,
+        _create_sbt=lambda: None,
+        _sync_prev_camera_matrices_to_current=lambda: None,
+    )
+
+    api.build_scene()
+
+    assert scene.optix is api._viewer._optix
+    assert api._viewer.sample_index == 0
+    assert api._viewer.frame_index == 0
+    assert api._viewer._dlss_reset_history is True
+    assert api._viewer._prev_instance_transforms_valid is False
+
+    api._viewer._dlss_reset_history = False
+    api.reset_temporal_history()
+    assert api._viewer._dlss_reset_history is True

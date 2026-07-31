@@ -87,6 +87,46 @@ class PathTracerAPI:
         """Return the DLSS initialization error, if Ray Reconstruction fell back."""
         return self._viewer._dlss_init_error
 
+    @property
+    def linear_depth_output(self):
+        """Return the current positive view-space depth buffer."""
+        return self._viewer.linear_depth_output
+
+    @property
+    def render_resolution(self) -> tuple[int, int]:
+        """Return the internal render resolution as ``(width, height)``."""
+        return self._viewer.render_resolution
+
+    @property
+    def tonemap_exposure(self) -> float:
+        """Return the linear exposure multiplier."""
+        return float(self._viewer._tonemapper.exposure)
+
+    @tonemap_exposure.setter
+    def tonemap_exposure(self, value: float) -> None:
+        """Set the nonnegative linear exposure multiplier."""
+        self._viewer._tonemapper.exposure = max(0.0, float(value))
+
+    @property
+    def tonemap_contrast(self) -> float:
+        """Return the display contrast multiplier."""
+        return float(self._viewer._tonemapper.contrast)
+
+    @tonemap_contrast.setter
+    def tonemap_contrast(self, value: float) -> None:
+        """Set the nonnegative display contrast multiplier."""
+        self._viewer._tonemapper.contrast = max(0.0, float(value))
+
+    @property
+    def tonemap_saturation(self) -> float:
+        """Return the display saturation multiplier."""
+        return float(self._viewer._tonemapper.saturation)
+
+    @tonemap_saturation.setter
+    def tonemap_saturation(self, value: float) -> None:
+        """Set the nonnegative display saturation multiplier."""
+        self._viewer._tonemapper.saturation = max(0.0, float(value))
+
     def _require_scene(self):
         """Ensure an initialized scene is available or raise a clear error."""
         if self._viewer._scene is None:
@@ -141,12 +181,19 @@ class PathTracerAPI:
         self._viewer._create_sbt()
         self._viewer.sample_index = 0
         self._viewer.frame_index = 0
+        self._viewer._dlss_reset_history = True
+        self._viewer._prev_instance_transforms_valid = False
+        self._viewer._sync_prev_camera_matrices_to_current()
+
+    def reset_temporal_history(self):
+        """Discard DLSS reconstruction history before a discontinuous scene change."""
+        self._viewer._dlss_reset_history = True
 
     def rebuild_tlas(self):
         scene = self._require_scene()
+        # Transform-only updates retain RNG progression and DLSS history; the
+        # renderer supplies motion vectors from its previous transform snapshot.
         scene.rebuild_tlas()
-        self._viewer.sample_index = 0
-        self._viewer.frame_index = 0
 
     def clear_scene(self):
         self._require_scene().clear()
@@ -233,6 +280,12 @@ class PathTracerAPI:
         m = np.asarray(matrix, dtype=np.float32).reshape(4, 4)
         self._require_scene().set_instance_transform(int(instance_id), m)
 
+    def set_instance_transform_matrices(self, instance_ids: Iterable[int], matrices: np.ndarray):
+        self._require_scene().set_instance_transforms_batch(instance_ids, matrices)
+
+    def set_instances_visible(self, instance_ids: Iterable[int], visible: bool):
+        self._require_scene().set_instances_visible_batch(instance_ids, visible)
+
     def set_instance_transforms_batch(
         self, instance_ids: Iterable[int], transforms_flat: np.ndarray
     ):
@@ -274,7 +327,14 @@ class PathTracerAPI:
         )
 
     def create_pbr_material(
-        self, color: Iterable[float], roughness: float, metallic: float
+        self,
+        color: Iterable[float],
+        roughness: float,
+        metallic: float,
+        ior: float = 1.5,
+        specular: float = 1.0,
+        clearcoat: float = 0.0,
+        clearcoat_roughness: float = 0.1,
     ) -> int:
         scene = self._require_scene()
         return int(
@@ -282,6 +342,10 @@ class PathTracerAPI:
                 base_color=tuple(float(v) for v in color),
                 roughness=float(roughness),
                 metallic=float(metallic),
+                ior=max(1.0, float(ior)),
+                specular=min(1.0, max(0.0, float(specular))),
+                clearcoat=min(1.0, max(0.0, float(clearcoat))),
+                clearcoat_roughness=min(1.0, max(0.001, float(clearcoat_roughness))),
             )
         )
 
@@ -381,7 +445,12 @@ class PathTracerAPI:
         y_is_up: int = 1,
     ):
         self.initialize()
-        self._viewer.sky_sun_direction = tuple(float(v) for v in sun_direction)
+        direction = np.asarray(tuple(float(v) for v in sun_direction), dtype=np.float32)
+        norm = float(np.linalg.norm(direction))
+        if norm <= 0.0:
+            raise ValueError("sun_direction must be nonzero")
+        direction /= norm
+        self._viewer.sky_sun_direction = tuple(float(v) for v in direction)
         self._viewer.sky_multiplier = float(multiplier)
         self._viewer.sky_haze = float(haze)
         self._viewer.sky_redblueshift = float(red_blue_shift)

@@ -20,13 +20,19 @@ _CPP_IDENTIFIER_RE = re.compile(r"^[A-Za-z_]\w*$")
 
 def _find_cuda_include_dir() -> Path | None:
     """Find the CUDA Toolkit headers required by some OptiX headers."""
-    candidates = []
+    roots = []
     for variable in ("CUDA_PATH", "CUDA_HOME"):
         if value := os.environ.get(variable):
-            candidates.append(Path(value) / "include")
+            roots.append(Path(value))
 
     if nvcc := shutil.which("nvcc"):
-        candidates.append(Path(nvcc).resolve().parent.parent / "include")
+        roots.append(Path(nvcc).resolve().parent.parent)
+
+    roots.append(Path("/usr/local/cuda"))
+    candidates = []
+    for root in roots:
+        candidates.append(root / "include")
+        candidates.extend(sorted(root.glob("targets/*/include")))
 
     return next(
         (path for path in candidates if (path / "cuda_fp16.h").is_file()),

@@ -23,6 +23,11 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import shutil
+import struct
+import tempfile
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +35,14 @@ import numpy as np
 import warp as wp
 import warp_optix as woptix
 from warp_optix.pathtracing import PathTracerAPI
+
+
+_ABEAUTIFULGAME_URL = (
+    "https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/"
+    "2bac6f8c57bf471df0d2a1e8a8ec023c7801dddf/"
+    "Models/ABeautifulGame/glTF-Binary/ABeautifulGame.glb"
+)
+_ABEAUTIFULGAME_FILENAME = "ABeautifulGame.glb"
 
 
 @wp.kernel
@@ -57,11 +70,11 @@ def _parse_args():
         "--scene-gltf",
         type=str,
         default=None,
-        help="Optional path to glTF scene file. If omitted, tries known ABeautifulGame locations.",
+        help="Optional path to a glTF/GLB scene. If omitted, finds or downloads A Beautiful Game.",
     )
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
-    parser.add_argument("--fps", type=int, default=60)
+    parser.add_argument("--fps", type=int, default=0, help="Presentation rate cap (0 = unlimited).")
     parser.add_argument("--max-frames", type=int, default=0, help="Auto-exit after N frames (0 = run forever).")
     parser.add_argument("--title", type=str, default="Warp OptiX Basic Pathtracing")
     parser.add_argument("--camera-speed", type=float, default=0.5, help="Camera movement speed in scene units/second.")
@@ -70,26 +83,92 @@ def _parse_args():
     return parser.parse_args()
 
 
+def _default_asset_cache_dir() -> Path:
+    """Return the platform-appropriate persistent cache for downloaded example assets."""
+    if cache_home := os.environ.get("XDG_CACHE_HOME"):
+        return Path(cache_home).expanduser() / "warp_optix" / "assets"
+    return Path.home() / ".cache" / "warp_optix" / "assets"
+
+
+def _validate_glb(path: Path) -> None:
+    """Reject incomplete or non-GLB downloads before they enter the persistent cache."""
+    size = path.stat().st_size
+    if size < 20:
+        raise ValueError(f"GLB is too small ({size} bytes)")
+
+    with path.open("rb") as stream:
+        header = stream.read(12)
+    magic, version, declared_size = struct.unpack("<4sII", header)
+    if magic != b"glTF" or version != 2 or declared_size != size:
+        raise ValueError(
+            f"invalid GLB header (magic={magic!r}, version={version}, "
+            f"declared size={declared_size}, actual size={size})"
+        )
+
+
+def _download_default_scene(destination: Path) -> Path:
+    """Download A Beautiful Game atomically and return its cached path."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    print(f"[optix] downloading A Beautiful Game from {_ABEAUTIFULGAME_URL}")
+    print(f"[optix] asset cache: {destination}")
+
+    try:
+        request = urllib.request.Request(_ABEAUTIFULGAME_URL, headers={"User-Agent": "warp-optix-example"})
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
+            with urllib.request.urlopen(request, timeout=60) as response:
+                shutil.copyfileobj(response, temp_file)
+
+        _validate_glb(temp_path)
+        temp_path.replace(destination)
+        temp_path = None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            "Failed to download the default A Beautiful Game scene. "
+            "Check the network connection or pass --scene-gltf explicitly. "
+            f"Source: {_ABEAUTIFULGAME_URL}"
+        ) from exc
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+    return destination.resolve()
+
+
 def _resolve_scene_gltf(scene_gltf_arg: str | None) -> Path:
     if scene_gltf_arg:
         scene_gltf = Path(scene_gltf_arg).expanduser().resolve()
-        if scene_gltf.exists():
+        if scene_gltf.is_file():
             return scene_gltf
         raise FileNotFoundError(f"--scene-gltf does not exist: {scene_gltf}")
 
+    repo_root = Path(__file__).resolve().parents[1]
     candidates = [
+        repo_root / "downloaded_resources" / "ABeautifulGame" / "glTF" / "ABeautifulGame.gltf",
+        repo_root / "examples_warp" / "assets" / "ABeautifulGame" / "glTF" / "ABeautifulGame.gltf",
         Path(r"C:\git\downloaded_resources\ABeautifulGame\glTF\ABeautifulGame.gltf"),
         Path(r"C:\git\single-file-vulkan-pathtracing\assets\gltf\ABeautifulGame\ABeautifulGame.gltf"),
     ]
     for candidate in candidates:
-        if candidate.exists():
-            return candidate
+        if candidate.is_file():
+            return candidate.resolve()
 
-    raise FileNotFoundError(
-        "Could not find ABeautifulGame.gltf. Pass --scene-gltf explicitly or place it in one of:\n"
-        f"  - {candidates[0]}\n"
-        f"  - {candidates[1]}"
-    )
+    cached_scene = _default_asset_cache_dir() / _ABEAUTIFULGAME_FILENAME
+    if cached_scene.is_file():
+        try:
+            _validate_glb(cached_scene)
+            return cached_scene.resolve()
+        except (OSError, ValueError) as exc:
+            print(f"[optix] cached scene is invalid; downloading it again: {exc}")
+
+    return _download_default_scene(cached_scene)
 
 
 class FreeCameraController:
@@ -235,6 +314,8 @@ def main():
     render_width = int(args.width)
     render_height = int(args.height)
     last_elapsed = 0.0
+    fps_sample_start = 0.0
+    fps_sample_frame = 0
 
     def _on_resize(width: int, height: int):
         nonlocal render_width, render_height, last_elapsed
@@ -250,13 +331,14 @@ def main():
         title=args.title,
         fps=args.fps,
         on_resize=_on_resize,
+        vsync=args.fps > 0,
     )
 
     # Attach Newton-style free camera controls to the viewer window.
     controller = FreeCameraController(viewer, api, cam_pos, cam_yaw, cam_pitch, cam_fov, args.camera_speed)
 
-    def _render(mapped_image: wp.array, _frame_idx: int, elapsed_sec: float):
-        nonlocal last_elapsed
+    def _render(mapped_image: wp.array, frame_idx: int, elapsed_sec: float):
+        nonlocal fps_sample_frame, fps_sample_start, last_elapsed
         dt = elapsed_sec - last_elapsed
         last_elapsed = elapsed_sec
         controller.update(dt)
@@ -267,6 +349,13 @@ def main():
             inputs=[api.viewer.tonemapped_output, mapped_image, render_width, render_height],
             device="cuda",
         )
+
+        fps_elapsed = elapsed_sec - fps_sample_start
+        if fps_elapsed >= 0.5:
+            fps = float(frame_idx - fps_sample_frame) / fps_elapsed
+            viewer.window.set_caption(f"{args.title} — {fps:.1f} FPS")
+            fps_sample_start = elapsed_sec
+            fps_sample_frame = frame_idx
 
     print(f"[optix] loaded glTF scene: {scene_gltf}")
     viewer.run(_render, max_frames=args.max_frames)

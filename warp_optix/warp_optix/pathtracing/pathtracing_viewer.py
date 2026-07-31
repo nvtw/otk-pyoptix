@@ -271,6 +271,16 @@ class PathTracingViewer:
         """Return the tonemapped output buffer used for display/extraction."""
         return self._tonemapper.output
 
+    @property
+    def linear_depth_output(self):
+        """Return the current positive view-space depth buffer."""
+        return self._depth_buffer
+
+    @property
+    def render_resolution(self) -> tuple[int, int]:
+        """Return the internal render resolution as ``(width, height)``."""
+        return self._render_width, self._render_height
+
     def build(self):
         """Build the OptiX pipeline and scene."""
         logger.info("Initializing OptiX path tracing viewer.")
@@ -408,14 +418,19 @@ class PathTracingViewer:
 
         required = ("DlssRRContext", "DlssRRInitInfo", "DlssRRResource", "DlssPerfQuality")
         if not all(hasattr(self._optix, name) for name in required):
+            self._dlss_init_error = "bindings are not present in the optix module"
             logger.info("DLSS RR bindings not present in optix module.")
             return
 
         try:
             context = self._optix.DlssRRContext()
-            context.init()
+            context.init(
+                featureSearchPath=str(Path(self._optix.__file__).resolve().parent),
+            )
             if not context.isDlssRRAvailable():
+                self._dlss_init_error = "not available on this system"
                 logger.info("DLSS RR not available on this system.")
+                context.deinit()
                 return
 
             init_info = self._optix.DlssRRInitInfo()
@@ -431,7 +446,10 @@ class PathTracingViewer:
             if not hasattr(quality_enum, quality_name):
                 quality_name = "BALANCED" if hasattr(quality_enum, "BALANCED") else "DLAA"
             init_info.quality = getattr(quality_enum, quality_name)
-            init_info.preset = self._optix.RayReconstructionHintRenderPreset.DEFAULT
+            preset_enum = self._optix.RayReconstructionHintRenderPreset
+            # Preset E's latest transformer better rejects stale illumination
+            # at moving shadow boundaries.
+            init_info.preset = getattr(preset_enum, "E", preset_enum.DEFAULT)
             # Match reference behavior:
             # - MVJittered=false while still passing per-frame jitter to denoise()
             # - lowResolutionMotionVectors=true (motion vectors provided at render resolution)
@@ -583,31 +601,17 @@ class PathTracingViewer:
             self._instance_transform_count = 0
             return
 
-        instances = getattr(self._scene, "_instances", None)
-        if not instances:
-            self._instance_transforms_buffer = None
-            self._prev_instance_transforms_buffer = None
-            self._instance_transform_count = 0
-            return
-
-        count = len(instances)
+        count = self._scene.instance_count
 
         # (Re)allocate GPU buffers when the instance count changes.
         if count != self._instance_transform_count:
-            self._instance_xform_curr_np = np.empty((count, 12), dtype=np.float32)
             self._instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
             self._prev_instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
             self._instance_transform_count = count
             self._prev_instance_transforms_valid = False
 
-        curr = self._instance_xform_curr_np
-        for i, inst in enumerate(instances):
-            m = np.asarray(inst.transform, dtype=np.float32).reshape(4, 4)
-            curr[i, 0:4] = m[0, :]
-            curr[i, 4:8] = m[1, :]
-            curr[i, 8:12] = m[2, :]
-
-        self._instance_transforms_buffer.assign(curr.reshape(-1))
+        curr = self._scene._instance_transform_cache[:count, :3, :].reshape(-1)
+        self._instance_transforms_buffer.assign(curr)
 
         # First frame (or after resize): prev == current so motion is zero.
         if not self._prev_instance_transforms_valid:
@@ -979,7 +983,7 @@ class PathTracingViewer:
                 self._render_width,
                 self._render_height,
                 self._launch_params_buffer,
-                stream=0,
+                stream=int(wp.get_stream("cuda").cuda_stream),
             )
 
             if not self._dlss_enabled:
@@ -1055,11 +1059,8 @@ class PathTracingViewer:
             proj_inv=current_proj_inv,
         )
 
-        # Ensure OptiX work is complete before publishing current transforms as "previous".
-        wp.synchronize_device("cuda")
-
-        # Snapshot current instance transforms -> previous for next frame's
-        # rigid-body motion vectors.  This is a GPU-side copy so it is cheap.
+        # Queue the current-to-previous transform snapshot behind the OptiX launch.
+        # The synchronization before DLSS publishes both results together.
         self._snapshot_instance_transforms()
 
         # Keep previous matrices for next frame's motion-vector calculation.

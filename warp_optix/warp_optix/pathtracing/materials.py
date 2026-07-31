@@ -269,12 +269,20 @@ class MaterialManager:
         base_color: tuple = (1.0, 1.0, 1.0),
         metallic: float = 0.0,
         roughness: float = 0.5,
+        ior: float = 1.5,
+        specular: float = 1.0,
+        clearcoat: float = 0.0,
+        clearcoat_roughness: float = 0.1,
     ) -> int:
         """Add a PBR material with custom properties."""
         mat = self._create_default_material()
         mat["pbrBaseColorFactor"] = (*base_color, 1.0)
         mat["pbrMetallicFactor"] = metallic
         mat["pbrRoughnessFactor"] = roughness
+        mat["ior"] = ior
+        mat["specularFactor"] = specular
+        mat["clearcoatFactor"] = clearcoat
+        mat["clearcoatRoughness"] = clearcoat_roughness
         self._materials.append(mat)
         self._dirty = True
         return len(self._materials) - 1
