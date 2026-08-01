@@ -163,7 +163,7 @@ class OptixGLInteropViewer:
             )
             elapsed = time.perf_counter() - self.start_time
             self._render_callback(mapped, self.frame_index, elapsed)
-            wp.synchronize_device(self.device)
+            wp.synchronize_stream(wp.get_stream(self.device))
             self.cuda_gl.unmap()
 
         # Drive presentation explicitly each update so rendering does not depend

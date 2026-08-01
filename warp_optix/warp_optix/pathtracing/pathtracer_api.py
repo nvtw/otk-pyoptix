@@ -40,6 +40,10 @@ class PathTracerAPI:
         height: int = 720,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
+        dlss_quality: str = "quality",
+        samples_per_frame: int = 1,
+        max_bounces: int = 4,
+        direct_light_samples: int = 1,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -50,6 +54,10 @@ class PathTracerAPI:
             enable_dlss_rr=bool(enable_dlss_rr),
             enable_set=bool(enable_set),
             accumulate_samples=False,
+            dlss_quality=dlss_quality,
+            samples_per_frame=samples_per_frame,
+            max_bounces=max_bounces,
+            direct_light_samples=direct_light_samples,
         )
         self._built = False
         self._running = True
@@ -86,6 +94,49 @@ class PathTracerAPI:
     def dlss_init_error(self) -> str | None:
         """Return the DLSS initialization error, if Ray Reconstruction fell back."""
         return self._viewer._dlss_init_error
+
+    @property
+    def dlss_quality(self) -> str:
+        """Return the active DLSS quality-mode selection."""
+        return self._viewer.dlss_quality
+
+    @property
+    def max_bounces(self) -> int:
+        """Return the current maximum path depth."""
+        return int(self._viewer.max_bounces)
+
+    @property
+    def max_compiled_bounces(self) -> int:
+        """Return the largest runtime path depth supported by this pipeline."""
+        return int(self._viewer._pipeline_max_bounces)
+
+    @property
+    def direct_light_samples(self) -> int:
+        """Return the direct-light samples evaluated at each surface hit."""
+        return int(self._viewer.direct_light_samples)
+
+    @property
+    def samples_per_frame(self) -> int:
+        """Return the samples rendered per frame when DLSS is disabled."""
+        return int(self._viewer.samples_per_frame)
+
+    def set_dlss_quality(self, quality: str) -> None:
+        """Select a DLSS quality mode and recreate DLSS resources if needed."""
+        self._viewer.set_dlss_quality(quality)
+
+    def set_ray_budget(
+        self,
+        *,
+        max_bounces: int | None = None,
+        direct_light_samples: int | None = None,
+        samples_per_frame: int | None = None,
+    ) -> None:
+        """Adjust path depth and sampling budgets."""
+        self._viewer.set_ray_budget(
+            max_bounces=max_bounces,
+            direct_light_samples=direct_light_samples,
+            samples_per_frame=samples_per_frame,
+        )
 
     @property
     def linear_depth_output(self):
@@ -148,6 +199,7 @@ class PathTracerAPI:
 
     def close(self):
         self._running = False
+        self._viewer.close()
 
     def begin_frame(self, time_sec: float):
         # Kept for ViewerBase API compatibility; rendering is driven explicitly.
@@ -280,8 +332,24 @@ class PathTracerAPI:
         m = np.asarray(matrix, dtype=np.float32).reshape(4, 4)
         self._require_scene().set_instance_transform(int(instance_id), m)
 
-    def set_instance_transform_matrices(self, instance_ids: Iterable[int], matrices: np.ndarray):
+    def set_instance_transform_matrices(
+        self, instance_ids: Iterable[int], matrices: np.ndarray
+    ):
         self._require_scene().set_instance_transforms_batch(instance_ids, matrices)
+
+    def set_instance_transform_arrays(
+        self, instance_ids, xforms, scales, global_transform
+    ) -> bool:
+        """Update instance transforms from CUDA-resident Warp arrays."""
+        return self._require_scene().set_instance_transforms_device(
+            instance_ids, xforms, scales, global_transform
+        )
+
+    def set_instance_material_arrays(self, material_ids, colors, properties) -> bool:
+        """Update compact materials from CUDA-resident Warp arrays."""
+        return self._require_scene().set_instance_materials_device(
+            material_ids, colors, properties
+        )
 
     def set_instances_visible(self, instance_ids: Iterable[int], visible: bool):
         self._require_scene().set_instances_visible_batch(instance_ids, visible)
@@ -443,6 +511,7 @@ class PathTracerAPI:
         sun_disk_scale: float = 1.0,
         sun_glow_intensity: float = 1.0,
         y_is_up: int = 1,
+        grayscale: bool = False,
     ):
         self.initialize()
         direction = np.asarray(tuple(float(v) for v in sun_direction), dtype=np.float32)
@@ -463,6 +532,7 @@ class PathTracerAPI:
         self._viewer.sky_sun_disk_scale = float(sun_disk_scale)
         self._viewer.sky_sun_glow_intensity = float(sun_glow_intensity)
         self._viewer.sky_y_is_up = int(y_is_up)
+        self._viewer.sky_grayscale = bool(grayscale)
 
     def set_environment_hdr(self, hdr_path: str, scaling: float = 1.0):
         self.initialize()

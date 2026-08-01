@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from warp_optix.pathtracing import PathTracerAPI, PathTracingViewerBackend
+from warp_optix.pathtracing import (
+    PathTracerAPI,
+    PathTracingRenderer,
+    PathTracingViewerBackend,
+)
 from warp_optix.pathtracing.scene import Scene
 
 
@@ -134,7 +138,6 @@ def _triangle():
     )
 
 
-
 def test_scene_batches_instance_transforms_and_visibility():
     scene = Scene(None)
     instance_ids = [scene.add_instance(0) for _ in range(3)]
@@ -145,7 +148,10 @@ def test_scene_batches_instance_transforms_and_visibility():
     scene.set_instances_visible_batch(instance_ids[1:], False)
 
     np.testing.assert_array_equal(scene._instance_transform_cache[:3], transforms)
-    np.testing.assert_array_equal(scene._instance_visibility_cache[:3], (True, False, False))
+    np.testing.assert_array_equal(
+        scene._instance_visibility_cache[:3], (True, False, False)
+    )
+
 
 def test_reference_sky_and_srgb_color_mapping():
     api = _FakePathTracerAPI()
@@ -198,8 +204,9 @@ def test_sky_parameters_normalize_sun_direction():
     api._viewer = SimpleNamespace()
     api.initialize = lambda: True
 
-    api.set_sky_parameters((0.0, 2.0, 1.0))
+    api.set_sky_parameters((0.0, 2.0, 1.0), grayscale=True)
 
+    assert api._viewer.sky_grayscale is True
     np.testing.assert_allclose(
         api._viewer.sky_sun_direction, (0.0, 0.8944272, 0.4472136), rtol=1.0e-6
     )
@@ -446,3 +453,33 @@ def test_scene_rebuild_resets_temporal_history():
     api._viewer._dlss_reset_history = False
     api.reset_temporal_history()
     assert api._viewer._dlss_reset_history is True
+
+
+def test_quality_modes_and_runtime_ray_budgets():
+    assert (
+        PathTracingRenderer._normalize_dlss_quality("ultra-performance")
+        == "ultra_performance"
+    )
+    assert PathTracingRenderer._normalize_dlss_quality("native") == "native"
+    with pytest.raises(ValueError, match="dlss_quality"):
+        PathTracingRenderer._normalize_dlss_quality("cinematic")
+
+    renderer = PathTracingRenderer.__new__(PathTracingRenderer)
+    renderer._pipeline_max_bounces = 6
+    renderer.max_bounces = 4
+    renderer.direct_light_samples = 1
+    renderer.samples_per_frame = 1
+
+    renderer.set_ray_budget(
+        max_bounces=2,
+        direct_light_samples=3,
+        samples_per_frame=4,
+    )
+
+    assert renderer.max_bounces == 2
+    assert renderer.direct_light_samples == 3
+    assert renderer.samples_per_frame == 4
+    with pytest.raises(ValueError, match="compiled limit"):
+        renderer.set_ray_budget(max_bounces=7)
+    with pytest.raises(ValueError, match="at least 1"):
+        renderer.set_ray_budget(direct_light_samples=0)

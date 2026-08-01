@@ -176,6 +176,7 @@ class PhysicalSkyParams:
     sun_disk_scale: wp.float32
     sun_glow_intensity: wp.float32
     y_is_up: wp.int32
+    grayscale: wp.int32
 
 
 @wp.struct
@@ -822,6 +823,10 @@ def _eval_physical_sky(ss: PhysicalSkyParams, in_direction: wp.vec3) -> wp.vec3:
             wp.max(result[1], night[1]),
             wp.max(result[2], night[2]),
         )
+
+    if ss.grayscale == 1:
+        gray = wp.max(result[0], wp.max(result[1], result[2]))
+        result = wp.vec3(gray, gray, gray)
 
     return result
 

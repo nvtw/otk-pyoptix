@@ -31,6 +31,154 @@ from .materials import MaterialManager
 logger = logging.getLogger(__name__)
 
 
+@wp.kernel
+def _update_device_instance_transforms(
+    instance_ids: wp.array(dtype=wp.int32),
+    xforms: wp.array(dtype=wp.transform),
+    scales: wp.array(dtype=wp.vec3),
+    instance_records: wp.array2d(dtype=wp.float32),
+    render_nodes: wp.array2d(dtype=wp.float32),
+    packed_transforms: wp.array2d(dtype=wp.float32),
+    global_rotation: wp.mat33,
+    global_translation: wp.vec3,
+):
+    batch_index = wp.tid()
+    instance_index = instance_ids[batch_index]
+    xform = xforms[batch_index]
+    position = (
+        global_rotation * wp.transform_get_translation(xform) + global_translation
+    )
+    rotation = global_rotation * wp.quat_to_matrix(wp.transform_get_rotation(xform))
+    scale = scales[batch_index]
+
+    m00 = rotation[0, 0] * scale[0]
+    m01 = rotation[0, 1] * scale[1]
+    m02 = rotation[0, 2] * scale[2]
+    m10 = rotation[1, 0] * scale[0]
+    m11 = rotation[1, 1] * scale[1]
+    m12 = rotation[1, 2] * scale[2]
+    m20 = rotation[2, 0] * scale[0]
+    m21 = rotation[2, 1] * scale[1]
+    m22 = rotation[2, 2] * scale[2]
+
+    instance_records[instance_index, 0] = m00
+    instance_records[instance_index, 1] = m01
+    instance_records[instance_index, 2] = m02
+    instance_records[instance_index, 3] = position[0]
+    instance_records[instance_index, 4] = m10
+    instance_records[instance_index, 5] = m11
+    instance_records[instance_index, 6] = m12
+    instance_records[instance_index, 7] = position[1]
+    instance_records[instance_index, 8] = m20
+    instance_records[instance_index, 9] = m21
+    instance_records[instance_index, 10] = m22
+    instance_records[instance_index, 11] = position[2]
+
+    for column in range(12):
+        packed_transforms[instance_index, column] = instance_records[
+            instance_index, column
+        ]
+
+    render_nodes[instance_index, 0] = m00
+    render_nodes[instance_index, 1] = m01
+    render_nodes[instance_index, 2] = m02
+    render_nodes[instance_index, 3] = position[0]
+    render_nodes[instance_index, 4] = m10
+    render_nodes[instance_index, 5] = m11
+    render_nodes[instance_index, 6] = m12
+    render_nodes[instance_index, 7] = position[1]
+    render_nodes[instance_index, 8] = m20
+    render_nodes[instance_index, 9] = m21
+    render_nodes[instance_index, 10] = m22
+    render_nodes[instance_index, 11] = position[2]
+    render_nodes[instance_index, 12] = 0.0
+    render_nodes[instance_index, 13] = 0.0
+    render_nodes[instance_index, 14] = 0.0
+    render_nodes[instance_index, 15] = 1.0
+
+    inv_sx = 0.0
+    inv_sy = 0.0
+    inv_sz = 0.0
+    if wp.abs(scale[0]) > 1.0e-12:
+        inv_sx = 1.0 / scale[0]
+    if wp.abs(scale[1]) > 1.0e-12:
+        inv_sy = 1.0 / scale[1]
+    if wp.abs(scale[2]) > 1.0e-12:
+        inv_sz = 1.0 / scale[2]
+
+    i00 = rotation[0, 0] * inv_sx
+    i01 = rotation[1, 0] * inv_sx
+    i02 = rotation[2, 0] * inv_sx
+    i10 = rotation[0, 1] * inv_sy
+    i11 = rotation[1, 1] * inv_sy
+    i12 = rotation[2, 1] * inv_sy
+    i20 = rotation[0, 2] * inv_sz
+    i21 = rotation[1, 2] * inv_sz
+    i22 = rotation[2, 2] * inv_sz
+
+    render_nodes[instance_index, 16] = i00
+    render_nodes[instance_index, 17] = i01
+    render_nodes[instance_index, 18] = i02
+    render_nodes[instance_index, 19] = -(
+        i00 * position[0] + i01 * position[1] + i02 * position[2]
+    )
+    render_nodes[instance_index, 20] = i10
+    render_nodes[instance_index, 21] = i11
+    render_nodes[instance_index, 22] = i12
+    render_nodes[instance_index, 23] = -(
+        i10 * position[0] + i11 * position[1] + i12 * position[2]
+    )
+    render_nodes[instance_index, 24] = i20
+    render_nodes[instance_index, 25] = i21
+    render_nodes[instance_index, 26] = i22
+    render_nodes[instance_index, 27] = -(
+        i20 * position[0] + i21 * position[1] + i22 * position[2]
+    )
+    render_nodes[instance_index, 28] = 0.0
+    render_nodes[instance_index, 29] = 0.0
+    render_nodes[instance_index, 30] = 0.0
+    render_nodes[instance_index, 31] = 1.0
+
+
+@wp.kernel
+def _update_device_instance_visibility(
+    instance_ids: wp.array(dtype=wp.int32),
+    visibility_mask: wp.uint32,
+    instance_record_words: wp.array2d(dtype=wp.uint32),
+):
+    instance_index = instance_ids[wp.tid()]
+    instance_record_words[instance_index, 14] = visibility_mask
+
+
+@wp.func
+def _srgb_channel_to_linear(value: float):
+    if value <= 0.04045:
+        return value / 12.92
+    return wp.pow((value + 0.055) / 1.055, 2.4)
+
+
+@wp.kernel
+def _update_device_instance_materials(
+    material_ids: wp.array(dtype=wp.int32),
+    colors: wp.array(dtype=wp.vec3),
+    properties: wp.array(dtype=wp.vec4),
+    color_count: int,
+    property_count: int,
+    compact_materials: wp.array2d(dtype=wp.float32),
+):
+    thread_index = wp.tid()
+    color_index = 0 if color_count == 1 else thread_index
+    property_index = 0 if property_count == 1 else thread_index
+    color = colors[color_index]
+    material = properties[property_index]
+    material_index = material_ids[thread_index]
+    compact_materials[material_index, 0] = _srgb_channel_to_linear(color[0])
+    compact_materials[material_index, 1] = _srgb_channel_to_linear(color[1])
+    compact_materials[material_index, 2] = _srgb_channel_to_linear(color[2])
+    compact_materials[material_index, 6] = wp.clamp(material[0], 0.0, 1.0)
+    compact_materials[material_index, 7] = wp.clamp(material[1], 0.0, 1.0)
+
+
 def _create_vertex_buffers_dtype():
     """Create numpy dtype for VertexBuffers structure (offset-based)."""
     return np.dtype(
@@ -326,6 +474,7 @@ class Scene:
         self._scene_desc = None
         self._instance_material_ids = None
         self._compact_materials = None
+        self._compact_material_floats = None
         self._instance_render_prim_ids = None
         self._texture_descs = None
         self._texture_data = None
@@ -344,6 +493,11 @@ class Scene:
         self._ias_handle = None
         self._ias_buffer = None
         self._instance_buffer = None
+        self._instance_record_floats = None
+        self._instance_record_words = None
+        self._render_node_floats = None
+        self._device_instance_transforms = None
+        self._instance_records_dirty = True
         self._instance_np_cache = None
         self._instance_np_capacity = 0
         self._instance_transform_cache = np.empty((0, 4, 4), dtype=np.float32)
@@ -352,6 +506,8 @@ class Scene:
         self._tlas_temp_buffer = None
         self._tlas_temp_capacity = 0
         self._tlas_output_capacity = 0
+        self._tlas_output_size = 0
+        self._tlas_instance_count = 0
 
         # Keepalive references
         self._keepalive = {}
@@ -444,6 +600,48 @@ class Scene:
         self._compact_materials = wp.array(
             np.asarray(compact_bytes, dtype=np.uint8), dtype=wp.uint8, device="cuda"
         )
+        self._compact_material_floats = None
+
+    def set_instance_materials_device(
+        self,
+        material_ids: wp.array,
+        colors: wp.array,
+        properties: wp.array,
+    ) -> bool:
+        """Update instance-owned compact material fields directly on CUDA."""
+        if len(material_ids) == 0:
+            return True
+        if self._compact_materials is None:
+            return False
+        material_count = self.materials.count
+        stride = int(self._compact_materials.capacity) // material_count // 4
+        self._compact_material_floats = wp.array(
+            ptr=self._compact_materials.ptr,
+            shape=(material_count, stride),
+            dtype=wp.float32,
+            capacity=int(self._compact_materials.capacity),
+            device="cuda",
+        )
+        if len(colors) not in (1, len(material_ids)):
+            raise ValueError("Device colors must contain one or one value per instance")
+        if len(properties) not in (1, len(material_ids)):
+            raise ValueError(
+                "Device material properties must contain one or one value per instance"
+            )
+        wp.launch(
+            _update_device_instance_materials,
+            dim=len(material_ids),
+            inputs=[
+                material_ids,
+                colors,
+                properties,
+                len(colors),
+                len(properties),
+                self._compact_material_floats,
+            ],
+            device="cuda",
+        )
+        return True
 
     def set_gltf_textures(
         self,
@@ -487,7 +685,9 @@ class Scene:
         visibility = np.empty(capacity, dtype=np.bool_)
         if self._instance_cache_capacity:
             transforms[: self._instance_cache_capacity] = self._instance_transform_cache
-            visibility[: self._instance_cache_capacity] = self._instance_visibility_cache
+            visibility[: self._instance_cache_capacity] = (
+                self._instance_visibility_cache
+            )
         self._instance_transform_cache = transforms
         self._instance_visibility_cache = visibility
         self._instance_cache_capacity = capacity
@@ -508,6 +708,7 @@ class Scene:
         self._ensure_instance_cache_capacity(instance_index + 1)
         self._instance_transform_cache[instance_index] = instance.transform
         self._instance_visibility_cache[instance_index] = instance.visible
+        self._instance_records_dirty = True
         return instance_index
 
     def set_instance_transform(self, instance_index: int, transform: np.ndarray):
@@ -517,6 +718,7 @@ class Scene:
             inst.prev_transform = inst.transform.copy()
             inst.transform = np.ascontiguousarray(transform, dtype=np.float32)
             self._instance_transform_cache[instance_index] = inst.transform
+            self._instance_records_dirty = True
 
     def set_instance_transforms_batch(self, instance_indices, transforms: np.ndarray):
         """Update a batch of instance transforms with one NumPy assignment."""
@@ -529,6 +731,49 @@ class Scene:
         if int(indices.min()) < 0 or int(indices.max()) >= len(self._instances):
             raise IndexError("instance index is out of range")
         self._instance_transform_cache[indices] = matrices
+        self._instance_records_dirty = True
+
+    def set_instance_transforms_device(
+        self,
+        instance_indices: wp.array,
+        xforms: wp.array,
+        scales: wp.array,
+        global_transform: np.ndarray,
+    ) -> bool:
+        """Update traversal, shading, and motion transforms directly on CUDA."""
+        if len(instance_indices) == 0:
+            return True
+        if (
+            self._instance_record_floats is None
+            or self._render_node_floats is None
+            or self._device_instance_transforms is None
+        ):
+            return False
+        if (
+            not instance_indices.device.is_cuda
+            or not xforms.device.is_cuda
+            or not scales.device.is_cuda
+        ):
+            raise ValueError("Device instance updates require CUDA arrays")
+        matrix = np.asarray(global_transform, dtype=np.float32).reshape(4, 4)
+        rotation = matrix[:3, :3]
+        translation = matrix[:3, 3]
+        wp.launch(
+            _update_device_instance_transforms,
+            dim=len(instance_indices),
+            inputs=[
+                instance_indices,
+                xforms,
+                scales,
+                self._instance_record_floats,
+                self._render_node_floats,
+                self._device_instance_transforms,
+                wp.mat33(*rotation.reshape(-1)),
+                wp.vec3(*translation),
+            ],
+            device="cuda",
+        )
+        return True
 
     def set_instance_material(self, instance_index: int, material_id: int | None):
         """Override the material used by one instance."""
@@ -541,6 +786,7 @@ class Scene:
             value = bool(visible)
             self._instances[instance_index].visible = value
             self._instance_visibility_cache[instance_index] = value
+            self._instance_records_dirty = True
 
     def set_instances_visible_batch(self, instance_indices, visible: bool):
         """Set visibility for a batch with one host-array assignment."""
@@ -550,6 +796,22 @@ class Scene:
         if int(indices.min()) < 0 or int(indices.max()) >= len(self._instances):
             raise IndexError("instance index is out of range")
         self._instance_visibility_cache[indices] = bool(visible)
+        if self._instance_record_words is None:
+            self._instance_records_dirty = True
+            return
+        device_indices = wp.array(
+            indices.astype(np.int32), dtype=wp.int32, device="cuda"
+        )
+        wp.launch(
+            _update_device_instance_visibility,
+            dim=len(indices),
+            inputs=[
+                device_indices,
+                wp.uint32(0xFF if visible else 0),
+                self._instance_record_words,
+            ],
+            device="cuda",
+        )
 
     def create_cornell_box(self):
         """Create a Cornell Box scene."""
@@ -748,6 +1010,11 @@ class Scene:
         self._ias_handle = None
         self._ias_buffer = None
         self._instance_buffer = None
+        self._instance_record_floats = None
+        self._instance_record_words = None
+        self._render_node_floats = None
+        self._device_instance_transforms = None
+        self._instance_records_dirty = True
         self._instance_np_cache = None
         self._instance_np_capacity = 0
         self._instance_transform_cache = np.empty((0, 4, 4), dtype=np.float32)
@@ -756,10 +1023,13 @@ class Scene:
         self._tlas_temp_buffer = None
         self._tlas_temp_capacity = 0
         self._tlas_output_capacity = 0
+        self._tlas_output_size = 0
+        self._tlas_instance_count = 0
         self._keepalive.clear()
         self.materials.clear()
         self._instance_material_ids = None
         self._compact_materials = None
+        self._compact_material_floats = None
         self._instance_render_prim_ids = None
         self._texture_descs = None
         self._texture_data = None
@@ -790,7 +1060,10 @@ class Scene:
         # the mesh and instance indices stay aligned.
         self._gas_handles.clear()
         self._gas_buffers.clear()
+        self._ias_handle = None
+        self._tlas_instance_count = 0
         self._keepalive.clear()
+        self._instance_records_dirty = True
 
         logger.info(
             "Building scene with %d meshes and %d instances.",
@@ -871,8 +1144,6 @@ class Scene:
             self._gas_buffers.append(d_gas)
             self._keepalive[f"gas_temp_{i}"] = d_temp
 
-        wp.synchronize_device("cuda")
-
     def _build_tlas(self):
         """Build top-level acceleration structure."""
         optix = self._optix
@@ -886,30 +1157,41 @@ class Scene:
             self._instance_np_cache = np.zeros(
                 self._instance_np_capacity, dtype=inst_dtype
             )
-        inst_np = self._instance_np_cache[:count]
-        mesh_indices = np.fromiter(
-            (inst.mesh_index for inst in self._instances), dtype=np.intp, count=count
-        )
-        inst_np["transform"] = self._instance_transform_cache[:count, :3, :].reshape(count, 12)
-        inst_np["instanceId"] = np.arange(count, dtype=np.uint32)
-        inst_np["sbtOffset"] = np.uint32(0)
-        inst_np["visibilityMask"] = np.where(
-            self._instance_visibility_cache[:count], 0xFF, 0
-        ).astype(np.uint32)
-        inst_np["flags"] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
-        inst_np["traversableHandle"] = np.asarray(self._gas_handles, dtype=np.uint64)[mesh_indices]
-
-        inst_bytes = inst_np.view(np.uint8).reshape(-1)
-        if (
+        required_bytes = count * inst_dtype.itemsize
+        buffer_changed = (
             self._instance_buffer is None
-            or self._instance_buffer.shape[0] != inst_bytes.shape[0]
-        ):
+            or self._instance_buffer.shape[0] != required_bytes
+        )
+        if buffer_changed:
             self._instance_buffer = wp.empty(
-                inst_bytes.shape[0], dtype=wp.uint8, device="cuda"
+                required_bytes, dtype=wp.uint8, device="cuda"
             )
-        self._instance_buffer.assign(inst_bytes)
+            self._instance_record_floats = None
+            self._instance_record_words = None
+            self._instance_records_dirty = True
+        if self._instance_records_dirty:
+            inst_np = self._instance_np_cache[:count]
+            mesh_indices = np.fromiter(
+                (inst.mesh_index for inst in self._instances),
+                dtype=np.intp,
+                count=count,
+            )
+            inst_np["transform"] = self._instance_transform_cache[
+                :count, :3, :
+            ].reshape(count, 12)
+            inst_np["instanceId"] = np.arange(count, dtype=np.uint32)
+            inst_np["sbtOffset"] = np.uint32(0)
+            inst_np["visibilityMask"] = np.where(
+                self._instance_visibility_cache[:count], 0xFF, 0
+            ).astype(np.uint32)
+            inst_np["flags"] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
+            inst_np["traversableHandle"] = np.asarray(
+                self._gas_handles, dtype=np.uint64
+            )[mesh_indices]
+            self._instance_buffer.assign(inst_np.view(np.uint8).reshape(-1))
+            self._instance_records_dirty = False
 
-        accel_options = optix.AccelBuildOptions(
+        build_options = optix.AccelBuildOptions(
             buildFlags=int(optix.BUILD_FLAG_ALLOW_UPDATE),
             operation=optix.BUILD_OPERATION_BUILD,
         )
@@ -918,25 +1200,47 @@ class Scene:
         ias_input.instances = int(self._instance_buffer.ptr)
         ias_input.numInstances = count
 
-        sizes = self._ctx.accelComputeMemoryUsage([accel_options], [ias_input])
-        required_temp = int(sizes.tempSizeInBytes)
+        sizes = self._ctx.accelComputeMemoryUsage([build_options], [ias_input])
+        required_build_temp = int(sizes.tempSizeInBytes)
+        required_update_temp = int(sizes.tempUpdateSizeInBytes)
         required_output = int(sizes.outputSizeInBytes)
+
+        can_update = (
+            self._ias_handle is not None
+            and not buffer_changed
+            and self._tlas_instance_count == count
+            and self._ias_buffer is not None
+            and self._tlas_output_size == required_output
+        )
 
         # Reuse TLAS scratch/output buffers across rebuilds.
         # Overallocate slightly to reduce realloc churn when scene size
         # changes by a small amount.
-        if self._tlas_temp_buffer is None or self._tlas_temp_capacity < required_temp:
-            self._tlas_temp_capacity = max(required_temp, int(required_temp * 1.25))
-            self._tlas_temp_buffer = wp.empty(
-                self._tlas_temp_capacity, dtype=wp.uint8, device="cuda"
-            )
-        if self._ias_buffer is None or self._tlas_output_capacity < required_output:
+        output_buffer_changed = (
+            self._ias_buffer is None or self._tlas_output_capacity < required_output
+        )
+        if output_buffer_changed:
             self._tlas_output_capacity = max(
                 required_output, int(required_output * 1.25)
             )
             self._ias_buffer = wp.empty(
                 self._tlas_output_capacity, dtype=wp.uint8, device="cuda"
             )
+            can_update = False
+
+        required_temp = required_update_temp if can_update else required_build_temp
+        if self._tlas_temp_buffer is None or self._tlas_temp_capacity < required_temp:
+            self._tlas_temp_capacity = max(required_temp, int(required_temp * 1.25))
+            self._tlas_temp_buffer = wp.empty(
+                self._tlas_temp_capacity, dtype=wp.uint8, device="cuda"
+            )
+
+        accel_options = optix.AccelBuildOptions(
+            buildFlags=int(optix.BUILD_FLAG_ALLOW_UPDATE),
+            operation=optix.BUILD_OPERATION_UPDATE
+            if can_update
+            else optix.BUILD_OPERATION_BUILD,
+        )
 
         self._ias_handle = self._ctx.accelBuild(
             int(wp.get_stream("cuda").cuda_stream),
@@ -949,8 +1253,9 @@ class Scene:
             [],
         )
 
+        self._tlas_output_size = required_output
+        self._tlas_instance_count = count
         self._keepalive["ias_temp"] = self._tlas_temp_buffer
-        wp.synchronize_device("cuda")
 
     def _build_scene_buffers(self):
         """Build GPU buffers for scene description."""
@@ -1047,6 +1352,34 @@ class Scene:
 
         rn_bytes = render_nodes.view(np.uint8).reshape(-1)
         self._render_nodes = wp.array(rn_bytes, dtype=wp.uint8, device="cuda")
+
+        count = len(self._instances)
+        record_capacity = int(self._instance_buffer.capacity)
+        self._instance_record_floats = wp.array(
+            ptr=self._instance_buffer.ptr,
+            shape=(count, 20),
+            dtype=wp.float32,
+            capacity=record_capacity,
+            device="cuda",
+        )
+        self._instance_record_words = wp.array(
+            ptr=self._instance_buffer.ptr,
+            shape=(count, 20),
+            dtype=wp.uint32,
+            capacity=record_capacity,
+            device="cuda",
+        )
+        self._render_node_floats = wp.array(
+            ptr=self._render_nodes.ptr,
+            shape=(count, 34),
+            dtype=wp.float32,
+            capacity=int(self._render_nodes.capacity),
+            device="cuda",
+        )
+        transforms = self._instance_transform_cache[:count, :3, :].reshape(count, 12)
+        self._device_instance_transforms = wp.array(
+            transforms, dtype=wp.float32, device="cuda"
+        )
 
         # Build SceneDescription
         sd_dtype = _create_scene_description_dtype()
@@ -1197,6 +1530,7 @@ class Scene:
             )
         compact_bytes = compact.view(np.uint8).reshape(-1)
         self._compact_materials = wp.array(compact_bytes, dtype=wp.uint8, device="cuda")
+        self._compact_material_floats = None
 
         # Build texture descriptor/texel buffers for shader-side glTF texture sampling.
         if self._gltf_textures:

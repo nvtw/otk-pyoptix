@@ -22,7 +22,6 @@ import os
 from dataclasses import dataclass
 
 import numpy as np
-
 import warp as wp
 
 from warp_optix._addon import get_module_build_options
@@ -33,7 +32,9 @@ def require_optix():
     try:
         import optix  # noqa: PLC0415
     except ImportError as e:
-        raise RuntimeError("Install otk-pyoptix first: https://github.com/NVIDIA/otk-pyoptix") from e
+        raise RuntimeError(
+            "Install otk-pyoptix first: https://github.com/NVIDIA/otk-pyoptix"
+        ) from e
     return optix
 
 
@@ -51,11 +52,19 @@ class OptixLogger:
         self.num_messages += 1
 
 
-def create_optix_context(optix, cuda_context, log_level: int = 4):
+def create_optix_context(
+    optix, cuda_context, log_level: int = 4, *, enable_validation: bool = False
+):
     logger = OptixLogger()
-    options = optix.DeviceContextOptions(logCallbackFunction=logger, logCallbackLevel=log_level)
+    options = optix.DeviceContextOptions(
+        logCallbackFunction=logger, logCallbackLevel=log_level
+    )
     if _optix_version_at_least(optix, 7, 2):
-        options.validationMode = optix.DEVICE_CONTEXT_VALIDATION_MODE_ALL
+        options.validationMode = (
+            optix.DEVICE_CONTEXT_VALIDATION_MODE_ALL
+            if enable_validation
+            else optix.DEVICE_CONTEXT_VALIDATION_MODE_OFF
+        )
     return optix.deviceContextCreate(cuda_context, options), logger
 
 
@@ -64,6 +73,7 @@ class LaunchParamsBuffer:
     struct_type: type
     struct_ctype: type[ctypes.Structure]
     bytes: wp.array
+    writer: wp.Kernel
     nbytes: int
     device: str
 
@@ -87,13 +97,31 @@ def _get_struct_type_info(params_struct_type):
     return wp_struct, wp_struct.ctype
 
 
-def create_launch_params_buffer(params_struct_type: type, device: str = "cuda") -> LaunchParamsBuffer:
+def _create_launch_params_writer(wp_struct):
+    def write_params(params, output):
+        output[0] = params
+
+    write_params.__annotations__ = {
+        "params": wp_struct,
+        "output": wp.array(dtype=wp_struct),
+    }
+    return wp.Kernel(
+        func=write_params,
+        key=f"write_launch_params_{wp_struct.key}",
+    )
+
+
+def create_launch_params_buffer(
+    params_struct_type: type, device: str = "cuda"
+) -> LaunchParamsBuffer:
     wp_struct, struct_ctype = _get_struct_type_info(params_struct_type)
     nbytes = ctypes.sizeof(struct_ctype)
+    storage = wp.empty(1, dtype=wp_struct, device=device)
     return LaunchParamsBuffer(
         struct_type=wp_struct.instance_type,
         struct_ctype=struct_ctype,
-        bytes=wp.empty(nbytes, dtype=wp.uint8, device=device),
+        bytes=storage,
+        writer=_create_launch_params_writer(wp_struct),
         nbytes=nbytes,
         device=device,
     )
@@ -101,7 +129,9 @@ def create_launch_params_buffer(params_struct_type: type, device: str = "cuda") 
 
 def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> None:
     if not isinstance(buffer, LaunchParamsBuffer):
-        raise TypeError("buffer must be a LaunchParamsBuffer created by create_launch_params_buffer()")
+        raise TypeError(
+            "buffer must be a LaunchParamsBuffer created by create_launch_params_buffer()"
+        )
     if not hasattr(params_struct_instance, "_ctype"):
         raise TypeError("params_struct_instance must be a Warp struct instance")
     if not isinstance(params_struct_instance, buffer.struct_type):
@@ -109,18 +139,36 @@ def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> N
             f"params struct type mismatch: expected {buffer.struct_type.__name__}, got {type(params_struct_instance).__name__}"
         )
 
-    host_bytes = np.frombuffer(bytes(params_struct_instance._ctype), dtype=np.uint8)
-    if host_bytes.size != buffer.nbytes:
-        raise RuntimeError(
-            f"params struct size mismatch: expected {buffer.nbytes} bytes, got {host_bytes.size} bytes from struct ctype"
-        )
-    wp.copy(buffer.bytes, wp.array(host_bytes, dtype=wp.uint8, device="cpu", copy=False))
+    wp.launch(
+        buffer.writer,
+        dim=1,
+        inputs=[params_struct_instance],
+        outputs=[buffer.bytes],
+        device=buffer.device,
+    )
 
 
-def launch(optix, pipeline, sbt, width: int, height: int, params_buffer: LaunchParamsBuffer, stream: int = 0) -> None:
+def launch(
+    optix,
+    pipeline,
+    sbt,
+    width: int,
+    height: int,
+    params_buffer: LaunchParamsBuffer,
+    stream: int = 0,
+) -> None:
     if not isinstance(params_buffer, LaunchParamsBuffer):
         raise TypeError("params_buffer must be a LaunchParamsBuffer")
-    optix.launch(pipeline, stream, params_buffer.bytes.ptr, params_buffer.nbytes, sbt, width, height, 1)
+    optix.launch(
+        pipeline,
+        stream,
+        params_buffer.bytes.ptr,
+        params_buffer.nbytes,
+        sbt,
+        width,
+        height,
+        1,
+    )
 
 
 def get_optix_entry_name(kernel_or_entry, expected_kernel_type=None) -> str:
@@ -137,12 +185,16 @@ def get_optix_entry_name(kernel_or_entry, expected_kernel_type=None) -> str:
             "(decorate it with @warp_optix.optix_kernel(...) instead of @wp.kernel)"
         )
     if expected_kernel_type is not None and kernel_type is not expected_kernel_type:
-        raise TypeError(f"kernel '{kernel_or_entry.key}' has type {kernel_type}, expected {expected_kernel_type}")
+        raise TypeError(
+            f"kernel '{kernel_or_entry.key}' has type {kernel_type}, expected {expected_kernel_type}"
+        )
 
     return kernel_or_entry.get_mangled_name()
 
 
-def _prepend_cuda_preamble(build_options: wp.ModuleBuildOptions, preamble: str) -> wp.ModuleBuildOptions:
+def _prepend_cuda_preamble(
+    build_options: wp.ModuleBuildOptions, preamble: str
+) -> wp.ModuleBuildOptions:
     if not preamble:
         return build_options
 
@@ -179,7 +231,9 @@ def compile_warp_module_to_ptx(
     try:
         wp.get_device(device)
         module_dir = os.path.join(wp.config.kernel_cache_dir, "optix", module_tag)
-        artifacts = wp.compile_aot_module(module, device=device, module_dir=module_dir, use_ptx=True)
+        artifacts = wp.compile_aot_module(
+            module, device=device, module_dir=module_dir, use_ptx=True
+        )
         return artifacts[0].read_bytes()
     finally:
         wp.set_module_options({"extra_build_options": old_build_options}, module=module)
@@ -234,7 +288,10 @@ def _build_acceleration_structure(
     if compact:
         build_flags |= int(optix.BUILD_FLAG_ALLOW_COMPACTION)
 
-    options_kwargs = {"buildFlags": build_flags, "operation": optix.BUILD_OPERATION_BUILD}
+    options_kwargs = {
+        "buildFlags": build_flags,
+        "operation": optix.BUILD_OPERATION_BUILD,
+    }
     if motion_options is not None:
         options_kwargs["motionOptions"] = motion_options
     options = optix.AccelBuildOptions(**options_kwargs)
@@ -246,7 +303,11 @@ def _build_acceleration_structure(
     d_compacted_size = None
     if compact:
         d_compacted_size = wp.zeros(1, dtype=wp.uint64, device=device)
-        emitted.append(optix.AccelEmitDesc(d_compacted_size.ptr, optix.PROPERTY_TYPE_COMPACTED_SIZE))
+        emitted.append(
+            optix.AccelEmitDesc(
+                d_compacted_size.ptr, optix.PROPERTY_TYPE_COMPACTED_SIZE
+            )
+        )
 
     handle = ctx.accelBuild(
         0,
@@ -289,21 +350,31 @@ def _build_acceleration_structure(
     return resources.handle, resources
 
 
-def refit_acceleration_structure(optix, ctx, resources: AccelResources, *, stream: int = 0) -> int:
+def refit_acceleration_structure(
+    optix, ctx, resources: AccelResources, *, stream: int = 0
+) -> int:
     """Refit an acceleration structure after updating its retained device buffers."""
     if not isinstance(resources, AccelResources):
-        raise TypeError("resources must be returned by a warp_optix acceleration-structure helper")
+        raise TypeError(
+            "resources must be returned by a warp_optix acceleration-structure helper"
+        )
     if not resources.build_flags & int(optix.BUILD_FLAG_ALLOW_UPDATE):
-        raise ValueError("the acceleration structure was not built with BUILD_FLAG_ALLOW_UPDATE")
+        raise ValueError(
+            "the acceleration structure was not built with BUILD_FLAG_ALLOW_UPDATE"
+        )
     if resources.compacted:
-        raise ValueError("compacted acceleration structures cannot be refit by this helper")
+        raise ValueError(
+            "compacted acceleration structures cannot be refit by this helper"
+        )
 
     options = optix.AccelBuildOptions(
         buildFlags=resources.build_flags,
         operation=optix.BUILD_OPERATION_UPDATE,
         motionOptions=resources.motion_options,
     )
-    d_temp = wp.empty(resources.update_temp_size_in_bytes, dtype=wp.uint8, device=resources.device)
+    d_temp = wp.empty(
+        resources.update_temp_size_in_bytes, dtype=wp.uint8, device=resources.device
+    )
     resources.handle = int(
         ctx.accelBuild(
             stream,
@@ -325,7 +396,9 @@ def _motion_options_for_keys(optix, num_keys: int, motion_time_range):
         return None
     if num_keys < 2:
         raise ValueError("motion geometry requires at least two keys")
-    time_begin, time_end = (0.0, 1.0) if motion_time_range is None else motion_time_range
+    time_begin, time_end = (
+        (0.0, 1.0) if motion_time_range is None else motion_time_range
+    )
     if not float(time_begin) < float(time_end):
         raise ValueError("motion_time_range must have an increasing begin and end")
     return optix.MotionOptions(
@@ -354,13 +427,19 @@ def create_triangle_gas(
         host_vertex_keys = [np.ascontiguousarray(key) for key in host_vertices]
     else:
         raise ValueError("vertices must have shape (N, 3) or (K, N, 3)")
-    d_vertex_buffers = [wp.array(key, dtype=wp.float32, device=device) for key in host_vertex_keys]
+    d_vertex_buffers = [
+        wp.array(key, dtype=wp.float32, device=device) for key in host_vertex_keys
+    ]
 
     host_indices = np.asarray(indices, dtype=np.uint32)
     if host_indices.ndim != 2 or host_indices.shape[1] != 3:
         raise ValueError("indices must have shape (M, 3)")
-    d_indices = wp.array(np.ascontiguousarray(host_indices), dtype=wp.uint32, device=device)
-    motion_options = _motion_options_for_keys(optix, len(d_vertex_buffers), motion_time_range)
+    d_indices = wp.array(
+        np.ascontiguousarray(host_indices), dtype=wp.uint32, device=device
+    )
+    motion_options = _motion_options_for_keys(
+        optix, len(d_vertex_buffers), motion_time_range
+    )
 
     tri = optix.BuildInputTriangleArray()
     tri.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
@@ -444,10 +523,16 @@ def create_custom_primitive_gas(
     if sbt_index_offsets is not None:
         host_sbt_indices = np.asarray(sbt_index_offsets, dtype=np.uint32)
         if host_sbt_indices.shape != (host_aabbs.shape[0],):
-            raise ValueError("sbt_index_offsets must have shape (N,), matching the AABB count")
+            raise ValueError(
+                "sbt_index_offsets must have shape (N,), matching the AABB count"
+            )
         if np.any(host_sbt_indices >= num_sbt_records):
-            raise ValueError("sbt_index_offsets values must be less than num_sbt_records")
-        d_sbt_indices = wp.array(np.ascontiguousarray(host_sbt_indices), dtype=wp.uint32, device=device)
+            raise ValueError(
+                "sbt_index_offsets values must be less than num_sbt_records"
+            )
+        d_sbt_indices = wp.array(
+            np.ascontiguousarray(host_sbt_indices), dtype=wp.uint32, device=device
+        )
 
     custom = optix.BuildInputCustomPrimitiveArray(
         aabbBuffers=[d_aabbs.ptr],
@@ -456,8 +541,12 @@ def create_custom_primitive_gas(
         flags=flags,
         numSbtRecords=num_sbt_records,
         sbtIndexOffsetBuffer=0 if d_sbt_indices is None else d_sbt_indices.ptr,
-        sbtIndexOffsetSizeInBytes=0 if d_sbt_indices is None else np.dtype(np.uint32).itemsize,
-        sbtIndexOffsetStrideInBytes=0 if d_sbt_indices is None else np.dtype(np.uint32).itemsize,
+        sbtIndexOffsetSizeInBytes=0
+        if d_sbt_indices is None
+        else np.dtype(np.uint32).itemsize,
+        sbtIndexOffsetStrideInBytes=0
+        if d_sbt_indices is None
+        else np.dtype(np.uint32).itemsize,
         primitiveIndexOffset=int(primitive_index_offset),
     )
 
@@ -505,7 +594,10 @@ def create_curve_gas(
         if host_widths.shape[0] != host_vertex_keys[0].shape[0]:
             raise ValueError("widths must contain one value per curve vertex")
         host_width_keys = [np.ascontiguousarray(host_widths)] * num_keys
-    elif host_widths.ndim == 2 and host_widths.shape == (num_keys, host_vertex_keys[0].shape[0]):
+    elif host_widths.ndim == 2 and host_widths.shape == (
+        num_keys,
+        host_vertex_keys[0].shape[0],
+    ):
         host_width_keys = [np.ascontiguousarray(key) for key in host_widths]
     else:
         raise ValueError("widths must have shape (N,) or (K, N), matching vertices")
@@ -515,12 +607,16 @@ def create_curve_gas(
         raise ValueError("segment_indices must be a non-empty one-dimensional array")
     host_indices = np.ascontiguousarray(host_indices)
 
-    d_vertex_buffers = [wp.array(key, dtype=wp.float32, device=device) for key in host_vertex_keys]
+    d_vertex_buffers = [
+        wp.array(key, dtype=wp.float32, device=device) for key in host_vertex_keys
+    ]
     if len({id(key) for key in host_width_keys}) == 1:
         d_width = wp.array(host_width_keys[0], dtype=wp.float32, device=device)
         d_width_buffers = [d_width] * num_keys
     else:
-        d_width_buffers = [wp.array(key, dtype=wp.float32, device=device) for key in host_width_keys]
+        d_width_buffers = [
+            wp.array(key, dtype=wp.float32, device=device) for key in host_width_keys
+        ]
     d_indices = wp.array(host_indices, dtype=wp.uint32, device=device)
     motion_options = _motion_options_for_keys(optix, num_keys, motion_time_range)
 
@@ -566,7 +662,9 @@ def create_instance_acceleration_structure(
 
     host_bytes = np.frombuffer(optix.getDeviceRepresentation(instances), dtype=np.uint8)
     d_instances = wp.array(host_bytes, dtype=wp.uint8, device=device)
-    instance_input = optix.BuildInputInstanceArray(instances=d_instances.ptr, numInstances=len(instances))
+    instance_input = optix.BuildInputInstanceArray(
+        instances=d_instances.ptr, numInstances=len(instances)
+    )
     return _build_acceleration_structure(
         optix,
         ctx,
@@ -619,7 +717,9 @@ def _primitive_type_flag(optix, primitive_type) -> int:
     for name in names:
         if primitive_type == getattr(optix, f"PRIMITIVE_TYPE_{name}", None):
             return int(getattr(optix, f"PRIMITIVE_TYPE_FLAGS_{name}"))
-    raise ValueError(f"Unsupported built-in intersection primitive type: {primitive_type}")
+    raise ValueError(
+        f"Unsupported built-in intersection primitive type: {primitive_type}"
+    )
 
 
 def create_pipeline_and_sbt(
@@ -648,40 +748,70 @@ def create_pipeline_and_sbt(
     from warp_optix._runtime.hit_kernels import HitKernel  # noqa: PLC0415
     from warp_optix._runtime.sbt import SbtKernelManager  # noqa: PLC0415
 
-    raygen_name = get_optix_entry_name(raygen_entry, expected_kernel_type=OptixKernelType.RAYGEN)
-    miss_name = get_optix_entry_name(miss_entry, expected_kernel_type=OptixKernelType.MISS)
+    raygen_name = get_optix_entry_name(
+        raygen_entry, expected_kernel_type=OptixKernelType.RAYGEN
+    )
+    miss_name = get_optix_entry_name(
+        miss_entry, expected_kernel_type=OptixKernelType.MISS
+    )
 
     if hit_groups is not None:
-        if any(entry is not None for entry in (closest_hit_entry, intersection_entry, any_hit_entry)):
-            raise ValueError("hit_groups cannot be combined with the individual hit entry arguments")
+        if any(
+            entry is not None
+            for entry in (closest_hit_entry, intersection_entry, any_hit_entry)
+        ):
+            raise ValueError(
+                "hit_groups cannot be combined with the individual hit entry arguments"
+            )
         requested_hit_groups = list(hit_groups)
         if not all(isinstance(group, HitKernel) for group in requested_hit_groups):
             raise TypeError("hit_groups must contain HitKernel objects")
     else:
         requested_hit_groups = []
-        if any(entry is not None for entry in (closest_hit_entry, intersection_entry, any_hit_entry)):
-            requested_hit_groups.append(HitKernel(closest_hit_entry, any_hit_entry, intersection_entry))
+        if any(
+            entry is not None
+            for entry in (closest_hit_entry, intersection_entry, any_hit_entry)
+        ):
+            requested_hit_groups.append(
+                HitKernel(closest_hit_entry, any_hit_entry, intersection_entry)
+            )
 
     resolved_hit_groups = []
     for group in requested_hit_groups:
         closest_hit_name = (
-            get_optix_entry_name(group.closest_hit, expected_kernel_type=OptixKernelType.CLOSEST_HIT)
+            get_optix_entry_name(
+                group.closest_hit, expected_kernel_type=OptixKernelType.CLOSEST_HIT
+            )
             if group.closest_hit is not None
             else None
         )
         any_hit_name = (
-            get_optix_entry_name(group.any_hit, expected_kernel_type=OptixKernelType.ANY_HIT)
+            get_optix_entry_name(
+                group.any_hit, expected_kernel_type=OptixKernelType.ANY_HIT
+            )
             if group.any_hit is not None
             else None
         )
         intersection_name = (
-            get_optix_entry_name(group.intersection, expected_kernel_type=OptixKernelType.INTERSECTION)
+            get_optix_entry_name(
+                group.intersection, expected_kernel_type=OptixKernelType.INTERSECTION
+            )
             if group.intersection is not None
             else None
         )
-        if intersection_name is not None and group.builtin_intersection_type is not None:
-            raise ValueError("a hit group cannot combine custom and built-in intersection programs")
-        if not (closest_hit_name or any_hit_name or intersection_name or group.builtin_intersection_type is not None):
+        if (
+            intersection_name is not None
+            and group.builtin_intersection_type is not None
+        ):
+            raise ValueError(
+                "a hit group cannot combine custom and built-in intersection programs"
+            )
+        if not (
+            closest_hit_name
+            or any_hit_name
+            or intersection_name
+            or group.builtin_intersection_type is not None
+        ):
             raise ValueError("each hit group must define at least one program")
         resolved_hit_groups.append(
             HitKernel(
@@ -696,11 +826,18 @@ def create_pipeline_and_sbt(
         traversable_graph_flags = optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS
     if max_traversable_depth is None:
         max_traversable_depth = (
-            1 if int(traversable_graph_flags) == int(optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS) else 2
+            1
+            if int(traversable_graph_flags)
+            == int(optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS)
+            else 2
         )
 
     if exception_flags is None:
-        exception_flags = optix.EXCEPTION_FLAG_USER if exception_entry is not None else optix.EXCEPTION_FLAG_NONE
+        exception_flags = (
+            optix.EXCEPTION_FLAG_USER
+            if exception_entry is not None
+            else optix.EXCEPTION_FLAG_NONE
+        )
 
     kwargs = {
         "usesMotionBlur": bool(uses_motion_blur),
@@ -715,7 +852,9 @@ def create_pipeline_and_sbt(
             primitive_type_flags = 0
             for group in resolved_hit_groups:
                 if group.builtin_intersection_type is not None:
-                    primitive_type_flags |= _primitive_type_flag(optix, group.builtin_intersection_type)
+                    primitive_type_flags |= _primitive_type_flag(
+                        optix, group.builtin_intersection_type
+                    )
                 elif group.intersection is not None:
                     primitive_type_flags |= int(optix.PRIMITIVE_TYPE_FLAGS_CUSTOM)
                 else:
@@ -747,7 +886,9 @@ def create_pipeline_and_sbt(
                 builtinISModuleType=group.builtin_intersection_type,
                 usesMotionBlur=bool(uses_motion_blur),
             )
-            intersection_module = ctx.builtinISModuleGet(module_options, pipeline_options, builtin_options)
+            intersection_module = ctx.builtinISModuleGet(
+                module_options, pipeline_options, builtin_options
+            )
             builtin_modules.append(intersection_module)
         hit_group_handles.append(
             sbt_manager.register_hit_shader_type(
@@ -762,7 +903,8 @@ def create_pipeline_and_sbt(
         )
 
     direct_callable_handles = [
-        sbt_manager.add_callable_kernel(entry) for entry in (direct_callable_entries or [])
+        sbt_manager.add_callable_kernel(entry)
+        for entry in (direct_callable_entries or [])
     ]
     continuation_callable_handles = [
         sbt_manager.add_callable_kernel(entry, continuation=True)

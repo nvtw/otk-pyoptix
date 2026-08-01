@@ -97,6 +97,10 @@ class PathTracingViewerBackend:
         num_frames: int | None = None,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
+        dlss_quality: str = "quality",
+        samples_per_frame: int = 1,
+        max_bounces: int = 4,
+        direct_light_samples: int = 1,
         up_axis: str | int = "Y",
         camera_speed: float = 4.0,
         api: PathTracerAPI | None = None,
@@ -170,6 +174,10 @@ class PathTracingViewerBackend:
             height=self.height,
             enable_dlss_rr=enable_dlss_rr,
             enable_set=enable_set,
+            dlss_quality=dlss_quality,
+            samples_per_frame=samples_per_frame,
+            max_bounces=max_bounces,
+            direct_light_samples=direct_light_samples,
         )
         self._presenter = None
         if not self.headless:
@@ -191,6 +199,12 @@ class PathTracingViewerBackend:
         self._mesh_ids: dict[str, int] = {}
         self._batches: dict[str, _InstanceBatch] = {}
         self._material_ids: dict[tuple[float, ...], int] = {}
+        self._device_transform_batches: dict[
+            str, tuple[wp.array, wp.array, wp.array]
+        ] = {}
+        self._device_material_batches: dict[
+            str, tuple[wp.array, wp.array, wp.array]
+        ] = {}
         self._default_color = (0.8, 0.8, 0.8)
         self._default_material = (0.5, 0.0, 0.0, 0.0)
 
@@ -254,6 +268,45 @@ class PathTracingViewerBackend:
     def tonemap_saturation(self, value: float) -> None:
         """Set the nonnegative display saturation multiplier."""
         self._api.tonemap_saturation = value
+
+    @property
+    def dlss_quality(self) -> str:
+        """Return the selected DLSS input-resolution/quality mode."""
+        return self._api.dlss_quality
+
+    @dlss_quality.setter
+    def dlss_quality(self, value: str) -> None:
+        """Select a DLSS quality mode."""
+        self._api.set_dlss_quality(value)
+
+    @property
+    def max_bounces(self) -> int:
+        """Return the current maximum path depth."""
+        return self._api.max_bounces
+
+    @property
+    def direct_light_samples(self) -> int:
+        """Return the number of direct-light samples per surface hit."""
+        return self._api.direct_light_samples
+
+    @property
+    def samples_per_frame(self) -> int:
+        """Return samples per frame used without DLSS."""
+        return self._api.samples_per_frame
+
+    def set_ray_budget(
+        self,
+        *,
+        max_bounces: int | None = None,
+        direct_light_samples: int | None = None,
+        samples_per_frame: int | None = None,
+    ) -> None:
+        """Adjust path depth and sampling budgets."""
+        self._api.set_ray_budget(
+            max_bounces=max_bounces,
+            direct_light_samples=direct_light_samples,
+            samples_per_frame=samples_per_frame,
+        )
 
     def _ensure_initialized(self):
         if self._initialized:
@@ -513,25 +566,42 @@ class PathTracingViewerBackend:
             self._scene_dirty = True
         instances_added = len(batch.instance_ids) != previous_count
 
+        device_appearance = (
+            isinstance(colors, wp.array)
+            and colors.device.is_cuda
+            or isinstance(materials, wp.array)
+            and materials.device.is_cuda
+            or name in self._device_material_batches
+            and colors is None
+            and materials is None
+        )
         appearance_changed = False
-        if colors is not None or len(batch.colors) != count:
-            updated_colors = _broadcast_rows(
-                _as_numpy(colors, np.float32), count, 3, self._default_color
-            )
-            if updated_colors.shape != batch.colors.shape or not np.array_equal(updated_colors, batch.colors):
-                batch.colors = updated_colors
-                appearance_changed = True
-        if materials is not None or len(batch.materials) != count:
-            updated_materials = _broadcast_rows(
-                _as_numpy(materials, np.float32), count, 4, self._default_material
-            )
-            if updated_materials.shape != batch.materials.shape or not np.array_equal(updated_materials, batch.materials):
-                batch.materials = updated_materials
-                appearance_changed = True
+        if not device_appearance:
+            if colors is not None or len(batch.colors) != count:
+                updated_colors = _broadcast_rows(
+                    _as_numpy(colors, np.float32), count, 3, self._default_color
+                )
+                if updated_colors.shape != batch.colors.shape or not np.array_equal(
+                    updated_colors, batch.colors
+                ):
+                    batch.colors = updated_colors
+                    appearance_changed = True
+            if materials is not None or len(batch.materials) != count:
+                updated_materials = _broadcast_rows(
+                    _as_numpy(materials, np.float32), count, 4, self._default_material
+                )
+                if (
+                    updated_materials.shape != batch.materials.shape
+                    or not np.array_equal(updated_materials, batch.materials)
+                ):
+                    batch.materials = updated_materials
+                    appearance_changed = True
 
         active_ids = batch.instance_ids[:count]
         inactive_ids = batch.instance_ids[count:]
-        visibility_changed = instances_added or hidden != batch.hidden or count != batch.active_count
+        visibility_changed = (
+            instances_added or hidden != batch.hidden or count != batch.active_count
+        )
         if visibility_changed:
             self._api.set_instances_visible(active_ids, not hidden)
             self._api.set_instances_visible(inactive_ids, False)
@@ -539,11 +609,66 @@ class PathTracingViewerBackend:
             batch.active_count = count
 
         if xforms is not None:
-            matrices = self._instance_matrices(xforms, scales)
-            self._api.set_instance_transform_matrices(active_ids, matrices)
+            if isinstance(xforms, wp.array) and xforms.device.is_cuda:
+                if not isinstance(scales, wp.array) or not scales.device.is_cuda:
+                    raise ValueError("CUDA transforms require CUDA-resident scales")
+                cached = self._device_transform_batches.get(name)
+                if cached is None or len(cached[0]) != count:
+                    instance_ids = wp.array(
+                        active_ids, dtype=wp.int32, device=self.device
+                    )
+                else:
+                    instance_ids = cached[0]
+                device_batch = (instance_ids, xforms, scales)
+                self._device_transform_batches[name] = device_batch
+                self._api.set_instance_transform_arrays(
+                    instance_ids, xforms, scales, self._global_transform
+                )
+            else:
+                matrices = self._instance_matrices(xforms, scales)
+                self._api.set_instance_transform_matrices(active_ids, matrices)
             self._transforms_dirty = True
 
-        if appearance_changed or instances_added:
+        if device_appearance:
+            cached_materials = self._device_material_batches.get(name)
+            if cached_materials is None or len(cached_materials[0]) != count:
+                if not isinstance(colors, wp.array) or not isinstance(
+                    materials, wp.array
+                ):
+                    raise ValueError(
+                        "The first CUDA appearance update requires colors and materials"
+                    )
+                material_id_values = []
+                default_linear = self.srgb_to_linear_rgb(self._default_color)
+                for instance_id in active_ids:
+                    material_id = self._api.create_pbr_material(
+                        default_linear,
+                        roughness=self._default_material[0],
+                        metallic=self._default_material[1],
+                        ior=self._default_ior,
+                        specular=self._default_specular,
+                        clearcoat=self._default_clearcoat,
+                        clearcoat_roughness=self._default_clearcoat_roughness,
+                    )
+                    self._api.set_instance_material(instance_id, material_id)
+                    material_id_values.append(material_id)
+                material_ids = wp.array(
+                    material_id_values, dtype=wp.int32, device=self.device
+                )
+                self._scene_dirty = True
+            else:
+                material_ids = cached_materials[0]
+                colors = cached_materials[1] if colors is None else colors
+                materials = cached_materials[2] if materials is None else materials
+            if not isinstance(colors, wp.array) or not isinstance(materials, wp.array):
+                raise ValueError(
+                    "CUDA appearance updates require CUDA colors and materials"
+                )
+            device_material_batch = (material_ids, colors, materials)
+            self._device_material_batches[name] = device_material_batch
+            self._api.set_instance_material_arrays(material_ids, colors, materials)
+
+        if not device_appearance and (appearance_changed or instances_added):
             for index, instance_id in enumerate(active_ids):
                 material_id = self._get_or_create_material(
                     batch.colors[index], batch.materials[index]
@@ -600,6 +725,18 @@ class PathTracingViewerBackend:
     def _flush_scene(self):
         if self._scene_dirty:
             self._api.build_scene()
+            for (
+                material_ids,
+                colors,
+                properties,
+            ) in self._device_material_batches.values():
+                self._api.set_instance_material_arrays(material_ids, colors, properties)
+            for instance_ids, xforms, scales in self._device_transform_batches.values():
+                self._api.set_instance_transform_arrays(
+                    instance_ids, xforms, scales, self._global_transform
+                )
+            if self._device_transform_batches:
+                self._api.rebuild_tlas()
         elif self._transforms_dirty:
             self._api.rebuild_tlas()
 
@@ -702,6 +839,8 @@ class PathTracingViewerBackend:
         self._api.clear_scene()
         self._mesh_ids.clear()
         self._batches.clear()
+        self._device_transform_batches.clear()
+        self._device_material_batches.clear()
         self._material_ids.clear()
         self._scene_dirty = False
         self._transforms_dirty = False

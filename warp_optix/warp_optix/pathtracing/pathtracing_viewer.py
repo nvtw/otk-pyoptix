@@ -95,6 +95,14 @@ class PathTracingViewer:
     OUTPUT_SPECULAR = 7
     OUTPUT_SPEC_HITDIST = 8
 
+    DLSS_QUALITY_MODES = {
+        "performance": "MAX_PERF",
+        "balanced": "BALANCED",
+        "quality": "MAX_QUALITY",
+        "ultra_performance": "ULTRA_PERFORMANCE",
+        "native": "DLAA",
+    }
+
     def __init__(
         self,
         width: int = 1280,
@@ -108,6 +116,7 @@ class PathTracingViewer:
         use_halton_jitter: bool = True,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
+        dlss_quality: str = "quality",
     ):
         """
         Initialize the path tracing viewer.
@@ -125,11 +134,14 @@ class PathTracingViewer:
         self.accumulate_samples = accumulate_samples
         self.samples_per_frame = max(1, int(samples_per_frame))
         self.max_bounces = max(1, int(max_bounces))
+        self._pipeline_max_bounces = self.max_bounces
         self.direct_light_samples = max(1, int(direct_light_samples))
         self.use_halton_jitter = bool(use_halton_jitter)
         self.enable_dlss_rr = bool(enable_dlss_rr)
         self.enable_set = bool(enable_set)
+        self.dlss_quality = self._normalize_dlss_quality(dlss_quality)
         self._set_active = False
+        self._render_stream = wp.get_stream("cuda")
 
         # Camera
         if camera is None:
@@ -224,6 +236,7 @@ class PathTracingViewer:
         self.sky_sun_disk_scale = 1.0
         self.sky_sun_glow_intensity = 1.0
         self.sky_y_is_up = 1
+        self.sky_grayscale = False
         self.env_intensity = (1.0, 1.0, 1.0)
         self.env_rotation = 0.0
         self.use_path_regularization = True
@@ -234,6 +247,52 @@ class PathTracingViewer:
 
         # Optional HDR environment map (lat-long, RGBA32F).
         self._env_map: EnvironmentMap | None = None
+
+    @classmethod
+    def _normalize_dlss_quality(cls, quality: str) -> str:
+        value = str(quality).strip().lower().replace("-", "_")
+        if value not in cls.DLSS_QUALITY_MODES:
+            choices = ", ".join(cls.DLSS_QUALITY_MODES)
+            raise ValueError(f"dlss_quality must be one of: {choices}")
+        return value
+
+    def set_dlss_quality(self, quality: str) -> None:
+        """Select the DLSS input-resolution/quality mode."""
+        value = self._normalize_dlss_quality(quality)
+        if value == self.dlss_quality:
+            return
+        self.dlss_quality = value
+        if self._optix is not None:
+            wp.synchronize_stream(self._render_stream)
+            self._init_dlss_rr()
+
+    def set_ray_budget(
+        self,
+        *,
+        max_bounces: int | None = None,
+        direct_light_samples: int | None = None,
+        samples_per_frame: int | None = None,
+    ) -> None:
+        """Adjust runtime ray budgets without rebuilding the OptiX pipeline."""
+        if max_bounces is not None:
+            value = int(max_bounces)
+            if value < 1 or value > self._pipeline_max_bounces:
+                raise ValueError(
+                    "max_bounces must be in the range "
+                    f"[1, {self._pipeline_max_bounces}]; construct the viewer with a "
+                    "larger max_bounces value to raise the compiled limit"
+                )
+            self.max_bounces = value
+        if direct_light_samples is not None:
+            value = int(direct_light_samples)
+            if value < 1:
+                raise ValueError("direct_light_samples must be at least 1")
+            self.direct_light_samples = value
+        if samples_per_frame is not None:
+            value = int(samples_per_frame)
+            if value < 1:
+                raise ValueError("samples_per_frame must be at least 1")
+            self.samples_per_frame = value
 
     def set_environment_hdr(self, hdr_path: str, scaling: float = 1.0):
         """
@@ -286,15 +345,23 @@ class PathTracingViewer:
         logger.info("Initializing OptiX path tracing viewer.")
 
         if optix is None:
-            logger.error("Could not import optix module. Ensure warp.pyoptix and OptiX SDK are installed.")
+            logger.error(
+                "Could not import optix module. Ensure warp.pyoptix and OptiX SDK are installed."
+            )
             return False
 
         self._optix = optix
 
         # Create OptiX context
         wp_device = wp.get_device("cuda")
-        cu_context = wp_device.context.value if hasattr(wp_device.context, "value") else int(wp_device.context)
-        self._ctx, self._optix_logger = create_optix_context(optix, int(cu_context))
+        cu_context = (
+            wp_device.context.value
+            if hasattr(wp_device.context, "value")
+            else int(wp_device.context)
+        )
+        self._ctx, self._optix_logger = create_optix_context(
+            optix, int(cu_context), log_level=2
+        )
 
         # Build PTX directly from Warp OptiX kernels.
         module = wp.get_module(pwk.__name__)
@@ -318,7 +385,9 @@ class PathTracingViewer:
         # Create output buffers
         self._create_buffers()
         self._launch_params = pwk.PathtraceLaunchParams()
-        self._launch_params_buffer = woptix.create_launch_params_buffer(pwk.PathtraceLaunchParams, device="cuda")
+        self._launch_params_buffer = woptix.create_launch_params_buffer(
+            pwk.PathtraceLaunchParams, device="cuda"
+        )
         self._init_dlss_rr()
 
         self._create_pipeline()
@@ -377,7 +446,7 @@ class PathTracingViewer:
         self._last_accum_view = view.copy()
         self._last_accum_proj = proj.copy()
 
-    def _destroy_dlss_rr(self):
+    def _destroy_dlss_rr(self, *, restore_resolution: bool = True):
         # Surface object lifetime is owned by the Texture2D instance.
         # Clearing references lets texture cleanup release CUDA resources.
         self._dlss_output_surface = 0
@@ -408,7 +477,8 @@ class PathTracingViewer:
         self._dlss_enabled = False
         self._dlss_status_reported = False
         # If DLSS gets disabled at runtime, restore full-resolution rendering.
-        self._set_render_resolution(self.width, self.height)
+        if restore_resolution:
+            self._set_render_resolution(self.width, self.height)
 
     def _init_dlss_rr(self):
         self._destroy_dlss_rr()
@@ -416,7 +486,12 @@ class PathTracingViewer:
         if not self.enable_dlss_rr or self._optix is None:
             return
 
-        required = ("DlssRRContext", "DlssRRInitInfo", "DlssRRResource", "DlssPerfQuality")
+        required = (
+            "DlssRRContext",
+            "DlssRRInitInfo",
+            "DlssRRResource",
+            "DlssPerfQuality",
+        )
         if not all(hasattr(self._optix, name) for name in required):
             self._dlss_init_error = "bindings are not present in the optix module"
             logger.info("DLSS RR bindings not present in optix module.")
@@ -440,11 +515,16 @@ class PathTracingViewer:
             init_info.inputHeight = int(render_height)
             init_info.outputWidth = int(self.width)
             init_info.outputHeight = int(self.height)
-            # Prefer an upscaling profile; fallback if binding enum names differ.
             quality_enum = self._optix.DlssPerfQuality
-            quality_name = "MAX_QUALITY"
+            quality_name = self.DLSS_QUALITY_MODES[self.dlss_quality]
             if not hasattr(quality_enum, quality_name):
-                quality_name = "BALANCED" if hasattr(quality_enum, "BALANCED") else "DLAA"
+                quality_name = (
+                    "MAX_QUALITY"
+                    if hasattr(quality_enum, "MAX_QUALITY")
+                    else "BALANCED"
+                    if hasattr(quality_enum, "BALANCED")
+                    else "DLAA"
+                )
             init_info.quality = getattr(quality_enum, quality_name)
             preset_enum = self._optix.RayReconstructionHintRenderPreset
             # Preset E's latest transformer better rejects stale illumination
@@ -464,7 +544,9 @@ class PathTracingViewer:
             # for the selected quality mode, and only fallback to half-res on failure.
             if hasattr(context, "querySupportedDlssInputSizes"):
                 try:
-                    sizes = context.querySupportedDlssInputSizes(int(self.width), int(self.height), init_info.quality)
+                    sizes = context.querySupportedDlssInputSizes(
+                        int(self.width), int(self.height), init_info.quality
+                    )
                     ow = int(getattr(sizes, "optimalWidth", 0))
                     oh = int(getattr(sizes, "optimalHeight", 0))
                     if ow > 0 and oh > 0:
@@ -473,31 +555,70 @@ class PathTracingViewer:
                         init_info.inputWidth = int(render_width)
                         init_info.inputHeight = int(render_height)
                 except Exception as exc:
-                    logger.warning("Failed to query optimal DLSS input size; using half-res fallback: %s", exc)
+                    logger.warning(
+                        "Failed to query optimal DLSS input size; using half-res fallback: %s",
+                        exc,
+                    )
 
-            denoiser = context.initDlssRR(init_info)
+            denoiser = context.initDlssRR(
+                init_info, int(self._render_stream.cuda_stream)
+            )
             self._set_render_resolution(render_width, render_height)
 
-            self._dlss_color_in_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 4)
-            self._dlss_normal_roughness_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 4)
-            self._dlss_motion_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 2)
-            self._dlss_depth_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 1)
-            self._dlss_diffuse_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 4)
-            self._dlss_specular_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 4)
-            self._dlss_spec_hit_dist_tex = self._create_cuda_texture_2d(self._render_height, self._render_width, 1)
-            self._dlss_color_out_tex = self._create_cuda_texture_2d(self.height, self.width, 4, surface_access=True)
-            self._dlss_output_buffer = wp.zeros((self.height, self.width), dtype=wp.vec4, device="cuda")
+            self._dlss_color_in_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 4
+            )
+            self._dlss_normal_roughness_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 4
+            )
+            self._dlss_motion_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 2
+            )
+            self._dlss_depth_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 1
+            )
+            self._dlss_diffuse_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 4
+            )
+            self._dlss_specular_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 4
+            )
+            self._dlss_spec_hit_dist_tex = self._create_cuda_texture_2d(
+                self._render_height, self._render_width, 1
+            )
+            self._dlss_color_out_tex = self._create_cuda_texture_2d(
+                self.height, self.width, 4, surface_access=True
+            )
+            self._dlss_output_buffer = wp.zeros(
+                (self.height, self.width), dtype=wp.vec4, device="cuda"
+            )
             self._dlss_output_surface = self._dlss_color_out_tex.cuda_surface
 
             res = self._optix.DlssRRResource
-            denoiser.setResource(res.RESOURCE_COLOR_IN, self._dlss_color_in_tex.cuda_texture)
+            denoiser.setResource(
+                res.RESOURCE_COLOR_IN, self._dlss_color_in_tex.cuda_texture
+            )
             denoiser.setResource(res.RESOURCE_COLOR_OUT, self._dlss_output_surface)
-            denoiser.setResource(res.RESOURCE_NORMALROUGHNESS, self._dlss_normal_roughness_tex.cuda_texture)
-            denoiser.setResource(res.RESOURCE_MOTIONVECTOR, self._dlss_motion_tex.cuda_texture)
-            denoiser.setResource(res.RESOURCE_LINEARDEPTH, self._dlss_depth_tex.cuda_texture)
-            denoiser.setResource(res.RESOURCE_DIFFUSE_ALBEDO, self._dlss_diffuse_tex.cuda_texture)
-            denoiser.setResource(res.RESOURCE_SPECULAR_ALBEDO, self._dlss_specular_tex.cuda_texture)
-            denoiser.setResource(res.RESOURCE_SPECULAR_HITDISTANCE, self._dlss_spec_hit_dist_tex.cuda_texture)
+            denoiser.setResource(
+                res.RESOURCE_NORMALROUGHNESS,
+                self._dlss_normal_roughness_tex.cuda_texture,
+            )
+            denoiser.setResource(
+                res.RESOURCE_MOTIONVECTOR, self._dlss_motion_tex.cuda_texture
+            )
+            denoiser.setResource(
+                res.RESOURCE_LINEARDEPTH, self._dlss_depth_tex.cuda_texture
+            )
+            denoiser.setResource(
+                res.RESOURCE_DIFFUSE_ALBEDO, self._dlss_diffuse_tex.cuda_texture
+            )
+            denoiser.setResource(
+                res.RESOURCE_SPECULAR_ALBEDO, self._dlss_specular_tex.cuda_texture
+            )
+            denoiser.setResource(
+                res.RESOURCE_SPECULAR_HITDISTANCE,
+                self._dlss_spec_hit_dist_tex.cuda_texture,
+            )
 
             self._dlss_context = context
             self._dlss_denoiser = denoiser
@@ -571,17 +692,29 @@ class PathTracingViewer:
     def _create_buffers(self):
         """Create output buffers."""
         # HDR color buffer
-        self._color_buffer = wp.zeros((self._render_height, self._render_width), dtype=wp.vec4, device="cuda")
-        self._accum_buffer = wp.zeros((self._render_height, self._render_width), dtype=wp.vec4, device="cuda")
+        self._color_buffer = wp.zeros(
+            (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
+        )
+        self._accum_buffer = wp.zeros(
+            (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
+        )
 
         # G-buffer outputs
         self._normal_roughness_buffer = wp.zeros(
             (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
         )
-        self._motion_buffer = wp.zeros((self._render_height, self._render_width), dtype=wp.vec2, device="cuda")
-        self._depth_buffer = wp.zeros((self._render_height, self._render_width), dtype=wp.float32, device="cuda")
-        self._diffuse_buffer = wp.zeros((self._render_height, self._render_width), dtype=wp.vec4, device="cuda")
-        self._specular_buffer = wp.zeros((self._render_height, self._render_width), dtype=wp.vec4, device="cuda")
+        self._motion_buffer = wp.zeros(
+            (self._render_height, self._render_width), dtype=wp.vec2, device="cuda"
+        )
+        self._depth_buffer = wp.zeros(
+            (self._render_height, self._render_width), dtype=wp.float32, device="cuda"
+        )
+        self._diffuse_buffer = wp.zeros(
+            (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
+        )
+        self._specular_buffer = wp.zeros(
+            (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
+        )
         self._spec_hit_dist_buffer = wp.zeros(
             (self._render_height, self._render_width), dtype=wp.float32, device="cuda"
         )
@@ -603,19 +736,23 @@ class PathTracingViewer:
 
         count = self._scene.instance_count
 
+        self._instance_transforms_buffer = self._scene._device_instance_transforms
+        if self._instance_transforms_buffer is None:
+            raise RuntimeError("Scene instance transform buffers have not been built")
+
         # (Re)allocate GPU buffers when the instance count changes.
         if count != self._instance_transform_count:
-            self._instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
-            self._prev_instance_transforms_buffer = wp.empty(count * 12, dtype=wp.float32, device="cuda")
+            self._prev_instance_transforms_buffer = wp.empty(
+                (count, 12), dtype=wp.float32, device="cuda"
+            )
             self._instance_transform_count = count
             self._prev_instance_transforms_valid = False
 
-        curr = self._scene._instance_transform_cache[:count, :3, :].reshape(-1)
-        self._instance_transforms_buffer.assign(curr)
-
         # First frame (or after resize): prev == current so motion is zero.
         if not self._prev_instance_transforms_valid:
-            wp.copy(self._prev_instance_transforms_buffer, self._instance_transforms_buffer)
+            wp.copy(
+                self._prev_instance_transforms_buffer, self._instance_transforms_buffer
+            )
             self._prev_instance_transforms_valid = True
 
     def _snapshot_instance_transforms(self):
@@ -628,23 +765,30 @@ class PathTracingViewer:
         if (
             self._instance_transforms_buffer is not None
             and self._prev_instance_transforms_buffer is not None
-            and self._instance_transforms_buffer.shape == self._prev_instance_transforms_buffer.shape
+            and self._instance_transforms_buffer.shape
+            == self._prev_instance_transforms_buffer.shape
         ):
-            wp.copy(self._prev_instance_transforms_buffer, self._instance_transforms_buffer)
+            wp.copy(
+                self._prev_instance_transforms_buffer, self._instance_transforms_buffer
+            )
 
     def _create_pipeline(self):
         """Create the OptiX pipeline."""
         optix = self._optix
         pipeline_kwargs = {
             "usesMotionBlur": False,
-            "traversableGraphFlags": int(optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING),
-            "numPayloadValues": 21,
+            "traversableGraphFlags": int(
+                optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING
+            ),
+            "numPayloadValues": 19,
             "numAttributeValues": 2,
             "exceptionFlags": int(optix.EXCEPTION_FLAG_NONE),
             "pipelineLaunchParamsVariableName": "params",
         }
         if optix.version()[1] >= 2:
-            pipeline_kwargs["usesPrimitiveTypeFlags"] = int(optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE)
+            pipeline_kwargs["usesPrimitiveTypeFlags"] = int(
+                optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
+            )
         pco = optix.PipelineCompileOptions(**pipeline_kwargs)
 
         mco = optix.ModuleCompileOptions(
@@ -661,8 +805,12 @@ class PathTracingViewer:
         # Match C++ SBT layout: 2 ray subtypes (primary + secondary/shadow).
         # Primary (offset 0): closest hit only, no anyhit — used by primary AND bounce rays.
         # Secondary (offset 1): closest hit + anyhit (simple block) — used by shadow/visibility rays.
-        self._sbt_manager = SbtKernelManager(optix, self._ctx, self._module, num_ray_subtypes=2)
-        self._sbt_manager.set_raygen_kernel(woptix.get_entry_name(pwk.primary_raygen, woptix.OptixKernelType.RAYGEN))
+        self._sbt_manager = SbtKernelManager(
+            optix, self._ctx, self._module, num_ray_subtypes=2
+        )
+        self._sbt_manager.set_raygen_kernel(
+            woptix.get_entry_name(pwk.primary_raygen, woptix.OptixKernelType.RAYGEN)
+        )
         self._sbt_manager.add_miss_kernels(
             [
                 woptix.get_entry_name(pwk.primary_miss, woptix.OptixKernelType.MISS),
@@ -671,11 +819,17 @@ class PathTracingViewer:
         )
         self._sbt_manager.register_hit_shader_type(
             HitKernel(
-                woptix.get_entry_name(pwk.primary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT),
+                woptix.get_entry_name(
+                    pwk.primary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT
+                ),
             ),
             HitKernel(
-                woptix.get_entry_name(pwk.secondary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT),
-                any_hit=woptix.get_entry_name(pwk.secondary_any_hit, woptix.OptixKernelType.ANY_HIT),
+                woptix.get_entry_name(
+                    pwk.secondary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT
+                ),
+                any_hit=woptix.get_entry_name(
+                    pwk.secondary_any_hit, woptix.OptixKernelType.ANY_HIT
+                ),
             ),
         )
 
@@ -768,7 +922,11 @@ class PathTracingViewer:
         p.tlas = wp.uint64(self._scene.tlas_handle)
         p.width = wp.uint32(self._render_width)
         p.height = wp.uint32(self._render_height)
-        frame_index_value = self.sample_index if frame_index_override is None else int(frame_index_override)
+        frame_index_value = (
+            self.sample_index
+            if frame_index_override is None
+            else int(frame_index_override)
+        )
         p.frame_index = wp.uint32(frame_index_value)
         p.max_bounces = wp.uint32(self.max_bounces)
         p.direct_light_samples = wp.uint32(self.direct_light_samples)
@@ -813,9 +971,15 @@ class PathTracingViewer:
         p.bitangent_flip = float(self.bitangent_flip)
         p.use_procedural_sky = wp.uint32(1 if self._env_map is None else 0)
         p.env_map = None if self._env_map is None else self._env_map._env_map_buffer
-        p.env_map_length = wp.uint32(0 if self._env_map is None else self._env_map.width * self._env_map.height * 4)
+        p.env_map_length = wp.uint32(
+            0
+            if self._env_map is None
+            else self._env_map.width * self._env_map.height * 4
+        )
         p.env_map_width = wp.uint32(0 if self._env_map is None else self._env_map.width)
-        p.env_map_height = wp.uint32(0 if self._env_map is None else self._env_map.height)
+        p.env_map_height = wp.uint32(
+            0 if self._env_map is None else self._env_map.height
+        )
         p.env_accel = (
             None
             if self._env_map is None or self._env_map._env_accel_buffer is None
@@ -825,7 +989,9 @@ class PathTracingViewer:
                 dtype=pwk.EnvAccel,
             )
         )
-        p.env_accel_count = wp.uint32(0 if self._env_map is None else self._env_map.accel_count)
+        p.env_accel_count = wp.uint32(
+            0 if self._env_map is None else self._env_map.accel_count
+        )
 
         sky = pwk.PhysicalSkyParams()
         sky.rgb_unit_conversion = wp.vec3(*self.sky_rgb_unit_conversion)
@@ -846,6 +1012,7 @@ class PathTracingViewer:
         sky.sun_disk_scale = float(self.sky_sun_disk_scale)
         sky.sun_glow_intensity = float(self.sky_sun_glow_intensity)
         sky.y_is_up = int(self.sky_y_is_up)
+        sky.grayscale = int(self.sky_grayscale)
         p.sky = sky
 
         p.render_primitives = (
@@ -881,7 +1048,8 @@ class PathTracingViewer:
         )
         p.compact_materials = (
             None
-            if self._scene._compact_materials is None or self._scene.materials.count == 0
+            if self._scene._compact_materials is None
+            or self._scene.materials.count == 0
             else wp.array(
                 ptr=self._scene._compact_materials.ptr,
                 shape=(self._scene.materials.count,),
@@ -908,7 +1076,9 @@ class PathTracingViewer:
         p.texture_data = self._scene._texture_data
         p.texture_count = wp.uint32(self._scene.texture_count)
         p.texture_data_length = wp.uint32(
-            0 if self._scene._texture_data is None else self._scene._texture_data.shape[0]
+            0
+            if self._scene._texture_data is None
+            else self._scene._texture_data.shape[0]
         )
 
         p.color_output = self._color_buffer
@@ -922,7 +1092,10 @@ class PathTracingViewer:
         woptix.write_launch_params(self._launch_params_buffer, p)
 
     def _update_temporal_state(
-        self, current_view: np.ndarray, current_proj: np.ndarray, use_external_accum: bool
+        self,
+        current_view: np.ndarray,
+        current_proj: np.ndarray,
+        use_external_accum: bool,
     ) -> bool:
         """Update accumulation state and return whether temporal history resets."""
         if self._dlss_enabled:
@@ -983,7 +1156,7 @@ class PathTracingViewer:
                 self._render_width,
                 self._render_height,
                 self._launch_params_buffer,
-                stream=int(wp.get_stream("cuda").cuda_stream),
+                stream=int(self._render_stream.cuda_stream),
             )
 
             if not self._dlss_enabled:
@@ -1022,7 +1195,9 @@ class PathTracingViewer:
 
     def _process_output(self, source_buffer, *, resize_final_to_render: bool):
         if self.output_mode == self.OUTPUT_FINAL:
-            self._process_final_output(source_buffer, resize_to_render=resize_final_to_render)
+            self._process_final_output(
+                source_buffer, resize_to_render=resize_final_to_render
+            )
             return
         self._process_debug_output()
 
@@ -1036,7 +1211,11 @@ class PathTracingViewer:
             if self.enable_dlss_rr and self._dlss_enabled:
                 logger.warning("DLSS RR active.")
             elif self.enable_dlss_rr and not self._dlss_enabled:
-                reason = self._dlss_init_error if self._dlss_init_error else "unknown initialization failure"
+                reason = (
+                    self._dlss_init_error
+                    if self._dlss_init_error
+                    else "unknown initialization failure"
+                )
                 logger.warning("DLSS RR requested but inactive: %s", reason)
             else:
                 logger.warning("DLSS RR disabled by configuration.")
@@ -1048,7 +1227,9 @@ class PathTracingViewer:
         current_proj_inv = np.linalg.inv(current_proj)
         use_external_accum = self.accumulate_samples and not self._dlss_enabled
         samples_this_frame = 1 if self._dlss_enabled else self.samples_per_frame
-        reset_temporal = self._update_temporal_state(current_view, current_proj, use_external_accum)
+        reset_temporal = self._update_temporal_state(
+            current_view, current_proj, use_external_accum
+        )
         self._update_instance_transform_buffers()
         self._launch_samples(
             samples_this_frame,
@@ -1060,7 +1241,6 @@ class PathTracingViewer:
         )
 
         # Queue the current-to-previous transform snapshot behind the OptiX launch.
-        # The synchronization before DLSS publishes both results together.
         self._snapshot_instance_transforms()
 
         # Keep previous matrices for next frame's motion-vector calculation.
@@ -1072,18 +1252,19 @@ class PathTracingViewer:
         self._last_output_mode = self.output_mode
 
         if self._dlss_enabled:
-            # Single sync: ensure OptiX launch + Warp kernel writes are visible
-            # before copying into DLSS texture resources and running DLSS.
-            wp.synchronize_device("cuda")
+            # OptiX, texture copies, DLSS, and tone mapping share one stream;
+            # stream ordering publishes every producer to its consumer.
             self._copy_linear_to_dlss_textures()
             if self._run_dlss_rr(reset_temporal):
-                # Single sync: ensure DLSS writes are complete before reading output.
-                wp.synchronize_device("cuda")
                 self._copy_dlss_output_to_color()
                 if self._dlss_output_buffer is not None:
-                    self._process_output(self._dlss_output_buffer, resize_final_to_render=False)
+                    self._process_output(
+                        self._dlss_output_buffer, resize_final_to_render=False
+                    )
                 else:
-                    self._process_output(self._color_buffer, resize_final_to_render=False)
+                    self._process_output(
+                        self._color_buffer, resize_final_to_render=False
+                    )
             else:
                 self._process_output(self._color_buffer, resize_final_to_render=True)
         else:
@@ -1092,12 +1273,13 @@ class PathTracingViewer:
 
     def get_output(self) -> np.ndarray:
         """Get the current output as a numpy array."""
-        wp.synchronize_device("cuda")
+        wp.synchronize_stream(self._render_stream)
         return self._tonemapper.get_numpy()
 
     def resize(self, width: int, height: int):
         """Resize the render buffers."""
         if width != self.width or height != self.height:
+            wp.synchronize_stream(self._render_stream)
             self.width = width
             self.height = height
             self.camera.set_aspect_ratio(width, height)
@@ -1107,8 +1289,16 @@ class PathTracingViewer:
             self._init_dlss_rr()
             self.frame_index = 0
 
+    def close(self):
+        """Wait for rendering and release DLSS resources."""
+        wp.synchronize_stream(self._render_stream)
+        self._destroy_dlss_rr(restore_resolution=False)
+
     def __del__(self):
-        self._destroy_dlss_rr()
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def main():
