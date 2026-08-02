@@ -53,6 +53,7 @@ class OptixGLInteropViewer:
         on_draw_overlay: Callable[[], None] | None = None,
         vsync: bool = False,
         fallback_to_copy: bool = True,
+        render_stream: wp.Stream | None = None,
     ):
         import pyglet
         from pyglet import gl
@@ -60,6 +61,7 @@ class OptixGLInteropViewer:
         self.width = width
         self.height = height
         self.device = device
+        self.render_stream = render_stream or wp.get_stream(device)
         self.pyglet = pyglet
         self.gl = gl
         self.frame_index = 0
@@ -158,13 +160,16 @@ class OptixGLInteropViewer:
         if self._render_callback is None:
             return
         with wp.ScopedDevice(self.device):
-            mapped = self.cuda_gl.map(
-                dtype=wp.uint32, shape=(self.width * self.height,)
-            )
-            elapsed = time.perf_counter() - self.start_time
-            self._render_callback(mapped, self.frame_index, elapsed)
-            wp.synchronize_stream(wp.get_stream(self.device))
-            self.cuda_gl.unmap()
+            with wp.ScopedStream(self.render_stream, sync_enter=False, sync_exit=False):
+                mapped = self.cuda_gl.map(
+                    dtype=wp.uint32, shape=(self.width * self.height,)
+                )
+                elapsed = time.perf_counter() - self.start_time
+                self._render_callback(mapped, self.frame_index, elapsed)
+                self.cuda_gl.unmap()
+                # Unmapping is asynchronous. Drain only the render stream so
+                # CUDA releases PBO ownership before OpenGL consumes it below.
+                wp.synchronize_stream(self.render_stream)
 
         # Drive presentation explicitly each update so rendering does not depend
         # on backend-specific on_draw invalidation behavior.
