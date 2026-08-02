@@ -3180,7 +3180,7 @@ def primary_raygen(params: PathtraceLaunchParams):
             break
 
         # Russian roulette.
-        if depth >= 2:
+        if depth >= 1:
             max_comp = wp.max(
                 sec_throughput[0], wp.max(sec_throughput[1], sec_throughput[2])
             )
