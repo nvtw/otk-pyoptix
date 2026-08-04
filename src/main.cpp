@@ -2351,6 +2351,15 @@ pyoptix::DlssRRDenoiser dlssRRCreate(
     dlssParams.InFeatureCreateFlags = createFlags;
     dlssParams.InEnableOutputSubrects = false;
 
+    // Upscaling and Ray Reconstruction select their transformer models through separate hints.
+    const auto upscalingPreset = NVSDK_NGX_DLSS_Hint_Render_Preset_K;
+    context.ngxParams->Set( NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_DLAA, upscalingPreset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Quality, upscalingPreset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraQuality, upscalingPreset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Balanced, upscalingPreset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_Performance, upscalingPreset );
+    context.ngxParams->Set( NVSDK_NGX_Parameter_DLSS_Hint_Render_Preset_UltraPerformance, upscalingPreset );
+
     context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA, initInfo.preset );
     context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_Quality, initInfo.preset );
     context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraQuality, initInfo.preset );
