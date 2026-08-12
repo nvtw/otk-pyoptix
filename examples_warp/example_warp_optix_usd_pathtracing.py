@@ -74,13 +74,18 @@ def _parse_args():
     parser.add_argument(
         "--max-texture-size",
         type=int,
-        default=2048,
+        default=512,
         help="Maximum size of each source texture/UDIM tile; stitched atlases may grow larger (0 keeps full resolution).",
     )
     parser.add_argument(
         "--load-usd-environment",
         action="store_true",
         help="Use the first lat-long DomeLight texture composed by the USD stage.",
+    )
+    parser.add_argument(
+        "--strict-usd-sidedness",
+        action="store_true",
+        help="Honor authored USD doubleSided metadata (default renders robustly two-sided).",
     )
     parser.add_argument(
         "--usd-environment-scale",
@@ -288,6 +293,7 @@ def main():
         apply_stage_units=not args.no_stage_units,
         convert_up_axis=not args.no_up_axis_conversion,
         max_texture_size=args.max_texture_size or None,
+        strict_sidedness=args.strict_usd_sidedness,
         load_usd_environment=args.load_usd_environment,
         usd_environment_scale=args.usd_environment_scale,
     ):

@@ -73,9 +73,12 @@ def test_separate_roughness_map_is_packed_with_metallic_constant(tmp_path):
     packed = _decode_packed_orm(spec)
 
     assert packed.shape == (1, 1, 4)
-    np.testing.assert_allclose(packed[0, 0, 0], 1.0)
-    np.testing.assert_allclose(packed[0, 0, 1], 0.1 * 0.2 + (64.0 / 255.0) * 0.8)
-    np.testing.assert_allclose(packed[0, 0, 2], 1.0)
+    assert packed.dtype == np.uint8
+    np.testing.assert_allclose(packed[0, 0, 0], 255)
+    np.testing.assert_allclose(
+        packed[0, 0, 1], round((0.1 * 0.2 + (64.0 / 255.0) * 0.8) * 255.0)
+    )
+    np.testing.assert_allclose(packed[0, 0, 2], 255)
 
 
 def test_omnipbr_separate_maps_select_packed_gltf_workflow(monkeypatch, tmp_path):
@@ -140,7 +143,8 @@ def test_udim_tiles_decode_to_horizontal_atlas(tmp_path):
     atlas = _decode_udim(tuple(paths))
 
     assert atlas.shape == (2, 6, 4)
-    np.testing.assert_allclose(atlas[0, (0, 2, 4), :3], np.eye(3), atol=1.0e-6)
+    assert atlas.dtype == np.uint8
+    np.testing.assert_array_equal(atlas[0, (0, 2, 4), :3], np.eye(3, dtype=np.uint8) * 255)
 
 
 def test_udim_size_limit_applies_per_tile_not_to_completed_atlas(tmp_path):

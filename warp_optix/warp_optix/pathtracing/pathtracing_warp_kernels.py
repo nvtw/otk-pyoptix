@@ -234,7 +234,7 @@ class PathtraceLaunchParams:
     packed_material_ids: wp.array(dtype=wp.uint32)
     material_count: wp.uint32
     texture_descs: wp.array(dtype=TextureDesc)
-    texture_data: wp.array(dtype=wp.float32)
+    texture_data: wp.array(dtype=wp.uint8)
     texture_count: wp.uint32
     texture_data_length: wp.uint32
 
@@ -375,10 +375,23 @@ def _sample_texture_rgba(
     ):
         return wp.vec4(1.0, 1.0, 1.0, 1.0)
 
-    c00 = wp.vec4(texels[b00], texels[b00 + 1], texels[b00 + 2], texels[b00 + 3])
-    c10 = wp.vec4(texels[b10], texels[b10 + 1], texels[b10 + 2], texels[b10 + 3])
-    c01 = wp.vec4(texels[b01], texels[b01 + 1], texels[b01 + 2], texels[b01 + 3])
-    c11 = wp.vec4(texels[b11], texels[b11 + 1], texels[b11 + 2], texels[b11 + 3])
+    scale = wp.float32(1.0 / 255.0)
+    c00 = wp.vec4(
+        wp.float32(texels[b00]), wp.float32(texels[b00 + 1]),
+        wp.float32(texels[b00 + 2]), wp.float32(texels[b00 + 3]),
+    ) * scale
+    c10 = wp.vec4(
+        wp.float32(texels[b10]), wp.float32(texels[b10 + 1]),
+        wp.float32(texels[b10 + 2]), wp.float32(texels[b10 + 3]),
+    ) * scale
+    c01 = wp.vec4(
+        wp.float32(texels[b01]), wp.float32(texels[b01 + 1]),
+        wp.float32(texels[b01 + 2]), wp.float32(texels[b01 + 3]),
+    ) * scale
+    c11 = wp.vec4(
+        wp.float32(texels[b11]), wp.float32(texels[b11 + 1]),
+        wp.float32(texels[b11 + 2]), wp.float32(texels[b11 + 3]),
+    ) * scale
 
     c0 = c00 * (1.0 - tx) + c10 * tx
     c1 = c01 * (1.0 - tx) + c11 * tx

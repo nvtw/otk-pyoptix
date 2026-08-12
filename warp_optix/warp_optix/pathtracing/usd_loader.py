@@ -117,12 +117,12 @@ def _decode_texture(path: Path, max_size: int | None = None) -> np.ndarray:
     with Image.open(path) as image:
         if max_size is not None and max(image.size) > max_size:
             image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-        arr = np.asarray(image.convert("RGBA"), dtype=np.float32) * (1.0 / 255.0)
+        arr = np.asarray(image.convert("RGBA"), dtype=np.uint8)
     # USD/MDL texture coordinates use a lower-left image origin while decoded
     # rows and the software sampler use a top-left origin. Keep the UV/tangent
     # basis intact and convert the image storage once here.
     arr = np.flip(arr, axis=0)
-    return np.ascontiguousarray(arr, dtype=np.float32)
+    return np.ascontiguousarray(arr, dtype=np.uint8)
 
 
 def _decode_udim(tiles: tuple[tuple[int, Path], ...], max_size: int | None = None) -> np.ndarray:
@@ -143,16 +143,14 @@ def _decode_udim(tiles: tuple[tuple[int, Path], ...], max_size: int | None = Non
 
         resized = []
         for tile in images:
-            pixels = np.clip(tile * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
             resized.append(
                 np.asarray(
-                    Image.fromarray(pixels, mode="RGBA").resize((width, height), Image.Resampling.LANCZOS),
-                    dtype=np.float32,
+                    Image.fromarray(tile, mode="RGBA").resize((width, height), Image.Resampling.LANCZOS),
+                    dtype=np.uint8,
                 )
-                * (1.0 / 255.0)
             )
         images = resized
-    atlas = np.zeros((height * row_count, width * column_count, 4), dtype=np.float32)
+    atlas = np.zeros((height * row_count, width * column_count, 4), dtype=np.uint8)
     for (number, _), image in zip(tiles, images, strict=True):
         column = (number - 1001) % 10
         row = (number - 1001) // 10
@@ -160,7 +158,7 @@ def _decode_udim(tiles: tuple[tuple[int, Path], ...], max_size: int | None = Non
         # upward in UV space, which is downward in the stored image.
         storage_row = row_count - 1 - row
         atlas[storage_row * height : (storage_row + 1) * height, column * width : (column + 1) * width] = image
-    return np.ascontiguousarray(atlas, dtype=np.float32)
+    return np.ascontiguousarray(atlas, dtype=np.uint8)
 
 
 def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
@@ -184,21 +182,19 @@ def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
         if image.shape[:2] != (height, width):
             from PIL import Image  # noqa: PLC0415
 
-            pixels = np.clip(image * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
-            pixels = np.asarray(
-                Image.fromarray(pixels, mode="RGBA").resize((width, height), Image.Resampling.LANCZOS),
-                dtype=np.float32,
-            ) * (1.0 / 255.0)
-            image = pixels
-        return image[..., 0]
+            image = np.asarray(
+                Image.fromarray(image, mode="RGBA").resize((width, height), Image.Resampling.LANCZOS),
+                dtype=np.uint8,
+            )
+        return image[..., 0].astype(np.float32) * (1.0 / 255.0)
 
     rough_source = channel_or_constant(rough, rough_constant)
     metal_source = channel_or_constant(metal, metal_constant)
     roughness = rough_constant * (1.0 - rough_influence) + rough_source * rough_influence
     metallic = metal_constant * (1.0 - metal_influence) + metal_source * metal_influence
-    packed = np.ones((height, width, 4), dtype=np.float32)
-    packed[..., 1] = np.clip(roughness, 0.0, 1.0)
-    packed[..., 2] = np.clip(metallic, 0.0, 1.0)
+    packed = np.full((height, width, 4), 255, dtype=np.uint8)
+    packed[..., 1] = np.clip(roughness * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+    packed[..., 2] = np.clip(metallic * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
     return np.ascontiguousarray(packed)
 
 
@@ -440,49 +436,26 @@ def _mesh_arrays(mesh, UsdGeom):
 
     left_handed = str(mesh.GetOrientationAttr().Get()) == "leftHanded"
     holes = set(int(i) for i in (mesh.GetHoleIndicesAttr().Get() or []))
-    # Some production assets contain an orientation token that disagrees with
-    # virtually every authored shading normal. Culling by that stale token
-    # removes the exterior shell. When the disagreement is overwhelming,
-    # retain the authored outward normals and repair the effective winding.
-    repair_winding = False
-    if normals is not None:
-        agreement = []
+    reverse_winding = left_handed
+    if not holes and np.all(counts == 3):
+        corners = np.arange(len(point_indices), dtype=np.int64).reshape(-1, 3)
+        if reverse_winding:
+            corners = corners[:, (0, 2, 1)]
+        triangles = np.column_stack((corners, np.arange(len(counts), dtype=np.int64)))
+    else:
+        triangles: list[tuple[int, int, int, int]] = []
         offset = 0
         for face, count in enumerate(counts):
             count = int(count)
             if face not in holes and count >= 3:
-                geometric = np.cross(
-                    vertices[offset + 1] - vertices[offset],
-                    vertices[offset + 2] - vertices[offset],
-                )
-                if left_handed:
-                    geometric = -geometric
-                geometric_length = float(np.linalg.norm(geometric))
-                shading = np.mean(normals[offset : offset + count], axis=0)
-                shading_length = float(np.linalg.norm(shading))
-                if geometric_length > 1.0e-20 and shading_length > 1.0e-20:
-                    agreement.append(
-                        float(np.dot(geometric, shading) / (geometric_length * shading_length))
+                for i in range(1, count - 1):
+                    tri = (
+                        (offset, offset + i + 1, offset + i)
+                        if reverse_winding
+                        else (offset, offset + i, offset + i + 1)
                     )
+                    triangles.append((*tri, face))
             offset += count
-        if agreement:
-            agreement = np.asarray(agreement, dtype=np.float32)
-            repair_winding = float(np.mean(agreement < -0.25)) >= 0.9
-
-    triangles: list[tuple[int, int, int, int]] = []
-    reverse_winding = left_handed != repair_winding
-    offset = 0
-    for face, count in enumerate(counts):
-        count = int(count)
-        if face not in holes and count >= 3:
-            for i in range(1, count - 1):
-                tri = (
-                    (offset, offset + i + 1, offset + i)
-                    if reverse_winding
-                    else (offset, offset + i, offset + i + 1)
-                )
-                triangles.append((*tri, face))
-        offset += count
 
     # Preserve authored normals regardless of the texture-coordinate
     # interpolation. Face-varying UVs do not imply flat shading, and replacing
@@ -546,6 +519,7 @@ def load_scene_from_usd(
     apply_stage_units: bool = True,
     convert_up_axis: bool = True,
     max_texture_size: int | None = None,
+    strict_sidedness: bool = False,
 ) -> bool:
     """Load composed USD meshes and common PreviewSurface/MDL PBR materials."""
     path = Path(usd_path).expanduser().resolve()
@@ -816,7 +790,13 @@ def load_scene_from_usd(
             )
             instance_id = scene.add_instance(
                 scene.add_mesh(out_mesh),
-                double_sided=bool(mesh.GetDoubleSidedAttr().Get()),
+                # Robust USD rendering is two-sided by default. The closest-
+                # hit shader face-forwards the complete shading frame, which
+                # tolerates stale orientation/sidedness metadata without a
+                # costly mesh-wide consistency scan during import.
+                double_sided=(
+                    bool(mesh.GetDoubleSidedAttr().Get()) if strict_sidedness else True
+                ),
             )
             instance_ids.append(instance_id)
             instance_node_ids.append(node_index)
@@ -843,7 +823,9 @@ def load_scene_from_usd(
         return _decode_packed_orm(spec, max_size=max_texture_size)
 
     if texture_specs:
-        workers = max(1, min(12, len(texture_specs)))
+        # Decoded 2K RGBA textures and UDIM atlases are large. Keep only two
+        # concurrent decodes so production scenes do not multiply peak RAM.
+        workers = max(1, min(2, len(texture_specs)))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             textures = list(executor.map(decode_texture_spec, texture_specs))
     else:

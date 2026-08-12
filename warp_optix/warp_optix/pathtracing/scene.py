@@ -758,10 +758,10 @@ class Scene:
         append: bool = False,
     ):
         """
-        Set glTF texture list as RGBA float32 images.
+        Set glTF texture list as normalized RGBA8 images.
 
         Args:
-            textures: RGBA textures in normalized [0,1] space.
+            textures: RGBA uint8 textures, or float textures in normalized [0,1] space.
             srgb_texture_indices: Texture indices that represent color data and
                 therefore require sRGB->linear decode to match Vulkan hardware
                 sampling with ``R8G8B8A8_SRGB``.
@@ -769,11 +769,15 @@ class Scene:
         srgb_indices = srgb_texture_indices or set()
         converted = []
         for tex_idx, tex in enumerate(textures):
-            tex_f = np.ascontiguousarray(tex, dtype=np.float32)
+            if np.issubdtype(tex.dtype, np.integer):
+                tex_u8 = np.ascontiguousarray(tex, dtype=np.uint8)
+            else:
+                tex_u8 = np.clip(np.asarray(tex) * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
             if tex_idx in srgb_indices:
-                tex_f = tex_f.copy()
-                tex_f[..., :3] = srgb_to_linear_rgb(np.clip(tex_f[..., :3], 0.0, 1.0))
-            converted.append(tex_f)
+                tex_u8 = tex_u8.copy()
+                linear = srgb_to_linear_rgb(tex_u8[..., :3].astype(np.float32) * (1.0 / 255.0))
+                tex_u8[..., :3] = np.clip(linear * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+            converted.append(tex_u8)
         if append:
             self._gltf_textures.extend(converted)
         else:
@@ -1195,6 +1199,7 @@ class Scene:
         apply_stage_units: bool = True,
         convert_up_axis: bool = True,
         max_texture_size: int | None = None,
+        strict_sidedness: bool = False,
     ) -> bool:
         """Load a composed USD stage into this scene.
 
@@ -1214,6 +1219,7 @@ class Scene:
                 apply_stage_units=apply_stage_units,
                 convert_up_axis=convert_up_axis,
                 max_texture_size=max_texture_size,
+                strict_sidedness=strict_sidedness,
             )
         )
 
@@ -1955,11 +1961,9 @@ class Scene:
             desc_bytes = desc.view(np.uint8).reshape(-1)
             self._texture_descs = wp.array(desc_bytes, dtype=wp.uint8, device="cuda")
 
-            texels = np.concatenate(packed_texels, axis=0).astype(
-                np.float32, copy=False
-            )
+            texels = np.concatenate(packed_texels, axis=0).astype(np.uint8, copy=False)
             self._texture_data = wp.array(
-                texels.reshape(-1), dtype=wp.float32, device="cuda"
+                texels.reshape(-1), dtype=wp.uint8, device="cuda"
             )
         else:
             self._texture_descs = None

@@ -238,6 +238,7 @@ def test_load_scene_from_usd_forwards_options_and_builds():
                 "apply_stage_units": False,
                 "convert_up_axis": False,
                 "max_texture_size": None,
+                "strict_sidedness": False,
             },
         ),
         ("build", {}),

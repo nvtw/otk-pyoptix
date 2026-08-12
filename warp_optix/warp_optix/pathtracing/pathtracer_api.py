@@ -292,6 +292,7 @@ class PathTracerAPI:
         apply_stage_units: bool = True,
         convert_up_axis: bool = True,
         max_texture_size: int | None = None,
+        strict_sidedness: bool = False,
         load_usd_environment: bool = False,
         usd_environment_scale: float = 1.0,
     ) -> bool:
@@ -304,6 +305,7 @@ class PathTracerAPI:
                 apply_stage_units=apply_stage_units,
                 convert_up_axis=convert_up_axis,
                 max_texture_size=max_texture_size,
+                strict_sidedness=strict_sidedness,
             )
         )
         if ok and load_usd_environment:
