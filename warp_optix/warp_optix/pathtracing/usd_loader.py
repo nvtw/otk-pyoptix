@@ -402,11 +402,19 @@ def _mesh_arrays(mesh, UsdGeom):
     points_np = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     vertices = points_np[point_indices]
 
+    primvars = UsdGeom.PrimvarsAPI(mesh.GetPrim())
+    normals_primvar = primvars.GetPrimvar("normals")
     normals_value = mesh.GetNormalsAttr().Get()
+    normals_indices = None
+    normals_interpolation = str(mesh.GetNormalsInterpolation())
+    if normals_primvar and normals_primvar.HasValue():
+        normals_value = normals_primvar.Get()
+        normals_indices = normals_primvar.GetIndices()
+        normals_interpolation = str(normals_primvar.GetInterpolation())
     normals = _expanded_attribute(
         normals_value,
-        None,
-        str(mesh.GetNormalsInterpolation()),
+        normals_indices,
+        normals_interpolation,
         point_indices,
         face_ids,
         corner_ids,
@@ -416,7 +424,6 @@ def _mesh_arrays(mesh, UsdGeom):
         length = np.linalg.norm(normals, axis=1, keepdims=True)
         normals /= np.maximum(length, 1.0e-20)
 
-    primvars = UsdGeom.PrimvarsAPI(mesh.GetPrim())
     st = primvars.GetPrimvar("st")
     if not st:
         for candidate in primvars.GetPrimvarsWithValues():
@@ -432,20 +439,26 @@ def _mesh_arrays(mesh, UsdGeom):
         )
 
     triangles: list[tuple[int, int, int, int]] = []
+    left_handed = str(mesh.GetOrientationAttr().Get()) == "leftHanded"
     holes = set(int(i) for i in (mesh.GetHoleIndicesAttr().Get() or []))
     offset = 0
     for face, count in enumerate(counts):
         count = int(count)
         if face not in holes and count >= 3:
             for i in range(1, count - 1):
-                tri = (offset, offset + i, offset + i + 1)
+                tri = (
+                    (offset, offset + i + 1, offset + i)
+                    if left_handed
+                    else (offset, offset + i, offset + i + 1)
+                )
                 triangles.append((*tri, face))
         offset += count
 
-    # Match the reference RacerX loader: meshes with face-varying texture
-    # coordinates use one geometric normal per polygon. This also gives the
-    # same split normal/tangent representation as the reference GLB export.
-    if texcoords is not None and texcoord_interpolation == "faceVarying":
+    # Preserve authored normals regardless of the texture-coordinate
+    # interpolation. Face-varying UVs do not imply flat shading, and replacing
+    # valid normals with winding-derived ones can invert the shading frame on
+    # otherwise valid USD meshes. Generate polygon normals only as a fallback.
+    if normals is None:
         normals = np.zeros_like(vertices)
         offset = 0
         for face, count in enumerate(counts):
@@ -456,9 +469,28 @@ def _mesh_arrays(mesh, UsdGeom):
                     vertices[second] - vertices[first],
                     vertices[third] - vertices[first],
                 )
+                if left_handed:
+                    face_normal = -face_normal
                 length = float(np.linalg.norm(face_normal))
                 if length > 1.0e-20:
                     normals[offset : offset + count] = face_normal / length
+            offset += count
+    else:
+        # Authored normals are shading data, while orientation and winding
+        # define USD's intrinsic surface side. Retain the authored shape but
+        # keep it in the intrinsic normal hemisphere on malformed assets.
+        offset = 0
+        for face, count in enumerate(counts):
+            count = int(count)
+            if face not in holes and count >= 3:
+                geometric = np.cross(
+                    vertices[offset + 1] - vertices[offset],
+                    vertices[offset + 2] - vertices[offset],
+                )
+                if left_handed:
+                    geometric = -geometric
+                if np.dot(np.mean(normals[offset : offset + count], axis=0), geometric) < 0.0:
+                    normals[offset : offset + count] *= -1.0
             offset += count
     return vertices, normals, texcoords, triangles, point_indices
 
@@ -769,7 +801,10 @@ def load_scene_from_usd(
                 texcoords=selected_texcoords,
                 material_id=mat_id,
             )
-            instance_id = scene.add_instance(scene.add_mesh(out_mesh))
+            instance_id = scene.add_instance(
+                scene.add_mesh(out_mesh),
+                double_sided=bool(mesh.GetDoubleSidedAttr().Get()),
+            )
             instance_ids.append(instance_id)
             instance_node_ids.append(node_index)
             stats["meshes"] += 1

@@ -520,6 +520,7 @@ class Instance:
         transform: np.ndarray = None,
         material_id: int | None = None,
         visible: bool = True,
+        double_sided: bool = False,
     ):
         """
         Create an instance.
@@ -531,6 +532,7 @@ class Instance:
         self.mesh_index = mesh_index
         self.material_id = material_id
         self.visible = bool(visible)
+        self.double_sided = bool(double_sided)
         if transform is None:
             transform = np.eye(4, dtype=np.float32)
         self.transform = np.ascontiguousarray(transform, dtype=np.float32)
@@ -804,10 +806,15 @@ class Scene:
         transform: np.ndarray = None,
         material_id: int | None = None,
         visible: bool = True,
+        double_sided: bool = False,
     ) -> int:
         """Add an instance of a mesh and return its index."""
         instance = Instance(
-            mesh_index, transform, material_id=material_id, visible=visible
+            mesh_index,
+            transform,
+            material_id=material_id,
+            visible=visible,
+            double_sided=double_sided,
         )
         self._instances.append(instance)
         instance_index = len(self._instances) - 1
@@ -1564,7 +1571,16 @@ class Scene:
             inst_np["visibilityMask"] = np.where(
                 self._instance_visibility_cache[:count], 0xFF, 0
             ).astype(np.uint32)
-            inst_np["flags"] = np.uint32(int(optix.INSTANCE_FLAG_NONE))
+            inst_np["flags"] = np.fromiter(
+                (
+                    int(optix.INSTANCE_FLAG_DISABLE_TRIANGLE_FACE_CULLING)
+                    if inst.double_sided
+                    else int(optix.INSTANCE_FLAG_NONE)
+                    for inst in self._instances
+                ),
+                dtype=np.uint32,
+                count=count,
+            )
             inst_np["traversableHandle"] = np.asarray(
                 self._gas_handles, dtype=np.uint64
             )[mesh_indices]

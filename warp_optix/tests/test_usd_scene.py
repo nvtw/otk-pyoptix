@@ -89,3 +89,44 @@ def test_reflected_face_varying_mesh_keeps_world_shading_frame_aligned(tmp_path)
 
     assert np.dot(geometric, shading) > 0.0
     np.testing.assert_array_equal(tri, (0, 1, 2))
+
+
+def test_face_varying_uvs_preserve_authored_normal_shape_and_align_orientation(tmp_path):
+    path = tmp_path / "authored_normals.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    mesh = UsdGeom.Mesh.Define(stage, "/mesh")
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    mesh.CreateNormalsAttr([Gf.Vec3f(0.0, 0.0, -1.0)] * 3)
+    mesh.SetNormalsInterpolation(UsdGeom.Tokens.faceVarying)
+    UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
+        "st", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying
+    ).Set([Gf.Vec2f(0.0, 0.0), Gf.Vec2f(1.0, 0.0), Gf.Vec2f(0.0, 1.0)])
+    stage.GetRootLayer().Save()
+
+    scene = Scene(None)
+    assert scene.load_from_usd(path, apply_stage_units=False, convert_up_axis=False)
+    np.testing.assert_allclose(scene._meshes[0].normals, ((0.0, 0.0, 1.0),) * 3)
+
+
+def test_left_handed_winding_and_double_sided_are_converted_for_optix(tmp_path):
+    path = tmp_path / "left_handed.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    mesh = UsdGeom.Mesh.Define(stage, "/mesh")
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    mesh.CreateOrientationAttr(UsdGeom.Tokens.leftHanded)
+    mesh.CreateDoubleSidedAttr(True)
+    stage.GetRootLayer().Save()
+
+    scene = Scene(None)
+    assert scene.load_from_usd(path, apply_stage_units=False, convert_up_axis=False)
+    np.testing.assert_array_equal(scene._meshes[0].indices[0], (0, 2, 1))
+    np.testing.assert_allclose(scene._meshes[0].normals, ((0.0, 0.0, -1.0),) * 3)
+    assert scene._instances[0].double_sided
