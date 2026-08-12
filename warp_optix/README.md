@@ -24,13 +24,7 @@ def raygen_program():
 From the otk-pyoptix repo root:
 
 ```bash
-pip install -e warp_optix/
-```
-
-The `optix` Python module (the pyoptix C++ binding) must also be installed:
-
-```bash
-pip install -e optix/
+pip install -e . -e warp_optix/
 ```
 
 `warp_optix` uses Warp's public addon hooks when they are available. With
@@ -45,7 +39,7 @@ The example path tracer is also installed as `warp_optix.pathtracing`. Install
 its windowing and image extras with:
 
 ```bash
-pip install -e "warp_optix[pathtracing]"
+pip install -e . -e "warp_optix[pathtracing]"
 ```
 
 `PathTracingViewer` is a standalone OptiX path-tracing viewer with DLSS Ray
@@ -66,7 +60,7 @@ class ViewerOptix(PathTracingViewerBackend, ViewerBase):
 The optional interactive features are installed separately:
 
 ```bash
-pip install -e "warp_optix[pathtracing,ui,recording]"
+pip install -e . -e "warp_optix[pathtracing,ui,recording]"
 ```
 
 The viewer follows the earlier hybrid viewer controls:
@@ -92,9 +86,66 @@ horizon used for untextured simulation geometry.
 
 The framework-neutral class can also be driven directly through
 `log_mesh()`, `log_instances()`, `begin_frame()`, and `end_frame()`. Textured
-glTF scenes remain available through `PathTracerAPI`; the framework `log_mesh`
-adapter currently maps vertex colors and PBR values but does not ingest its
-optional texture argument.
+glTF and USD scenes remain available through `PathTracerAPI`; USD loading uses
+the optional `usd-core` extra and maps UsdPreviewSurface and common NVIDIA MDL
+inputs to the same internal PBR material representation. Composed DomeLight
+HDR textures can be enabled explicitly with
+`load_scene_from_usd(..., load_usd_environment=True)`. The framework
+`log_mesh` adapter currently maps vertex colors and PBR values but does not
+ingest its optional texture argument.
+
+`PathTracerAPI` enables CUDA graph replay for the stable OptiX launch by
+default when DLSS-RR is inactive. Launch parameters are written to a persistent device buffer before
+each replay, so camera motion, Halton jitter, frame indices, materials, and
+TLAS handles remain dynamic. With DLSS-RR active, frame-level capture is
+skipped because RTX/NGX resource event queries are forbidden during CUDA
+stream capture; USD transform/TLAS device updates remain graph-capturable.
+Pass `enable_cuda_graphs=False` to diagnose a driver or
+capture compatibility issue; `api.cuda_graph_active` reports successful
+capture after the first rendered sample.
+
+USD loads also retain a path-addressable transform hierarchy instead of
+baking composed transforms into vertices:
+
+```python
+api.load_scene_from_usd("scene.usd")
+usd = api.usd_scene
+body = usd.require_transform("/World/Robot/base")
+
+# Host batch (local 4x4 matrices).
+usd.update_local_transforms([body], matrices)
+
+# Zero-staging CUDA batch on a caller-owned Warp stream.
+usd.update_local_transforms_device(
+    body_ids_cuda, local_mat44_cuda, stream=simulation_stream
+)
+# Newton-style wp.transform + wp.vec3 scale arrays are accepted directly too.
+usd.update_local_transform_trs_device(
+    body_ids_cuda, local_poses_cuda, local_scales_cuda, stream=simulation_stream
+)
+
+# Or decouple hierarchy writes from the OptiX update.
+usd.update_local_transforms_device(
+    body_ids_cuda,
+    local_mat44_cuda,
+    stream=simulation_stream,
+    rebuild_tlas=False,
+)
+usd.update_tlas(stream=simulation_stream)
+```
+
+`usd.transforms` enumerates a stable `USDTransformHandle` for every composed
+transformable prim path. `usd.get_transform(path)` performs a non-throwing
+lookup, `usd.get_prim(path)` accesses any prim on the retained OpenUSD stage,
+and the CUDA local/world `wp.mat44` arrays are exposed after scene build. A
+batch composes hierarchy levels, updates all affected OptiX instance and
+motion-vector transforms, and updates the TLAS on the selected CUDA stream.
+The device methods and allocation-free TLAS `UPDATE` path are CUDA graph
+capture compatible after one warm-up call (which compiles kernels and sizes
+the reusable TLAS buffers). Keep the device batch length and array addresses
+stable across graph replays; a batch length of one is supported. The NumPy
+convenience method performs allocation/upload and is intentionally not the
+graph-capture path.
 
 The old hybrid viewer's Vulkan-backed OpenGL transform VBO was specific to its
 C# bridge. Compatibility queries remain available, but return unavailable;

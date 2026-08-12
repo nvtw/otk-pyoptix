@@ -202,6 +202,7 @@ class PathtraceLaunchParams:
     proj_inv: Mat16f
     prev_mvp: Mat16f
     env_intensity: wp.vec3
+    ambient_light: wp.vec3
     env_rotation: wp.float32
     flags: wp.uint32
     override_roughness: wp.float32
@@ -2384,6 +2385,13 @@ def _evaluate_material_from_payload(
 
     # C++ lines 51-60: build tangent frame from geometry
     n = wp.normalize(normal)
+    # Keep the unperturbed surface normal separate from the normal-mapped
+    # shading normal.  Ng is used for geometric hemisphere tests and ray
+    # offsets; replacing it with the tangent-space normal can reject valid
+    # lighting samples and self-intersect strongly normal-mapped surfaces.
+    # This matches mat_eval_common.glsl in the reference C# renderer, which
+    # assigns pbrMat.Ng from state.Ng before changing only pbrMat.N.
+    ng = n
     t = tangent - n * wp.dot(n, tangent)
     t_len_sq = wp.dot(t, t)
     if t_len_sq < 1.0e-12:
@@ -2458,7 +2466,7 @@ def _evaluate_material_from_payload(
     if params.override_metallic > 0.0:
         metallic = wp.clamp(params.override_metallic, 0.0, 1.0)
 
-    # C++ lines 163-174: apply normal map, update N, Ng, Nc
+    # C++ lines 163-174: apply the normal map to N; Ng remains geometric.
     needs_tangent_update = wp.bool(False)
     uv_n = _apply_uv_transform(
         _select_uv(mat.normal_tex_coord, uv, uv1), mat.normal_uv_transform
@@ -2509,7 +2517,7 @@ def _evaluate_material_from_payload(
     out.valid = wp.uint32(1)
     out.color = emissive
     out.normal = n
-    out.Ng = n
+    out.Ng = ng
     out.T = t
     out.B = b
     out.roughness = roughness_sq
@@ -2866,7 +2874,12 @@ def primary_raygen(params: PathtraceLaunchParams):
 
     # Direct lighting at primary hit (Step 2 - matches C++ HdrContrib with GGX BSDF).
     to_eye = -direction
-    hdr_radiance = wp.vec3(0.0, 0.0, 0.0)
+    # Omniverse's sceneDb ambient light is diffuse irradiance, separate from
+    # the environment/DomeLight. AO modulates it and metals have no diffuse
+    # lobe in the glTF metallic-roughness model.
+    hdr_radiance = _mul_vec3(base_color, params.ambient_light) * (
+        (1.0 - pbr_mat.metallic) * pbr_mat.occlusion
+    )
     rng = _pcg_advance(rng)
     xi0_l = _pcg_rand01(rng)
     rng = _pcg_advance(rng)
@@ -3061,6 +3074,11 @@ def primary_raygen(params: PathtraceLaunchParams):
         sec_base_color = sec_pbr.diffuse
         sec_specular_color = sec_pbr.specular
         sec_to_eye = -sec_direction
+
+        sec_ambient = _mul_vec3(sec_base_color, params.ambient_light) * (
+            (1.0 - sec_pbr.metallic) * sec_pbr.occlusion
+        )
+        radiance = radiance + _mul_vec3(sec_throughput, sec_ambient)
 
         # Direct lighting at secondary hit (GGX BSDF).
         rng = _pcg_advance(rng)

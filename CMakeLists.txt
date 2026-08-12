@@ -85,6 +85,13 @@ endif()
 
 target_compile_features(_optix PRIVATE cxx_std_17)
 
+# src/main.cpp contains the complete pybind11 binding surface in one
+# translation unit. Recent pybind11/MSVC combinations can exceed COFF's
+# default section count, especially for Python 3.13 builds.
+if(MSVC)
+  target_compile_options(_optix PRIVATE /bigobj)
+endif()
+
 target_compile_definitions(_optix PRIVATE
     VERSION_INFO=${PROJECT_VERSION}
 )

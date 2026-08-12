@@ -14,3 +14,11 @@ imageio-ffmpeg>=0.5
 [ui]
 imgui-bundle>=1.92
 PyOpenGL>=3.1
+
+[usd]
+
+[usd:platform_machine != "aarch64" and python_version < "3.14"]
+usd-core<26.5,>=25.5
+
+[usd:platform_machine == "aarch64" and python_version < "3.13"]
+usd-exchange>=2.2.0

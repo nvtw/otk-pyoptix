@@ -76,9 +76,22 @@ def _parse_args():
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=0, help="Presentation rate cap (0 = unlimited).")
     parser.add_argument("--max-frames", type=int, default=0, help="Auto-exit after N frames (0 = run forever).")
+    parser.add_argument(
+        "--screenshot",
+        type=Path,
+        default=None,
+        help="Save the final tone-mapped frame as a PNG (use with --max-frames).",
+    )
     parser.add_argument("--title", type=str, default="Warp OptiX Basic Pathtracing")
     parser.add_argument("--camera-speed", type=float, default=0.5, help="Camera movement speed in scene units/second.")
+    parser.add_argument("--camera-position", type=float, nargs=3, default=None)
+    parser.add_argument("--camera-target", type=float, nargs=3, default=None)
+    parser.add_argument("--camera-fov", type=float, default=None)
+    parser.add_argument("--exposure", type=float, default=0.68, help="Linear display exposure multiplier.")
+    parser.add_argument("--contrast", type=float, default=1.08, help="Display contrast multiplier.")
+    parser.add_argument("--saturation", type=float, default=1.1, help="Display saturation multiplier.")
     parser.add_argument("--no-dlss-rr", action="store_true", help="Disable DLSS Ray Reconstruction.")
+    parser.add_argument("--no-cuda-graphs", action="store_true", help="Disable OptiX CUDA graph replay.")
     parser.add_argument("--no-set", action="store_true", help="Disable Shader Execution Reordering.")
     return parser.parse_args()
 
@@ -88,6 +101,14 @@ def _default_asset_cache_dir() -> Path:
     if cache_home := os.environ.get("XDG_CACHE_HOME"):
         return Path(cache_home).expanduser() / "warp_optix" / "assets"
     return Path.home() / ".cache" / "warp_optix" / "assets"
+
+
+def _camera_angles(position, target):
+    direction = np.asarray(target, dtype=np.float64) - np.asarray(position, dtype=np.float64)
+    direction /= max(float(np.linalg.norm(direction)), 1.0e-20)
+    yaw = math.degrees(math.atan2(float(direction[0]), float(direction[2])))
+    pitch = math.degrees(math.asin(float(np.clip(direction[1], -1.0, 1.0))))
+    return tuple(position), yaw, pitch
 
 
 def _validate_glb(path: Path) -> None:
@@ -298,9 +319,14 @@ def main():
         height=args.height,
         enable_dlss_rr=not args.no_dlss_rr,
         enable_set=not args.no_set,
+        enable_cuda_graphs=not args.no_cuda_graphs,
     )
     if not api.initialize():
         raise RuntimeError("Failed to initialize pathtracing API.")
+    # Match Newton's ViewerOptix display defaults.
+    api.tonemap_exposure = args.exposure
+    api.tonemap_contrast = args.contrast
+    api.tonemap_saturation = args.saturation
 
     if not api.load_scene_from_gltf(str(scene_gltf), build_scene=True):
         raise RuntimeError(f"Failed to load glTF scene: {scene_gltf}")
@@ -310,6 +336,12 @@ def main():
     cam_yaw = 115.2
     cam_pitch = -21.8
     cam_fov = 45.0
+    if (args.camera_position is None) != (args.camera_target is None):
+        raise ValueError("--camera-position and --camera-target must be supplied together")
+    if args.camera_position is not None:
+        cam_pos, cam_yaw, cam_pitch = _camera_angles(args.camera_position, args.camera_target)
+    if args.camera_fov is not None:
+        cam_fov = float(np.clip(args.camera_fov, 5.0, 120.0))
 
     render_width = int(args.width)
     render_height = int(args.height)
@@ -319,8 +351,7 @@ def main():
 
     def _on_resize(width: int, height: int):
         nonlocal render_width, render_height, last_elapsed
-        render_width = int(width)
-        render_height = int(height)
+        render_width, render_height = int(width), int(height)
         api.resize(render_width, render_height)
         last_elapsed = 0.0
 
@@ -359,6 +390,16 @@ def main():
 
     print(f"[optix] loaded glTF scene: {scene_gltf}")
     viewer.run(_render, max_frames=args.max_frames)
+    if args.screenshot is not None:
+        from PIL import Image  # noqa: PLC0415
+
+        screenshot = args.screenshot.expanduser().resolve()
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        frame = np.clip(api.get_frame(), 0.0, 1.0)
+        Image.fromarray((frame[..., :3] * 255.0 + 0.5).astype(np.uint8), mode="RGB").save(
+            screenshot
+        )
+        print(f"[optix] saved screenshot: {screenshot}")
 
 
 if __name__ == "__main__":

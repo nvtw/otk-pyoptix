@@ -21,6 +21,7 @@ Handles mesh loading, BLAS/TLAS construction, and instance management.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 
 import numpy as np
 import warp as wp
@@ -138,6 +139,93 @@ def _update_device_instance_transforms(
     render_nodes[instance_index, 29] = 0.0
     render_nodes[instance_index, 30] = 0.0
     render_nodes[instance_index, 31] = 1.0
+
+
+@wp.kernel
+def _scatter_usd_local_transforms(
+    node_ids: wp.array(dtype=wp.int32),
+    transforms: wp.array(dtype=wp.mat44),
+    local_transforms: wp.array(dtype=wp.mat44),
+):
+    update_index = wp.tid()
+    local_transforms[node_ids[update_index]] = transforms[update_index]
+
+
+@wp.kernel
+def _scatter_usd_local_transform_trs(
+    node_ids: wp.array(dtype=wp.int32),
+    transforms: wp.array(dtype=wp.transform),
+    scales: wp.array(dtype=wp.vec3),
+    local_transforms: wp.array(dtype=wp.mat44),
+):
+    update_index = wp.tid()
+    transform = transforms[update_index]
+    position = wp.transform_get_translation(transform)
+    rotation = wp.quat_to_matrix(wp.transform_get_rotation(transform))
+    scale = scales[update_index]
+    local_transforms[node_ids[update_index]] = wp.mat44(
+        rotation[0, 0] * scale[0],
+        rotation[0, 1] * scale[1],
+        rotation[0, 2] * scale[2],
+        position[0],
+        rotation[1, 0] * scale[0],
+        rotation[1, 1] * scale[1],
+        rotation[1, 2] * scale[2],
+        position[1],
+        rotation[2, 0] * scale[0],
+        rotation[2, 1] * scale[1],
+        rotation[2, 2] * scale[2],
+        position[2],
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    )
+
+
+@wp.kernel
+def _compose_usd_transform_level(
+    level_nodes: wp.array(dtype=wp.int32),
+    parents: wp.array(dtype=wp.int32),
+    local_transforms: wp.array(dtype=wp.mat44),
+    world_transforms: wp.array(dtype=wp.mat44),
+):
+    node_index = level_nodes[wp.tid()]
+    parent_index = parents[node_index]
+    if parent_index < 0:
+        world_transforms[node_index] = local_transforms[node_index]
+    else:
+        world_transforms[node_index] = (
+            world_transforms[parent_index] * local_transforms[node_index]
+        )
+
+
+@wp.kernel
+def _write_usd_instance_transforms(
+    instance_ids: wp.array(dtype=wp.int32),
+    instance_node_ids: wp.array(dtype=wp.int32),
+    world_transforms: wp.array(dtype=wp.mat44),
+    instance_records: wp.array2d(dtype=wp.float32),
+    render_nodes: wp.array2d(dtype=wp.float32),
+    packed_transforms: wp.array2d(dtype=wp.float32),
+):
+    mapping_index = wp.tid()
+    instance_index = instance_ids[mapping_index]
+    matrix = world_transforms[instance_node_ids[mapping_index]]
+    inverse = wp.inverse(matrix)
+
+    for row in range(3):
+        for column in range(4):
+            value = matrix[row, column]
+            flat_index = row * 4 + column
+            instance_records[instance_index, flat_index] = value
+            packed_transforms[instance_index, flat_index] = value
+
+    for row in range(4):
+        for column in range(4):
+            flat_index = row * 4 + column
+            render_nodes[instance_index, flat_index] = matrix[row, column]
+            render_nodes[instance_index, 16 + flat_index] = inverse[row, column]
 
 
 @wp.kernel
@@ -486,6 +574,24 @@ class Scene:
         self._packed_prev_positions = None
         self._packed_material_ids = None
         self._gltf_textures = []
+        # Resolved DomeLight texture discovered while composing the last USD
+        # stage. Keeping it here lets PathTracerAPI opt into the environment
+        # without reopening (and recomposing) a large stage.
+        self.usd_environment_path = None
+        self.usd_ambient_light = (0.0, 0.0, 0.0)
+        self.usd_scene = None
+        self._usd_node_parents = np.empty(0, dtype=np.int32)
+        self._usd_local_transforms = np.empty((0, 4, 4), dtype=np.float32)
+        self._usd_world_transforms = np.empty((0, 4, 4), dtype=np.float32)
+        self._usd_instance_ids = np.empty(0, dtype=np.int32)
+        self._usd_instance_node_ids = np.empty(0, dtype=np.int32)
+        self._usd_level_nodes = []
+        self._d_usd_node_parents = None
+        self._d_usd_local_transforms = None
+        self._d_usd_world_transforms = None
+        self._d_usd_instance_ids = None
+        self._d_usd_instance_node_ids = None
+        self._d_usd_level_nodes = []
 
         # Acceleration structures
         self._gas_handles = []
@@ -775,6 +881,225 @@ class Scene:
         )
         return True
 
+    def configure_usd_transform_hierarchy(
+        self,
+        usd_scene,
+        parents: np.ndarray,
+        local_transforms: np.ndarray,
+        instance_ids: np.ndarray,
+        instance_node_ids: np.ndarray,
+    ):
+        """Retain a composed USD transform hierarchy for dynamic updates."""
+        parents = np.asarray(parents, dtype=np.int32).reshape(-1)
+        local = np.ascontiguousarray(local_transforms, dtype=np.float32).reshape(-1, 4, 4)
+        if len(parents) != len(local):
+            raise ValueError("USD hierarchy parents and transforms must have equal length")
+        if np.any(parents >= np.arange(len(parents), dtype=np.int32)):
+            raise ValueError("USD hierarchy parents must precede their children")
+
+        world = np.empty_like(local)
+        depths = np.zeros(len(parents), dtype=np.int32)
+        for node_index, parent_index in enumerate(parents):
+            if parent_index < 0:
+                world[node_index] = local[node_index]
+            else:
+                world[node_index] = world[parent_index] @ local[node_index]
+                depths[node_index] = depths[parent_index] + 1
+
+        self.usd_scene = usd_scene
+        self._usd_node_parents = parents
+        self._usd_local_transforms = local
+        self._usd_world_transforms = world
+        self._usd_instance_ids = np.asarray(instance_ids, dtype=np.int32).reshape(-1)
+        self._usd_instance_node_ids = np.asarray(instance_node_ids, dtype=np.int32).reshape(-1)
+        self._usd_level_nodes = [
+            np.flatnonzero(depths == depth).astype(np.int32)
+            for depth in range(int(depths.max(initial=0)) + 1)
+        ]
+        if len(self._usd_instance_ids) != len(self._usd_instance_node_ids):
+            raise ValueError("USD instance and node mappings must have equal length")
+        if len(self._usd_instance_ids):
+            self.set_instance_transforms_batch(
+                self._usd_instance_ids,
+                world[self._usd_instance_node_ids],
+            )
+
+    def _build_usd_transform_buffers(self):
+        if self.usd_scene is None or len(self._usd_node_parents) == 0:
+            return
+        self._d_usd_node_parents = wp.array(
+            self._usd_node_parents, dtype=wp.int32, device="cuda"
+        )
+        self._d_usd_local_transforms = wp.array(
+            self._usd_local_transforms, dtype=wp.mat44, device="cuda"
+        )
+        self._d_usd_world_transforms = wp.array(
+            self._usd_world_transforms, dtype=wp.mat44, device="cuda"
+        )
+        self._d_usd_instance_ids = wp.array(
+            self._usd_instance_ids, dtype=wp.int32, device="cuda"
+        )
+        self._d_usd_instance_node_ids = wp.array(
+            self._usd_instance_node_ids, dtype=wp.int32, device="cuda"
+        )
+        self._d_usd_level_nodes = [
+            wp.array(level, dtype=wp.int32, device="cuda")
+            for level in self._usd_level_nodes
+        ]
+        self.usd_scene._attach_device_arrays(
+            self._d_usd_local_transforms, self._d_usd_world_transforms
+        )
+
+    def _evaluate_usd_transform_hierarchy_host(self, update_instances: bool = True):
+        for node_index, parent_index in enumerate(self._usd_node_parents):
+            local = self._usd_local_transforms[node_index]
+            if parent_index < 0:
+                self._usd_world_transforms[node_index] = local
+            else:
+                self._usd_world_transforms[node_index] = (
+                    self._usd_world_transforms[parent_index] @ local
+                )
+        if update_instances and len(self._usd_instance_ids):
+            self.set_instance_transforms_batch(
+                self._usd_instance_ids,
+                self._usd_world_transforms[self._usd_instance_node_ids],
+            )
+
+    def _evaluate_usd_transform_hierarchy(self, stream=None):
+        if self._d_usd_local_transforms is None:
+            raise RuntimeError("Build the scene before updating USD transforms")
+        scope = (
+            wp.ScopedStream(stream, sync_enter=False, sync_exit=False)
+            if stream is not None
+            else nullcontext()
+        )
+        with scope:
+            for level_nodes in self._d_usd_level_nodes:
+                wp.launch(
+                    _compose_usd_transform_level,
+                    dim=len(level_nodes),
+                    inputs=[
+                        level_nodes,
+                        self._d_usd_node_parents,
+                        self._d_usd_local_transforms,
+                        self._d_usd_world_transforms,
+                    ],
+                    device="cuda",
+                )
+            if len(self._usd_instance_ids):
+                wp.launch(
+                    _write_usd_instance_transforms,
+                    dim=len(self._usd_instance_ids),
+                    inputs=[
+                        self._d_usd_instance_ids,
+                        self._d_usd_instance_node_ids,
+                        self._d_usd_world_transforms,
+                        self._instance_record_floats,
+                        self._render_node_floats,
+                        self._device_instance_transforms,
+                    ],
+                    device="cuda",
+                )
+
+    def set_usd_local_transforms_device(
+        self, node_ids: wp.array, transforms: wp.array, stream=None, rebuild_tlas: bool = True
+    ):
+        """Apply CUDA-resident USD local matrices and compose the hierarchy."""
+        if self._d_usd_local_transforms is None:
+            raise RuntimeError("Build the scene before updating USD transforms")
+        if not node_ids.device.is_cuda or not transforms.device.is_cuda:
+            raise ValueError("USD device transform updates require CUDA arrays")
+        if len(node_ids) != len(transforms):
+            raise ValueError("node_ids and transforms must have equal length")
+        if len(node_ids) == 0:
+            return
+        if node_ids.dtype != wp.int32 or transforms.dtype != wp.mat44:
+            raise TypeError("USD device batches require wp.int32 IDs and wp.mat44 matrices")
+        scope = (
+            wp.ScopedStream(stream, sync_enter=False, sync_exit=False)
+            if stream is not None
+            else nullcontext()
+        )
+        with scope:
+            wp.launch(
+                _scatter_usd_local_transforms,
+                dim=len(node_ids),
+                inputs=[node_ids, transforms, self._d_usd_local_transforms],
+                device="cuda",
+            )
+            self._evaluate_usd_transform_hierarchy()
+            if rebuild_tlas:
+                self.rebuild_tlas()
+
+    def set_usd_local_transform_trs_device(
+        self,
+        node_ids: wp.array,
+        transforms: wp.array,
+        scales: wp.array,
+        stream=None,
+        rebuild_tlas: bool = True,
+    ):
+        """Apply CUDA-resident Warp transforms/scales to USD local nodes."""
+        if self._d_usd_local_transforms is None:
+            raise RuntimeError("Build the scene before updating USD transforms")
+        if not node_ids.device.is_cuda or not transforms.device.is_cuda or not scales.device.is_cuda:
+            raise ValueError("USD device transform updates require CUDA arrays")
+        if len(node_ids) != len(transforms) or len(node_ids) != len(scales):
+            raise ValueError("node_ids, transforms, and scales must have equal length")
+        if len(node_ids) == 0:
+            return
+        if node_ids.dtype != wp.int32 or transforms.dtype != wp.transform or scales.dtype != wp.vec3:
+            raise TypeError(
+                "USD TRS batches require wp.int32 IDs, wp.transform poses, and wp.vec3 scales"
+            )
+        scope = (
+            wp.ScopedStream(stream, sync_enter=False, sync_exit=False)
+            if stream is not None
+            else nullcontext()
+        )
+        with scope:
+            wp.launch(
+                _scatter_usd_local_transform_trs,
+                dim=len(node_ids),
+                inputs=[node_ids, transforms, scales, self._d_usd_local_transforms],
+                device="cuda",
+            )
+            self._evaluate_usd_transform_hierarchy()
+            if rebuild_tlas:
+                self.rebuild_tlas()
+
+    def set_usd_local_transforms(
+        self, node_ids, transforms: np.ndarray, stream=None, rebuild_tlas: bool = True
+    ):
+        """Upload a host batch and apply it through the CUDA hierarchy path."""
+        indices = np.asarray(node_ids, dtype=np.int32).reshape(-1)
+        matrices = np.ascontiguousarray(transforms, dtype=np.float32).reshape(-1, 4, 4)
+        if len(indices) != len(matrices):
+            raise ValueError("node_ids and transforms must have equal length")
+        if len(indices) == 0:
+            return
+        if int(indices.min()) < 0 or int(indices.max()) >= len(self._usd_node_parents):
+            raise IndexError("USD transform handle is out of range")
+        self._usd_local_transforms[indices] = matrices
+        self._evaluate_usd_transform_hierarchy_host(
+            update_instances=self._d_usd_local_transforms is None
+        )
+        if self._d_usd_local_transforms is None:
+            return
+        scope = (
+            wp.ScopedStream(stream, sync_enter=False, sync_exit=False)
+            if stream is not None
+            else nullcontext()
+        )
+        with scope:
+            device_ids = wp.array(indices, dtype=wp.int32, device="cuda")
+            device_matrices = wp.array(matrices, dtype=wp.mat44, device="cuda")
+            self.set_usd_local_transforms_device(
+                device_ids,
+                device_matrices,
+                rebuild_tlas=rebuild_tlas,
+            )
+
     def set_instance_material(self, instance_index: int, material_id: int | None):
         """Override the material used by one instance."""
         if 0 <= instance_index < len(self._instances):
@@ -853,6 +1178,36 @@ class Scene:
             self.clear()
         return bool(
             load_scene_from_gltf(self, gltf_path, root_transform=root_transform)
+        )
+
+    def load_from_usd(
+        self,
+        usd_path: str,
+        root_transform: np.ndarray | None = None,
+        clear_existing: bool = True,
+        apply_stage_units: bool = True,
+        convert_up_axis: bool = True,
+        max_texture_size: int | None = None,
+    ) -> bool:
+        """Load a composed USD stage into this scene.
+
+        OpenUSD is an optional dependency and is imported only when this method
+        is called. Meshes, UVs, material subsets, UsdPreviewSurface materials,
+        and common NVIDIA MDL PBR inputs are translated to the internal scene.
+        """
+        from .usd_loader import load_scene_from_usd
+
+        if clear_existing:
+            self.clear()
+        return bool(
+            load_scene_from_usd(
+                self,
+                usd_path,
+                root_transform=root_transform,
+                apply_stage_units=apply_stage_units,
+                convert_up_axis=convert_up_axis,
+                max_texture_size=max_texture_size,
+            )
         )
 
     def load_from_obj(self, obj_path: str) -> bool:
@@ -1041,6 +1396,21 @@ class Scene:
         self._packed_prev_positions = None
         self._packed_material_ids = None
         self._gltf_textures = []
+        self.usd_environment_path = None
+        self.usd_ambient_light = (0.0, 0.0, 0.0)
+        self.usd_scene = None
+        self._usd_node_parents = np.empty(0, dtype=np.int32)
+        self._usd_local_transforms = np.empty((0, 4, 4), dtype=np.float32)
+        self._usd_world_transforms = np.empty((0, 4, 4), dtype=np.float32)
+        self._usd_instance_ids = np.empty(0, dtype=np.int32)
+        self._usd_instance_node_ids = np.empty(0, dtype=np.int32)
+        self._usd_level_nodes = []
+        self._d_usd_node_parents = None
+        self._d_usd_local_transforms = None
+        self._d_usd_world_transforms = None
+        self._d_usd_instance_ids = None
+        self._d_usd_instance_node_ids = None
+        self._d_usd_level_nodes = []
 
     def build(self, optix_module):
         """
@@ -1112,7 +1482,9 @@ class Scene:
         )
 
         stream = int(wp.get_stream("cuda").cuda_stream)
-        for i, mesh in enumerate(self._meshes):
+        build_inputs = []
+        max_temp_size = 0
+        for mesh in self._meshes:
             tri = optix.BuildInputTriangleArray()
             tri.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
             tri.numVertices = len(mesh.vertices)
@@ -1126,7 +1498,15 @@ class Scene:
             tri.numSbtRecords = 1
 
             sizes = self._ctx.accelComputeMemoryUsage([accel_options], [tri])
-            d_temp = wp.empty(sizes.tempSizeInBytes, dtype=wp.uint8, device="cuda")
+            build_inputs.append((tri, sizes))
+            max_temp_size = max(max_temp_size, int(sizes.tempSizeInBytes))
+
+        # Every build is submitted to the same CUDA stream, so its scratch
+        # range can be reused once the preceding build reaches completion.
+        # Large composed USD stages otherwise retain hundreds of independent
+        # temporary allocations until the full build is synchronized.
+        d_temp = wp.empty(max_temp_size, dtype=wp.uint8, device="cuda")
+        for tri, sizes in build_inputs:
             d_gas = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device="cuda")
 
             handle = self._ctx.accelBuild(
@@ -1142,7 +1522,7 @@ class Scene:
 
             self._gas_handles.append(int(handle))
             self._gas_buffers.append(d_gas)
-            self._keepalive[f"gas_temp_{i}"] = d_temp
+        self._keepalive["gas_temp"] = d_temp
 
     def _build_tlas(self):
         """Build top-level acceleration structure."""
@@ -1380,6 +1760,7 @@ class Scene:
         self._device_instance_transforms = wp.array(
             transforms, dtype=wp.float32, device="cuda"
         )
+        self._build_usd_transform_buffers()
 
         # Build SceneDescription
         sd_dtype = _create_scene_description_dtype()
