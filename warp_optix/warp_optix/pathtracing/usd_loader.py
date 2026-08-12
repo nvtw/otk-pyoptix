@@ -438,9 +438,39 @@ def _mesh_arrays(mesh, UsdGeom):
             st.Get(), st.GetIndices(), texcoord_interpolation, point_indices, face_ids, corner_ids, 2
         )
 
-    triangles: list[tuple[int, int, int, int]] = []
     left_handed = str(mesh.GetOrientationAttr().Get()) == "leftHanded"
     holes = set(int(i) for i in (mesh.GetHoleIndicesAttr().Get() or []))
+    # Some production assets contain an orientation token that disagrees with
+    # virtually every authored shading normal. Culling by that stale token
+    # removes the exterior shell. When the disagreement is overwhelming,
+    # retain the authored outward normals and repair the effective winding.
+    repair_winding = False
+    if normals is not None:
+        agreement = []
+        offset = 0
+        for face, count in enumerate(counts):
+            count = int(count)
+            if face not in holes and count >= 3:
+                geometric = np.cross(
+                    vertices[offset + 1] - vertices[offset],
+                    vertices[offset + 2] - vertices[offset],
+                )
+                if left_handed:
+                    geometric = -geometric
+                geometric_length = float(np.linalg.norm(geometric))
+                shading = np.mean(normals[offset : offset + count], axis=0)
+                shading_length = float(np.linalg.norm(shading))
+                if geometric_length > 1.0e-20 and shading_length > 1.0e-20:
+                    agreement.append(
+                        float(np.dot(geometric, shading) / (geometric_length * shading_length))
+                    )
+            offset += count
+        if agreement:
+            agreement = np.asarray(agreement, dtype=np.float32)
+            repair_winding = float(np.mean(agreement < -0.25)) >= 0.9
+
+    triangles: list[tuple[int, int, int, int]] = []
+    reverse_winding = left_handed != repair_winding
     offset = 0
     for face, count in enumerate(counts):
         count = int(count)
@@ -448,7 +478,7 @@ def _mesh_arrays(mesh, UsdGeom):
             for i in range(1, count - 1):
                 tri = (
                     (offset, offset + i + 1, offset + i)
-                    if left_handed
+                    if reverse_winding
                     else (offset, offset + i, offset + i + 1)
                 )
                 triangles.append((*tri, face))
@@ -474,23 +504,6 @@ def _mesh_arrays(mesh, UsdGeom):
                 length = float(np.linalg.norm(face_normal))
                 if length > 1.0e-20:
                     normals[offset : offset + count] = face_normal / length
-            offset += count
-    else:
-        # Authored normals are shading data, while orientation and winding
-        # define USD's intrinsic surface side. Retain the authored shape but
-        # keep it in the intrinsic normal hemisphere on malformed assets.
-        offset = 0
-        for face, count in enumerate(counts):
-            count = int(count)
-            if face not in holes and count >= 3:
-                geometric = np.cross(
-                    vertices[offset + 1] - vertices[offset],
-                    vertices[offset + 2] - vertices[offset],
-                )
-                if left_handed:
-                    geometric = -geometric
-                if np.dot(np.mean(normals[offset : offset + count], axis=0), geometric) < 0.0:
-                    normals[offset : offset + count] *= -1.0
             offset += count
     return vertices, normals, texcoords, triangles, point_indices
 

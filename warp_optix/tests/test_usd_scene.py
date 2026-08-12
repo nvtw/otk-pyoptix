@@ -91,7 +91,7 @@ def test_reflected_face_varying_mesh_keeps_world_shading_frame_aligned(tmp_path)
     np.testing.assert_array_equal(tri, (0, 1, 2))
 
 
-def test_face_varying_uvs_preserve_authored_normal_shape_and_align_orientation(tmp_path):
+def test_authored_normals_repair_globally_inconsistent_winding(tmp_path):
     path = tmp_path / "authored_normals.usda"
     stage = Usd.Stage.CreateNew(str(path))
     mesh = UsdGeom.Mesh.Define(stage, "/mesh")
@@ -109,7 +109,8 @@ def test_face_varying_uvs_preserve_authored_normal_shape_and_align_orientation(t
 
     scene = Scene(None)
     assert scene.load_from_usd(path, apply_stage_units=False, convert_up_axis=False)
-    np.testing.assert_allclose(scene._meshes[0].normals, ((0.0, 0.0, 1.0),) * 3)
+    np.testing.assert_allclose(scene._meshes[0].normals, ((0.0, 0.0, -1.0),) * 3)
+    np.testing.assert_array_equal(scene._meshes[0].indices[0], (0, 2, 1))
 
 
 def test_left_handed_winding_and_double_sided_are_converted_for_optix(tmp_path):
