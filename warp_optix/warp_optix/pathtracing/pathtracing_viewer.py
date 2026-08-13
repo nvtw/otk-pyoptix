@@ -116,6 +116,7 @@ class PathTracingViewer:
         use_halton_jitter: bool = True,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
+        enable_cuda_graphs: bool = True,
         dlss_quality: str = "quality",
     ):
         """
@@ -139,9 +140,13 @@ class PathTracingViewer:
         self.use_halton_jitter = bool(use_halton_jitter)
         self.enable_dlss_rr = bool(enable_dlss_rr)
         self.enable_set = bool(enable_set)
+        self.enable_cuda_graphs = bool(enable_cuda_graphs)
         self.dlss_quality = self._normalize_dlss_quality(dlss_quality)
         self._set_active = False
         self._render_stream = wp.get_stream("cuda")
+        self._optix_launch_graph = None
+        self._optix_graph_warmed = False
+        self._cuda_graph_error: str | None = None
 
         # Camera
         if camera is None:
@@ -224,15 +229,17 @@ class PathTracingViewer:
         # Physical sky defaults aligned with the upstream DLSS-RR sample behavior.
         self.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
         self.sky_multiplier = 1.0
-        self.sky_haze = 0.0
-        self.sky_redblueshift = 0.0
+        self.sky_haze = 0.5
+        self.sky_redblueshift = 0.05
         self.sky_saturation = 1.0
         self.sky_horizon_height = 0.0
-        self.sky_ground_color = (0.4, 0.4, 0.4)
+        self.sky_ground_color = (0.4, 0.35, 0.3)
         self.sky_horizon_blur = 1.0
         self.sky_night_color = (0.0, 0.0, 0.0)
         self.sky_sun_disk_intensity = 1.0
-        self.sky_sun_direction = (0.0, 1.0, 0.5)
+        # MinimalDlssRR PhysicalSky.Afternoon: 45-degree elevation,
+        # 240-degree azimuth (west-southwest).
+        self.sky_sun_direction = (-0.6123724, 0.7071068, -0.3535534)
         self.sky_sun_disk_scale = 1.0
         self.sky_sun_glow_intensity = 1.0
         self.sky_y_is_up = 1
@@ -427,6 +434,8 @@ class PathTracingViewer:
             return
         self._render_width = rw
         self._render_height = rh
+        self._optix_launch_graph = None
+        self._optix_graph_warmed = False
         self._create_buffers()
         self.frame_index = 0
         self.sample_index = 0
@@ -481,9 +490,14 @@ class PathTracingViewer:
             self._set_render_resolution(self.width, self.height)
 
     def _init_dlss_rr(self):
-        self._destroy_dlss_rr()
+        # Release the previous NGX feature and its full-resolution output
+        # before allocating replacement render targets.  This is important on
+        # a maximize/large resize, where keeping both generations alive can
+        # briefly require considerably more VRAM than the steady-state frame.
+        self._destroy_dlss_rr(restore_resolution=False)
         self._dlss_init_error = None
         if not self.enable_dlss_rr or self._optix is None:
+            self._set_render_resolution(self.width, self.height)
             return
 
         required = (
@@ -495,6 +509,7 @@ class PathTracingViewer:
         if not all(hasattr(self._optix, name) for name in required):
             self._dlss_init_error = "bindings are not present in the optix module"
             logger.info("DLSS RR bindings not present in optix module.")
+            self._set_render_resolution(self.width, self.height)
             return
 
         try:
@@ -506,6 +521,7 @@ class PathTracingViewer:
                 self._dlss_init_error = "not available on this system"
                 logger.info("DLSS RR not available on this system.")
                 context.deinit()
+                self._set_render_resolution(self.width, self.height)
                 return
 
             init_info = self._optix.DlssRRInitInfo()
@@ -957,6 +973,8 @@ class PathTracingViewer:
             float(self.env_intensity[1]),
             float(self.env_intensity[2]),
         )
+        ambient = getattr(self._scene, "usd_ambient_light", (0.0, 0.0, 0.0))
+        p.ambient_light = wp.vec3(float(ambient[0]), float(ambient[1]), float(ambient[2]))
         p.env_rotation = float(self.env_rotation)
         flags = 0
         if self._env_map is None:
@@ -1149,15 +1167,7 @@ class PathTracingViewer:
                 proj_inv=proj_inv,
             )
 
-            woptix.launch(
-                self._optix,
-                self._pipeline,
-                self._sbt,
-                self._render_width,
-                self._render_height,
-                self._launch_params_buffer,
-                stream=int(self._render_stream.cuda_stream),
-            )
+            self._launch_optix()
 
             if not self._dlss_enabled:
                 accum_sample_index = int(self.frame_index if use_external_accum else s)
@@ -1170,6 +1180,58 @@ class PathTracingViewer:
 
                 if use_external_accum:
                     self.frame_index += 1
+
+    def _launch_optix(self):
+        """Launch OptiX through a reusable CUDA graph when capture is supported.
+
+        The launch-parameter writer remains outside the graph, so camera,
+        jitter, frame index, TLAS, and material state can change every launch
+        while the graph retains the stable OptiX submission topology.
+        """
+
+        def launch():
+            woptix.launch(
+                self._optix,
+                self._pipeline,
+                self._sbt,
+                self._render_width,
+                self._render_height,
+                self._launch_params_buffer,
+                stream=int(self._render_stream.cuda_stream),
+            )
+
+        # NGX/DLSS and OptiX share this stream. RTX resource-event bookkeeping
+        # used by NGX is not legal while the stream is being captured and can
+        # invalidate it with CUDA 900/901, producing a black presentation.
+        # Keep DLSS evaluation on its normal optimized command path; CUDA graph
+        # replay remains enabled for non-DLSS rendering and USD transform/TLAS
+        # update batches.
+        if self._dlss_enabled or not self.enable_cuda_graphs or self._cuda_graph_error is not None:
+            launch()
+            return
+        # OptiX/RTX records resource-use events the first time a scene and its
+        # output buffers are launched. CUDA forbids those event queries during
+        # stream capture (errors 900/901), so prime them with one ordinary
+        # launch before attempting to capture the stable submission.
+        if not self._optix_graph_warmed:
+            launch()
+            self._optix_graph_warmed = True
+            return
+        if self._optix_launch_graph is None:
+            try:
+                with wp.ScopedCapture(stream=self._render_stream) as capture:
+                    launch()
+                self._optix_launch_graph = capture.graph
+            except Exception as exc:
+                self._cuda_graph_error = str(exc)
+                # A failed CUDA stream capture can poison subsequent work on
+                # the stream. Surface the failure instead of silently showing
+                # a black frame after an unsafe direct-launch fallback.
+                raise RuntimeError(
+                    "OptiX CUDA graph capture failed after warm-up; rerun with "
+                    "enable_cuda_graphs=False / --no-cuda-graphs"
+                ) from exc
+        wp.capture_launch(self._optix_launch_graph, stream=self._render_stream)
 
     def _process_debug_output(self):
         self._tonemapper.resize(self.width, self.height)
@@ -1280,18 +1342,23 @@ class PathTracingViewer:
         """Resize the render buffers."""
         if width != self.width or height != self.height:
             wp.synchronize_stream(self._render_stream)
+            # Tear down resources tied to the old dimensions first.  Native
+            # window/output resolution remains uncapped; this only avoids a
+            # transient old+new allocation spike during resize.
+            self._destroy_dlss_rr(restore_resolution=False)
             self.width = width
             self.height = height
             self.camera.set_aspect_ratio(width, height)
             self._sync_prev_camera_matrices_to_current()
-            self._set_render_resolution(width, height)
-            self._tonemapper.resize(width, height)
             self._init_dlss_rr()
+            self._tonemapper.resize(width, height)
             self.frame_index = 0
 
     def close(self):
         """Wait for rendering and release DLSS resources."""
         wp.synchronize_stream(self._render_stream)
+        self._optix_launch_graph = None
+        self._optix_graph_warmed = False
         self._destroy_dlss_rr(restore_resolution=False)
 
     def __del__(self):

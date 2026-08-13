@@ -40,6 +40,7 @@ class PathTracerAPI:
         height: int = 720,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
+        enable_cuda_graphs: bool = True,
         dlss_quality: str = "quality",
         samples_per_frame: int = 1,
         max_bounces: int = 4,
@@ -53,6 +54,7 @@ class PathTracerAPI:
             scene_setup=lambda _scene: None,
             enable_dlss_rr=bool(enable_dlss_rr),
             enable_set=bool(enable_set),
+            enable_cuda_graphs=bool(enable_cuda_graphs),
             accumulate_samples=False,
             dlss_quality=dlss_quality,
             samples_per_frame=samples_per_frame,
@@ -86,6 +88,12 @@ class PathTracerAPI:
         return self._viewer._scene  # internal, initialized by build()
 
     @property
+    def usd_scene(self):
+        """Retained path-addressable hierarchy from the last USD load."""
+        scene = self.scene
+        return None if scene is None else scene.usd_scene
+
+    @property
     def dlss_enabled(self) -> bool:
         """Return whether DLSS Ray Reconstruction initialized successfully."""
         return bool(self._viewer._dlss_enabled)
@@ -94,6 +102,11 @@ class PathTracerAPI:
     def dlss_init_error(self) -> str | None:
         """Return the DLSS initialization error, if Ray Reconstruction fell back."""
         return self._viewer._dlss_init_error
+
+    @property
+    def cuda_graph_active(self) -> bool:
+        """Whether the stable OptiX launch has been captured for replay."""
+        return self._viewer._optix_launch_graph is not None
 
     @property
     def dlss_quality(self) -> str:
@@ -231,6 +244,8 @@ class PathTracerAPI:
         scene = self._require_scene()
         scene.build(self._viewer._optix)
         self._viewer._create_sbt()
+        self._viewer._optix_launch_graph = None
+        self._viewer._optix_graph_warmed = False
         self._viewer.sample_index = 0
         self._viewer.frame_index = 0
         self._viewer._dlss_reset_history = True
@@ -264,6 +279,41 @@ class PathTracerAPI:
                 clear_existing=clear_existing,
             )
         )
+        if ok and build_scene:
+            self.build_scene()
+        return ok
+
+    def load_scene_from_usd(
+        self,
+        usd_path: str,
+        root_transform: np.ndarray | None = None,
+        clear_existing: bool = True,
+        build_scene: bool = True,
+        apply_stage_units: bool = True,
+        convert_up_axis: bool = True,
+        max_texture_size: int | None = None,
+        strict_sidedness: bool = False,
+        load_usd_environment: bool = False,
+        usd_environment_scale: float = 1.0,
+    ) -> bool:
+        """Load USD geometry and PBR materials through the optional OpenUSD bindings."""
+        ok = bool(
+            self._require_scene().load_from_usd(
+                usd_path,
+                root_transform=root_transform,
+                clear_existing=clear_existing,
+                apply_stage_units=apply_stage_units,
+                convert_up_axis=convert_up_axis,
+                max_texture_size=max_texture_size,
+                strict_sidedness=strict_sidedness,
+            )
+        )
+        if ok and load_usd_environment:
+            environment_path = self._require_scene().usd_environment_path
+            if environment_path is None:
+                logger.warning("USD stage contains no supported DomeLight environment texture: %s", usd_path)
+            else:
+                self.set_environment_hdr(str(environment_path), scaling=float(usd_environment_scale))
         if ok and build_scene:
             self.build_scene()
         return ok

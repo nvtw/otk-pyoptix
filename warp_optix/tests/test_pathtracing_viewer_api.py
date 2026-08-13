@@ -11,6 +11,7 @@ from warp_optix.pathtracing import (
     PathTracingViewerBackend,
 )
 from warp_optix.pathtracing.scene import Scene
+from warp_optix.pathtracing import pathtracing_viewer as viewer_module
 
 
 class _FakeScene:
@@ -212,6 +213,80 @@ def test_sky_parameters_normalize_sun_direction():
     )
     with pytest.raises(ValueError, match="nonzero"):
         api.set_sky_parameters((0.0, 0.0, 0.0))
+
+
+def test_load_scene_from_usd_forwards_options_and_builds():
+    calls = []
+    scene = SimpleNamespace(load_from_usd=lambda *args, **kwargs: calls.append((args, kwargs)) or True)
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+    api.initialize = lambda: True
+    api.build_scene = lambda: calls.append(("build", {}))
+
+    assert api.load_scene_from_usd(
+        "asset.usd",
+        clear_existing=False,
+        apply_stage_units=False,
+        convert_up_axis=False,
+    )
+    assert calls == [
+        (
+            ("asset.usd",),
+            {
+                "root_transform": None,
+                "clear_existing": False,
+                "apply_stage_units": False,
+                "convert_up_axis": False,
+                "max_texture_size": None,
+                "strict_sidedness": False,
+            },
+        ),
+        ("build", {}),
+    ]
+
+
+def test_resize_releases_old_dlss_resources_before_native_reallocation(monkeypatch):
+    viewer = PathTracingRenderer.__new__(PathTracingRenderer)
+    viewer.width = 800
+    viewer.height = 600
+    viewer._render_stream = object()
+    viewer.frame_index = 9
+    events = []
+    viewer.camera = SimpleNamespace(
+        set_aspect_ratio=lambda width, height: events.append(("aspect", width, height))
+    )
+    viewer._tonemapper = SimpleNamespace(
+        resize=lambda width, height: events.append(("tonemap", width, height))
+    )
+    viewer._sync_prev_camera_matrices_to_current = lambda: events.append(("camera",))
+    viewer._destroy_dlss_rr = lambda **kwargs: events.append(("destroy", kwargs))
+    viewer._init_dlss_rr = lambda: events.append(("init",))
+    monkeypatch.setattr(viewer_module.wp, "synchronize_stream", lambda stream: events.append(("sync",)))
+
+    viewer.resize(3840, 2160)
+
+    assert viewer.width == 3840
+    assert viewer.height == 2160
+    assert events[:2] == [("sync",), ("destroy", {"restore_resolution": False})]
+    assert events[-2:] == [("init",), ("tonemap", 3840, 2160)]
+
+
+def test_load_scene_from_usd_can_enable_composed_environment():
+    calls = []
+    scene = SimpleNamespace(
+        load_from_usd=lambda *args, **kwargs: True,
+        usd_environment_path="environment.hdr",
+    )
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+    api.initialize = lambda: True
+    api.build_scene = lambda: calls.append(("build", {}))
+    api.set_environment_hdr = lambda path, scaling=1.0: calls.append((path, scaling))
+
+    assert api.load_scene_from_usd(
+        "asset.usd", load_usd_environment=True, usd_environment_scale=0.25
+    )
+    assert calls == [("environment.hdr", 0.25), ("build", {})]
 
 
 def test_logged_instances_apply_up_axis_materials_and_frame_lifecycle():

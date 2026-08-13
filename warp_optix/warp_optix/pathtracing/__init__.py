@@ -33,6 +33,7 @@ from .materials import MaterialManager
 from .pathtracer_api import PathTracerAPI
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .scene import Mesh, Scene
+from .usd_scene import USDScene, USDTransformHandle
 from .tonemap import Tonemapper
 from .viewer import PathTracingViewer, PathTracingViewerBackend
 
@@ -46,4 +47,6 @@ __all__ = [
     "PathTracingViewerBackend",
     "Scene",
     "Tonemapper",
+    "USDScene",
+    "USDTransformHandle",
 ]

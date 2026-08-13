@@ -2,6 +2,7 @@ README.md
 pyproject.toml
 tests/test_custom_geometry.py
 tests/test_device_queries.py
+tests/test_gl_interop.py
 tests/test_pathtracing_viewer_api.py
 warp_optix/__init__.py
 warp_optix/__init__.pyi
@@ -40,5 +41,6 @@ warp_optix/pathtracing/ptx_compiler.py
 warp_optix/pathtracing/ray_common.py
 warp_optix/pathtracing/scene.py
 warp_optix/pathtracing/tonemap.py
+warp_optix/pathtracing/usd_loader.py
 warp_optix/pathtracing/viewer.py
 warp_optix/pathtracing/viewer_rt_common.py

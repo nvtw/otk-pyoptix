@@ -202,6 +202,7 @@ class PathtraceLaunchParams:
     proj_inv: Mat16f
     prev_mvp: Mat16f
     env_intensity: wp.vec3
+    ambient_light: wp.vec3
     env_rotation: wp.float32
     flags: wp.uint32
     override_roughness: wp.float32
@@ -233,7 +234,7 @@ class PathtraceLaunchParams:
     packed_material_ids: wp.array(dtype=wp.uint32)
     material_count: wp.uint32
     texture_descs: wp.array(dtype=TextureDesc)
-    texture_data: wp.array(dtype=wp.float32)
+    texture_data: wp.array(dtype=wp.uint8)
     texture_count: wp.uint32
     texture_data_length: wp.uint32
 
@@ -374,10 +375,23 @@ def _sample_texture_rgba(
     ):
         return wp.vec4(1.0, 1.0, 1.0, 1.0)
 
-    c00 = wp.vec4(texels[b00], texels[b00 + 1], texels[b00 + 2], texels[b00 + 3])
-    c10 = wp.vec4(texels[b10], texels[b10 + 1], texels[b10 + 2], texels[b10 + 3])
-    c01 = wp.vec4(texels[b01], texels[b01 + 1], texels[b01 + 2], texels[b01 + 3])
-    c11 = wp.vec4(texels[b11], texels[b11 + 1], texels[b11 + 2], texels[b11 + 3])
+    scale = wp.float32(1.0 / 255.0)
+    c00 = wp.vec4(
+        wp.float32(texels[b00]), wp.float32(texels[b00 + 1]),
+        wp.float32(texels[b00 + 2]), wp.float32(texels[b00 + 3]),
+    ) * scale
+    c10 = wp.vec4(
+        wp.float32(texels[b10]), wp.float32(texels[b10 + 1]),
+        wp.float32(texels[b10 + 2]), wp.float32(texels[b10 + 3]),
+    ) * scale
+    c01 = wp.vec4(
+        wp.float32(texels[b01]), wp.float32(texels[b01 + 1]),
+        wp.float32(texels[b01 + 2]), wp.float32(texels[b01 + 3]),
+    ) * scale
+    c11 = wp.vec4(
+        wp.float32(texels[b11]), wp.float32(texels[b11 + 1]),
+        wp.float32(texels[b11 + 2]), wp.float32(texels[b11 + 3]),
+    ) * scale
 
     c0 = c00 * (1.0 - tx) + c10 * tx
     c1 = c01 * (1.0 - tx) + c11 * tx
@@ -2384,6 +2398,13 @@ def _evaluate_material_from_payload(
 
     # C++ lines 51-60: build tangent frame from geometry
     n = wp.normalize(normal)
+    # Keep the unperturbed surface normal separate from the normal-mapped
+    # shading normal.  Ng is used for geometric hemisphere tests and ray
+    # offsets; replacing it with the tangent-space normal can reject valid
+    # lighting samples and self-intersect strongly normal-mapped surfaces.
+    # This matches mat_eval_common.glsl in the reference C# renderer, which
+    # assigns pbrMat.Ng from state.Ng before changing only pbrMat.N.
+    ng = n
     t = tangent - n * wp.dot(n, tangent)
     t_len_sq = wp.dot(t, t)
     if t_len_sq < 1.0e-12:
@@ -2458,7 +2479,7 @@ def _evaluate_material_from_payload(
     if params.override_metallic > 0.0:
         metallic = wp.clamp(params.override_metallic, 0.0, 1.0)
 
-    # C++ lines 163-174: apply normal map, update N, Ng, Nc
+    # C++ lines 163-174: apply the normal map to N; Ng remains geometric.
     needs_tangent_update = wp.bool(False)
     uv_n = _apply_uv_transform(
         _select_uv(mat.normal_tex_coord, uv, uv1), mat.normal_uv_transform
@@ -2509,7 +2530,7 @@ def _evaluate_material_from_payload(
     out.valid = wp.uint32(1)
     out.color = emissive
     out.normal = n
-    out.Ng = n
+    out.Ng = ng
     out.T = t
     out.B = b
     out.roughness = roughness_sq
@@ -2866,7 +2887,12 @@ def primary_raygen(params: PathtraceLaunchParams):
 
     # Direct lighting at primary hit (Step 2 - matches C++ HdrContrib with GGX BSDF).
     to_eye = -direction
-    hdr_radiance = wp.vec3(0.0, 0.0, 0.0)
+    # Omniverse's sceneDb ambient light is diffuse irradiance, separate from
+    # the environment/DomeLight. AO modulates it and metals have no diffuse
+    # lobe in the glTF metallic-roughness model.
+    hdr_radiance = _mul_vec3(base_color, params.ambient_light) * (
+        (1.0 - pbr_mat.metallic) * pbr_mat.occlusion
+    )
     rng = _pcg_advance(rng)
     xi0_l = _pcg_rand01(rng)
     rng = _pcg_advance(rng)
@@ -3061,6 +3087,11 @@ def primary_raygen(params: PathtraceLaunchParams):
         sec_base_color = sec_pbr.diffuse
         sec_specular_color = sec_pbr.specular
         sec_to_eye = -sec_direction
+
+        sec_ambient = _mul_vec3(sec_base_color, params.ambient_light) * (
+            (1.0 - sec_pbr.metallic) * sec_pbr.occlusion
+        )
+        radiance = radiance + _mul_vec3(sec_throughput, sec_ambient)
 
         # Direct lighting at secondary hit (GGX BSDF).
         rng = _pcg_advance(rng)

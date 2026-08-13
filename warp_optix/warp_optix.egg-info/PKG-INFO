@@ -13,6 +13,9 @@ Provides-Extra: pathtracing
 Requires-Dist: imageio>=2.31; extra == "pathtracing"
 Requires-Dist: Pillow>=9; extra == "pathtracing"
 Requires-Dist: pyglet<3,>=2.1; extra == "pathtracing"
+Provides-Extra: usd
+Requires-Dist: usd-core<26.5,>=25.5; (platform_machine != "aarch64" and python_version < "3.14") and extra == "usd"
+Requires-Dist: usd-exchange>=2.2.0; (platform_machine == "aarch64" and python_version < "3.13") and extra == "usd"
 Provides-Extra: recording
 Requires-Dist: imageio>=2.31; extra == "recording"
 Requires-Dist: imageio-ffmpeg>=0.5; extra == "recording"
@@ -46,13 +49,7 @@ def raygen_program():
 From the otk-pyoptix repo root:
 
 ```bash
-pip install -e warp_optix/
-```
-
-The `optix` Python module (the pyoptix C++ binding) must also be installed:
-
-```bash
-pip install -e optix/
+pip install -e . -e warp_optix/
 ```
 
 `warp_optix` uses Warp's public addon hooks when they are available. With
@@ -67,7 +64,7 @@ The example path tracer is also installed as `warp_optix.pathtracing`. Install
 its windowing and image extras with:
 
 ```bash
-pip install -e "warp_optix[pathtracing]"
+pip install -e . -e "warp_optix[pathtracing]"
 ```
 
 `PathTracingViewer` is a standalone OptiX path-tracing viewer with DLSS Ray
@@ -88,7 +85,7 @@ class ViewerOptix(PathTracingViewerBackend, ViewerBase):
 The optional interactive features are installed separately:
 
 ```bash
-pip install -e "warp_optix[pathtracing,ui,recording]"
+pip install -e . -e "warp_optix[pathtracing,ui,recording]"
 ```
 
 The viewer follows the earlier hybrid viewer controls:
@@ -114,9 +111,11 @@ horizon used for untextured simulation geometry.
 
 The framework-neutral class can also be driven directly through
 `log_mesh()`, `log_instances()`, `begin_frame()`, and `end_frame()`. Textured
-glTF scenes remain available through `PathTracerAPI`; the framework `log_mesh`
-adapter currently maps vertex colors and PBR values but does not ingest its
-optional texture argument.
+glTF and USD scenes remain available through `PathTracerAPI`; USD loading uses
+the optional `usd-core` extra and maps UsdPreviewSurface and common NVIDIA MDL
+inputs to the same internal PBR material representation. The framework
+`log_mesh` adapter currently maps vertex colors and PBR values but does not
+ingest its optional texture argument.
 
 The old hybrid viewer's Vulkan-backed OpenGL transform VBO was specific to its
 C# bridge. Compatibility queries remain available, but return unavailable;
