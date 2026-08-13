@@ -1081,6 +1081,46 @@ class PathTracingViewerBackend:
             self._materials_dirty = False
         return bool(loaded)
 
+    def set_camera_look_at(
+        self,
+        position,
+        target,
+        *,
+        fov: float | None = None,
+        renderer_space: bool = False,
+    ) -> None:
+        """Set a level camera from an eye and target in physics or renderer space."""
+        if self._user_camera_control:
+            return
+        position = np.asarray(position, dtype=np.float32).reshape(3)
+        target = np.asarray(target, dtype=np.float32).reshape(3)
+        if renderer_space:
+            renderer_to_physics = self._global_transform[:3, :3].T
+            position = renderer_to_physics @ position
+            target = renderer_to_physics @ target
+        direction = target - position
+        norm = float(np.linalg.norm(direction))
+        if norm <= 1.0e-8:
+            raise ValueError("Camera position and target must differ")
+        direction /= norm
+
+        if self._up_axis == 0:
+            pitch = math.degrees(math.asin(float(np.clip(direction[0], -1.0, 1.0))))
+            yaw = math.degrees(math.atan2(float(direction[2]), float(direction[1])))
+        elif self._up_axis == 2:
+            pitch = math.degrees(math.asin(float(np.clip(direction[2], -1.0, 1.0))))
+            yaw = math.degrees(math.atan2(float(direction[1]), float(direction[0])))
+        else:
+            pitch = math.degrees(math.asin(float(np.clip(direction[1], -1.0, 1.0))))
+            yaw = math.degrees(math.atan2(float(direction[2]), float(direction[0])))
+
+        self._camera_position = position
+        self._camera_pitch = float(np.clip(pitch, -89.0, 89.0))
+        self._camera_yaw = (float(yaw) + 180.0) % 360.0 - 180.0
+        if fov is not None:
+            self._camera_fov = float(np.clip(fov, 5.0, 120.0))
+        self._sync_camera()
+
     def set_camera(self, pos, pitch: float, yaw: float):
         """Set a framework-style camera unless interactive control has taken over."""
         if self._user_camera_control:

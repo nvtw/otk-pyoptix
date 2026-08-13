@@ -519,6 +519,30 @@ def test_viewer_loads_usd_through_public_backend_api():
     assert viewer._mesh_ids == {}
 
 
+def test_renderer_space_look_at_preserves_level_z_up_camera():
+    api = _FakePathTracerAPI()
+    viewer = PathTracingViewerBackend(
+        device="cpu", headless=True, up_axis="Z", api=api
+    )
+    viewer._ensure_initialized()
+
+    position = np.array((1.0, 2.0, 3.0), dtype=np.float32)
+    target = np.array((4.0, 6.0, 3.0), dtype=np.float32)
+    viewer.set_camera_look_at(
+        position, target, fov=52.0, renderer_space=True
+    )
+
+    camera_position, camera_target, camera_up, camera_fov = api.camera
+    np.testing.assert_allclose(camera_position, position)
+    np.testing.assert_allclose(
+        camera_target - camera_position,
+        (target - position) / np.linalg.norm(target - position),
+        atol=1.0e-6,
+    )
+    assert camera_up == (0.0, 1.0, 0.0)
+    assert camera_fov == 52.0
+
+
 def test_instance_capacity_is_enforced():
     api = _FakePathTracerAPI()
     viewer = PathTracingViewerBackend(
