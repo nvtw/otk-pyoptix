@@ -1041,6 +1041,46 @@ class PathTracingViewerBackend:
         self._transforms_dirty = False
         self._materials_dirty = False
 
+    @property
+    def usd_scene(self):
+        """Return the retained USD hierarchy from the loaded OptiX scene."""
+        return self._api.usd_scene
+
+    def load_scene_from_usd(
+        self,
+        usd_path: str,
+        *,
+        clear_existing: bool = True,
+        apply_stage_units: bool = True,
+        convert_up_axis: bool = True,
+        max_texture_size: int | None = None,
+        strict_sidedness: bool = False,
+        load_usd_environment: bool = False,
+        usd_environment_scale: float = 1.0,
+    ) -> bool:
+        """Load a composed USD stage into the OptiX renderer."""
+        self._ensure_initialized()
+        loaded = self._api.load_scene_from_usd(
+            usd_path,
+            clear_existing=clear_existing,
+            apply_stage_units=apply_stage_units,
+            convert_up_axis=convert_up_axis,
+            max_texture_size=max_texture_size,
+            strict_sidedness=strict_sidedness,
+            load_usd_environment=load_usd_environment,
+            usd_environment_scale=usd_environment_scale,
+        )
+        if loaded and clear_existing:
+            self._mesh_ids.clear()
+            self._batches.clear()
+            self._device_transform_batches.clear()
+            self._device_material_batches.clear()
+            self._material_ids.clear()
+            self._scene_dirty = False
+            self._transforms_dirty = False
+            self._materials_dirty = False
+        return bool(loaded)
+
     def set_camera(self, pos, pitch: float, yaw: float):
         """Set a framework-style camera unless interactive control has taken over."""
         if self._user_camera_control:

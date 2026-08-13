@@ -5,14 +5,29 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
-
 from warp_optix.pathtracing import usd_loader
 from warp_optix.pathtracing.usd_loader import (
     _ambient_light_from_custom_layer_data,
-    _normalize_mesh_uvs_for_udim_atlas,
     _decode_packed_orm,
     _decode_udim,
+    _fit_textures_to_budget,
+    _normalize_mesh_uvs_for_udim_atlas,
 )
+
+
+def test_texture_budget_proportionally_downscales_large_atlas():
+    textures = [
+        np.zeros((16, 16, 4), dtype=np.uint8),
+        np.zeros((16, 16, 4), dtype=np.uint8),
+    ]
+
+    resized = _fit_textures_to_budget(textures, max_bytes=512)
+
+    assert sum(texture.nbytes for texture in resized) <= 512
+    assert resized[0].shape == resized[1].shape
+    assert resized[0].shape[0] < textures[0].shape[0]
+    assert all(texture.flags.c_contiguous for texture in resized)
+    assert _fit_textures_to_budget(textures, max_bytes=4096) is textures
 
 
 def test_omniverse_ambient_light_metadata_is_preserved():

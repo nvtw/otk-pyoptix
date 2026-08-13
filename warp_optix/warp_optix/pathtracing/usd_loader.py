@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from .scene import Scene
 
 logger = logging.getLogger(__name__)
+_MAX_TEXTURE_ATLAS_BYTES = 1 << 30
+
 
 
 def _import_usd():
@@ -196,6 +198,45 @@ def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
     packed[..., 1] = np.clip(roughness * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
     packed[..., 2] = np.clip(metallic * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
     return np.ascontiguousarray(packed)
+
+def _fit_textures_to_budget(
+    textures: list[np.ndarray], max_bytes: int = _MAX_TEXTURE_ATLAS_BYTES
+) -> list[np.ndarray]:
+    """Proportionally downscale RGBA textures to fit one GPU atlas budget."""
+    total_bytes = sum(texture.nbytes for texture in textures)
+    if total_bytes <= max_bytes:
+        return textures
+    if max_bytes <= 0:
+        raise ValueError("Texture atlas byte budget must be positive")
+
+    from PIL import Image  # noqa: PLC0415
+
+    # Pixel storage is RGBA8, so reducing both dimensions by this scale reduces
+    # aggregate memory quadratically. Leave rounding headroom for small images.
+    scale = min(1.0, (max_bytes / total_bytes) ** 0.5 * 0.99)
+    resized = []
+    for texture in textures:
+        height, width = texture.shape[:2]
+        target_width = max(1, int(width * scale))
+        target_height = max(1, int(height * scale))
+        if (target_height, target_width) == (height, width):
+            resized.append(texture)
+            continue
+        image = Image.fromarray(texture, mode="RGBA").resize(
+            (target_width, target_height), Image.Resampling.LANCZOS
+        )
+        resized.append(np.ascontiguousarray(image, dtype=np.uint8))
+
+    resized_bytes = sum(texture.nbytes for texture in resized)
+    logger.warning(
+        "USD texture atlas exceeded %.2f GiB; downscaled %d textures from %.2f GiB to %.2f GiB",
+        max_bytes / (1 << 30),
+        len(textures),
+        total_bytes / (1 << 30),
+        resized_bytes / (1 << 30),
+    )
+    return resized
+
 
 
 def _preview_texture(shader_input) -> Path | None:
@@ -830,6 +871,7 @@ def load_scene_from_usd(
             textures = list(executor.map(decode_texture_spec, texture_specs))
     else:
         textures = []
+    textures = _fit_textures_to_budget(textures)
     scene.set_gltf_textures(textures, srgb_texture_indices=srgb_textures)
     logger.info(
         "[USD timing] total=%.1f ms meshes=%d verts=%d tris=%d materials=%d textures=%d",

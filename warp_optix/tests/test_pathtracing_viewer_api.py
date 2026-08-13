@@ -40,6 +40,8 @@ class _FakePathTracerAPI:
         self.tonemap_exposure = 1.0
         self.tonemap_contrast = 1.0
         self.tonemap_saturation = 1.0
+        self.usd_scene = None
+        self.usd_load = None
 
     def initialize(self):
         return True
@@ -128,6 +130,11 @@ class _FakePathTracerAPI:
 
     def clear_scene(self):
         self.scene = _FakeScene()
+
+    def load_scene_from_usd(self, path, **kwargs):
+        self.usd_load = (path, kwargs)
+        self.usd_scene = object()
+        return True
 
     def close(self):
         pass
@@ -482,6 +489,34 @@ def test_recording_defaults_to_system_videos_directory(tmp_path, monkeypatch):
     assert path.startswith(str(tmp_path / "NewtonRecordings"))
     assert path.endswith(".mp4")
     assert writer.closed
+
+
+def test_viewer_loads_usd_through_public_backend_api():
+    api = _FakePathTracerAPI()
+    viewer = PathTracingViewerBackend(device="cpu", headless=True, api=api)
+    viewer._mesh_ids["old"] = 1
+
+    loaded = viewer.load_scene_from_usd(
+        "scene.usd",
+        max_texture_size=2048,
+        load_usd_environment=True,
+    )
+
+    assert loaded
+    assert api.usd_load == (
+        "scene.usd",
+        {
+            "clear_existing": True,
+            "apply_stage_units": True,
+            "convert_up_axis": True,
+            "max_texture_size": 2048,
+            "strict_sidedness": False,
+            "load_usd_environment": True,
+            "usd_environment_scale": 1.0,
+        },
+    )
+    assert viewer.usd_scene is api.usd_scene
+    assert viewer._mesh_ids == {}
 
 
 def test_instance_capacity_is_enforced():
