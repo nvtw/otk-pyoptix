@@ -10,8 +10,9 @@ from warp_optix.pathtracing import (
     PathTracingRenderer,
     PathTracingViewerBackend,
 )
-from warp_optix.pathtracing.scene import Scene
 from warp_optix.pathtracing import pathtracing_viewer as viewer_module
+from warp_optix.pathtracing import viewer as recording_viewer_module
+from warp_optix.pathtracing.scene import Scene
 
 
 class _FakeScene:
@@ -410,11 +411,17 @@ def test_optional_picking_uses_physics_camera_ray_and_applies_forces():
 def test_recording_debug_and_bridge_transform_compatibility(tmp_path):
     api = _FakePathTracerAPI()
     writer = _FakeVideoWriter()
+    writer_options = {}
+
+    def writer_factory(*_args, **kwargs):
+        writer_options.update(kwargs)
+        return writer
+
     viewer = PathTracingViewerBackend(
         device="cpu",
         headless=True,
         api=api,
-        recording_writer_factory=lambda *_args, **_kwargs: writer,
+        recording_writer_factory=writer_factory,
     )
 
     viewer.set_debug_buffer_mode(7)
@@ -452,10 +459,29 @@ def test_recording_debug_and_bridge_transform_compatibility(tmp_path):
 
     assert len(writer.frames) == 2
     assert writer.frames[0].shape == (2, 3, 3)
+    assert writer_options["output_params"][:2] == ["-vf", "vflip"]
     assert writer.closed
     assert viewer.get_instance_transform_gl_buffer() == 0
     assert viewer.get_instance_transform_capacity() == 10000
     assert not viewer.is_gpu_transform_available()
+
+
+def test_recording_defaults_to_system_videos_directory(tmp_path, monkeypatch):
+    monkeypatch.setattr(recording_viewer_module, "_system_videos_dir", lambda: tmp_path)
+    writer = _FakeVideoWriter()
+    viewer = PathTracingViewerBackend(
+        device="cpu",
+        headless=True,
+        api=_FakePathTracerAPI(),
+        recording_writer_factory=lambda *_args, **_kwargs: writer,
+    )
+
+    path = viewer.start_recording()
+    viewer.stop_recording()
+
+    assert path.startswith(str(tmp_path / "NewtonRecordings"))
+    assert path.endswith(".mp4")
+    assert writer.closed
 
 
 def test_instance_capacity_is_enforced():

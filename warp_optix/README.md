@@ -69,7 +69,15 @@ The viewer follows the earlier hybrid viewer controls:
 - Left drag looks around and the scroll wheel changes field of view.
 - Right click and drag picks Newton bodies when Newton is installed.
 - Space pauses, Escape closes, and 0-8 select path-tracing debug buffers.
-- R starts MP4 recording and T stops it.
+- R starts MP4 recording and T stops it. Recordings default to the system
+  Videos directory under `NewtonRecordings/pathtracing_recording_*.mp4`.
+
+Recording packs RGB8 on the GPU, reads back asynchronously through pinned
+buffers, and encodes on a worker thread. The automatic encoder probes the
+system FFmpeg with a real frame and prefers `h264_nvenc`; it falls back to
+`libx264` with its ultrafast low-latency preset. Set `recording_encoder` to
+`"h264_nvenc"` or `"libx264"` to override selection. FFmpeg vertically flips
+the raw OptiX image into display orientation while encoding.
 
 `register_ui_callback()` adds application controls to the optional ImGui panel.
 The panel also exposes rendering statistics, DLSS state, visualization flags,
