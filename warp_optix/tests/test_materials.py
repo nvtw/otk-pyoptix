@@ -29,7 +29,7 @@ def test_checker_overlay_defaults_to_disabled():
 
     assert material["uSubdiv"] == pytest.approx(0.0)
     assert material["vSubdiv"] == pytest.approx(0.0)
-    assert material["baseColorScale"] == pytest.approx(0.9)
+    assert material["baseColorScale"] == pytest.approx(0.75)
 
 
 @pytest.mark.parametrize(

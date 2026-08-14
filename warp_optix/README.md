@@ -95,7 +95,7 @@ horizon used for untextured simulation geometry.
 The four material values passed to `log_instances()` are roughness, metallic,
 U subdivisions, and V subdivisions. Positive subdivision values enable a
 procedural UV checker overlay; alternating cells multiply the sampled base
-color by `base_color_scale` (default `0.9`). A zero subdivision disables the
+color by `base_color_scale` (default `0.75`). A zero subdivision disables the
 overlay. The same `u_subdiv`, `v_subdiv`, and `base_color_scale` controls are
 available when creating PBR or glTF materials directly.
 

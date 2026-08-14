@@ -66,7 +66,7 @@ class _FakePathTracerAPI:
         clearcoat_roughness=0.1,
         u_subdiv=0.0,
         v_subdiv=0.0,
-        base_color_scale=0.9,
+        base_color_scale=0.75,
     ):
         self.materials.append(
             (
@@ -188,7 +188,7 @@ def test_reference_sky_and_srgb_color_mapping():
         api.materials[0][0], (0.60382736, 0.60382736, 0.60382736), rtol=1.0e-6
     )
     assert api.materials[0][1:3] == (0.25, 0.75)
-    assert api.materials[0][3:] == (1.5, 1.0, 0.0, 0.1, 0.0, 0.0, 0.9)
+    assert api.materials[0][3:] == (1.5, 1.0, 0.0, 0.1, 0.0, 0.0, 0.75)
 
     viewer.set_sky_parameters(
         sun_direction=(0.0, 1.0, 0.0),
@@ -330,7 +330,7 @@ def test_logged_instances_apply_up_axis_materials_and_frame_lifecycle():
         0.1,
         12.5,
         7.25,
-        0.9,
+        0.75,
     )
 
     viewer.end_frame()

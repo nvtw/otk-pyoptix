@@ -278,7 +278,7 @@ class MaterialManager:
         clearcoat_roughness: float = 0.1,
         u_subdiv: float = 0.0,
         v_subdiv: float = 0.0,
-        base_color_scale: float = 0.9,
+        base_color_scale: float = 0.75,
     ) -> int:
         """Add a PBR material with custom properties."""
         mat = self._create_default_material()
@@ -316,7 +316,7 @@ class MaterialManager:
         attenuation_distance: float = 1.0e10,
         u_subdiv: float = 0.0,
         v_subdiv: float = 0.0,
-        base_color_scale: float = 0.9,
+        base_color_scale: float = 0.75,
     ) -> int:
         """Add a glTF PBR material using reference loader-compatible fields."""
         mat = self._create_default_material()
@@ -404,7 +404,7 @@ class MaterialManager:
         mat["pbrMetallicFactor"] = 0.0
         mat["uSubdiv"] = 0.0
         mat["vSubdiv"] = 0.0
-        mat["baseColorScale"] = 0.9
+        mat["baseColorScale"] = 0.75
         mat["alphaMode"] = ALPHA_OPAQUE
         mat["alphaCutoff"] = 0.5
 

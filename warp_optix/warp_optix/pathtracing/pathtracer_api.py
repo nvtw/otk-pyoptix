@@ -465,7 +465,7 @@ class PathTracerAPI:
         clearcoat_roughness: float = 0.1,
         u_subdiv: float = 0.0,
         v_subdiv: float = 0.0,
-        base_color_scale: float = 0.9,
+        base_color_scale: float = 0.75,
     ) -> int:
         scene = self._require_scene()
         return int(
