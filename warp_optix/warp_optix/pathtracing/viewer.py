@@ -417,6 +417,7 @@ class PathTracingViewerBackend:
         self._look_sensitivity = 0.1
         self._keys_down: set[int] = set()
         self._user_camera_control = False
+        self._camera_override_this_frame = False
         self._global_transform = np.eye(4, dtype=np.float32)
         self._up_axis = 1
         self.set_up_axis(up_axis)
@@ -956,6 +957,7 @@ class PathTracingViewerBackend:
         if callable(parent):
             parent(time_sec)
         self.time = float(time_sec)
+        self._camera_override_this_frame = False
 
     def _render_to_mapped_buffer(
         self, mapped_image: wp.array, _frame_index: int, _elapsed: float
@@ -983,7 +985,8 @@ class PathTracingViewerBackend:
         self._ensure_initialized()
         self._flush_scene()
         now = time.perf_counter()
-        self._update_camera_from_input(max(0.0, min(now - self._last_wall_time, 0.1)))
+        if not self._camera_override_this_frame:
+            self._update_camera_from_input(max(0.0, min(now - self._last_wall_time, 0.1)))
         self._last_wall_time = now
         if self._presenter is None:
             self._api.render_frame()
@@ -1095,6 +1098,8 @@ class PathTracingViewerBackend:
         """Set a level camera from an eye and target in physics or renderer space."""
         if self._user_camera_control and not force:
             return
+        if force:
+            self._camera_override_this_frame = True
         position = np.asarray(position, dtype=np.float32).reshape(3)
         target = np.asarray(target, dtype=np.float32).reshape(3)
         if renderer_space:
@@ -1241,6 +1246,8 @@ class PathTracingViewerBackend:
         if self._ui_wants_mouse():
             return
         mouse = self._presenter.pyglet.window.mouse
+        if self._camera_override_this_frame:
+            return
         if buttons & mouse.LEFT:
             self._camera_yaw -= float(dx) * self._look_sensitivity
             self._camera_pitch = float(
@@ -1289,6 +1296,8 @@ class PathTracingViewerBackend:
 
     def on_mouse_scroll(self, _x, _y, _scroll_x, scroll_y):
         if self._ui_wants_mouse():
+            return
+        if self._camera_override_this_frame:
             return
         self._camera_fov = float(
             np.clip(self._camera_fov - float(scroll_y) * 2.0, 10.0, 120.0)
