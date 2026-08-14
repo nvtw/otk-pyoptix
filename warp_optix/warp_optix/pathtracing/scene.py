@@ -143,22 +143,28 @@ def _update_device_instance_transforms(
 
 @wp.kernel
 def _scatter_usd_local_transforms(
+    transform_count: wp.array(dtype=wp.int32),
     node_ids: wp.array(dtype=wp.int32),
     transforms: wp.array(dtype=wp.mat44),
     local_transforms: wp.array(dtype=wp.mat44),
 ):
     update_index = wp.tid()
+    if update_index >= wp.clamp(transform_count[0], 0, node_ids.shape[0]):
+        return
     local_transforms[node_ids[update_index]] = transforms[update_index]
 
 
 @wp.kernel
 def _scatter_usd_local_transform_trs(
+    transform_count: wp.array(dtype=wp.int32),
     node_ids: wp.array(dtype=wp.int32),
     transforms: wp.array(dtype=wp.transform),
     scales: wp.array(dtype=wp.vec3),
     local_transforms: wp.array(dtype=wp.mat44),
 ):
     update_index = wp.tid()
+    if update_index >= wp.clamp(transform_count[0], 0, node_ids.shape[0]):
+        return
     transform = transforms[update_index]
     position = wp.transform_get_translation(transform)
     rotation = wp.quat_to_matrix(wp.transform_get_rotation(transform))
@@ -1013,19 +1019,36 @@ class Scene:
                 )
 
     def set_usd_local_transforms_device(
-        self, node_ids: wp.array, transforms: wp.array, stream=None, rebuild_tlas: bool = True
+        self,
+        transform_count: wp.array,
+        node_ids: wp.array,
+        transforms: wp.array,
+        stream=None,
+        rebuild_tlas: bool = True,
     ):
         """Apply CUDA-resident USD local matrices and compose the hierarchy."""
         if self._d_usd_local_transforms is None:
             raise RuntimeError("Build the scene before updating USD transforms")
-        if not node_ids.device.is_cuda or not transforms.device.is_cuda:
+        if (
+            not transform_count.device.is_cuda
+            or not node_ids.device.is_cuda
+            or not transforms.device.is_cuda
+        ):
             raise ValueError("USD device transform updates require CUDA arrays")
+        if len(transform_count) != 1:
+            raise ValueError("transform_count must contain exactly one value")
         if len(node_ids) != len(transforms):
             raise ValueError("node_ids and transforms must have equal length")
         if len(node_ids) == 0:
             return
-        if node_ids.dtype != wp.int32 or transforms.dtype != wp.mat44:
-            raise TypeError("USD device batches require wp.int32 IDs and wp.mat44 matrices")
+        if (
+            transform_count.dtype != wp.int32
+            or node_ids.dtype != wp.int32
+            or transforms.dtype != wp.mat44
+        ):
+            raise TypeError(
+                "USD device batches require an int32 count, int32 IDs, and mat44 matrices"
+            )
         scope = (
             wp.ScopedStream(stream, sync_enter=False, sync_exit=False)
             if stream is not None
@@ -1035,7 +1058,12 @@ class Scene:
             wp.launch(
                 _scatter_usd_local_transforms,
                 dim=len(node_ids),
-                inputs=[node_ids, transforms, self._d_usd_local_transforms],
+                inputs=[
+                    transform_count,
+                    node_ids,
+                    transforms,
+                    self._d_usd_local_transforms,
+                ],
                 device="cuda",
             )
             self._evaluate_usd_transform_hierarchy()
@@ -1044,6 +1072,7 @@ class Scene:
 
     def set_usd_local_transform_trs_device(
         self,
+        transform_count: wp.array,
         node_ids: wp.array,
         transforms: wp.array,
         scales: wp.array,
@@ -1053,15 +1082,27 @@ class Scene:
         """Apply CUDA-resident Warp transforms/scales to USD local nodes."""
         if self._d_usd_local_transforms is None:
             raise RuntimeError("Build the scene before updating USD transforms")
-        if not node_ids.device.is_cuda or not transforms.device.is_cuda or not scales.device.is_cuda:
+        if (
+            not transform_count.device.is_cuda
+            or not node_ids.device.is_cuda
+            or not transforms.device.is_cuda
+            or not scales.device.is_cuda
+        ):
             raise ValueError("USD device transform updates require CUDA arrays")
+        if len(transform_count) != 1:
+            raise ValueError("transform_count must contain exactly one value")
         if len(node_ids) != len(transforms) or len(node_ids) != len(scales):
             raise ValueError("node_ids, transforms, and scales must have equal length")
         if len(node_ids) == 0:
             return
-        if node_ids.dtype != wp.int32 or transforms.dtype != wp.transform or scales.dtype != wp.vec3:
+        if (
+            transform_count.dtype != wp.int32
+            or node_ids.dtype != wp.int32
+            or transforms.dtype != wp.transform
+            or scales.dtype != wp.vec3
+        ):
             raise TypeError(
-                "USD TRS batches require wp.int32 IDs, wp.transform poses, and wp.vec3 scales"
+                "USD TRS batches require an int32 count, int32 IDs, transform poses, and vec3 scales"
             )
         scope = (
             wp.ScopedStream(stream, sync_enter=False, sync_exit=False)
@@ -1072,7 +1113,13 @@ class Scene:
             wp.launch(
                 _scatter_usd_local_transform_trs,
                 dim=len(node_ids),
-                inputs=[node_ids, transforms, scales, self._d_usd_local_transforms],
+                inputs=[
+                    transform_count,
+                    node_ids,
+                    transforms,
+                    scales,
+                    self._d_usd_local_transforms,
+                ],
                 device="cuda",
             )
             self._evaluate_usd_transform_hierarchy()
@@ -1103,9 +1150,11 @@ class Scene:
             else nullcontext()
         )
         with scope:
+            device_count = wp.array([len(indices)], dtype=wp.int32, device="cuda")
             device_ids = wp.array(indices, dtype=wp.int32, device="cuda")
             device_matrices = wp.array(matrices, dtype=wp.mat44, device="cuda")
             self.set_usd_local_transforms_device(
+                device_count,
                 device_ids,
                 device_matrices,
                 rebuild_tlas=rebuild_tlas,

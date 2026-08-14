@@ -124,16 +124,22 @@ body = usd.require_transform("/World/Robot/base")
 usd.update_local_transforms([body], matrices)
 
 # Zero-staging CUDA batch on a caller-owned Warp stream.
+transform_count_cuda = wp.array([capacity], dtype=wp.int32, device="cuda")
 usd.update_local_transforms_device(
-    body_ids_cuda, local_mat44_cuda, stream=simulation_stream
+    transform_count_cuda, body_ids_cuda, local_mat44_cuda, stream=simulation_stream
 )
 # Newton-style wp.transform + wp.vec3 scale arrays are accepted directly too.
 usd.update_local_transform_trs_device(
-    body_ids_cuda, local_poses_cuda, local_scales_cuda, stream=simulation_stream
+    transform_count_cuda,
+    body_ids_cuda,
+    local_poses_cuda,
+    local_scales_cuda,
+    stream=simulation_stream,
 )
 
 # Or decouple hierarchy writes from the OptiX update.
 usd.update_local_transforms_device(
+    transform_count_cuda,
     body_ids_cuda,
     local_mat44_cuda,
     stream=simulation_stream,
@@ -141,6 +147,10 @@ usd.update_local_transforms_device(
 )
 usd.update_tlas(stream=simulation_stream)
 ```
+
+The ID and transform arrays define a fixed launch capacity. A CUDA kernel may
+change the single active-count value inside a captured graph to update any
+prefix of those arrays without graph recapture or host synchronization.
 
 `usd.transforms` enumerates a stable `USDTransformHandle` for every composed
 transformable prim path. `usd.get_transform(path)` performs a non-throwing

@@ -143,36 +143,40 @@ class USDScene:
 
     def update_local_transforms_device(
         self,
-        handle_indices: wp.array,
-        matrices: wp.array,
+        transform_count: wp.array,
+        transform_ids: wp.array,
+        local_transforms: wp.array,
         *,
         stream=None,
         rebuild_tlas: bool = True,
     ):
-        """Apply CUDA ``int32`` handles and ``mat44`` local matrices in-place."""
+        """Apply a device-counted prefix of CUDA handle and local-matrix arrays."""
         self._require_current()
         self._scene.set_usd_local_transforms_device(
-            handle_indices,
-            matrices,
+            transform_count,
+            transform_ids,
+            local_transforms,
             stream=stream,
             rebuild_tlas=rebuild_tlas,
         )
 
     def update_local_transform_trs_device(
         self,
-        handle_indices: wp.array,
-        transforms: wp.array,
-        scales: wp.array,
+        transform_count: wp.array,
+        transform_ids: wp.array,
+        local_poses: wp.array,
+        local_scales: wp.array,
         *,
         stream=None,
         rebuild_tlas: bool = True,
     ):
-        """Apply CUDA Warp poses/scales without constructing matrix arrays."""
+        """Apply a device-counted prefix of CUDA pose and scale arrays."""
         self._require_current()
         self._scene.set_usd_local_transform_trs_device(
-            handle_indices,
-            transforms,
-            scales,
+            transform_count,
+            transform_ids,
+            local_poses,
+            local_scales,
             stream=stream,
             rebuild_tlas=rebuild_tlas,
         )

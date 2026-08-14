@@ -818,9 +818,10 @@ class PathTracingViewerBackend:
                     instance_ids = cached[0]
                 device_batch = (instance_ids, xforms, scales)
                 self._device_transform_batches[name] = device_batch
-                self._api.set_instance_transform_arrays(
-                    instance_ids, xforms, scales, self._global_transform
-                )
+                if not self._scene_dirty:
+                    self._api.set_instance_transform_arrays(
+                        instance_ids, xforms, scales, self._global_transform
+                    )
             else:
                 matrices = self._instance_matrices(xforms, scales)
                 self._api.set_instance_transform_matrices(active_ids, matrices)
@@ -863,7 +864,11 @@ class PathTracingViewerBackend:
                 )
             device_material_batch = (material_ids, colors, materials)
             self._device_material_batches[name] = device_material_batch
-            self._api.set_instance_material_arrays(material_ids, colors, materials)
+            # New instances also create materials, while the compact CUDA table
+            # is rebuilt only by build_scene(). The dirty-scene flush reapplies
+            # every cached batch after that table has the required capacity.
+            if not self._scene_dirty:
+                self._api.set_instance_material_arrays(material_ids, colors, materials)
 
         if not device_appearance and (appearance_changed or instances_added):
             for index, instance_id in enumerate(active_ids):
