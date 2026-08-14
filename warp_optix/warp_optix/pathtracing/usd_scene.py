@@ -100,6 +100,14 @@ class USDScene:
         ]
         return tuple(int(value) for value in selected)
 
+    def set_visible(self, visible: bool):
+        """Show or hide every render instance imported from this USD stage."""
+        self._require_current()
+        instance_ids = self._scene._usd_instance_ids
+        if len(instance_ids) == 0:
+            return
+        self._scene.set_instances_visible_batch(instance_ids, bool(visible))
+
     def get_local_transform(self, handle: USDTransformHandle | int) -> np.ndarray:
         """Read one local matrix; this synchronizes when CUDA state exists."""
         index = self._index(handle)

@@ -44,6 +44,11 @@ def test_usd_scene_retains_paths_and_local_geometry(tmp_path):
     assert usd_scene.instance_ids(body) == ()
     assert usd_scene.instance_ids(mesh) == (0,)
 
+    usd_scene.set_visible(False)
+    assert not scene._instance_visibility_cache[0]
+    usd_scene.set_visible(True)
+    assert scene._instance_visibility_cache[0]
+
     updated = np.eye(4, dtype=np.float32)
     updated[:3, 3] = (4.0, 5.0, 6.0)
     usd_scene.update_local_transform(body, updated)
