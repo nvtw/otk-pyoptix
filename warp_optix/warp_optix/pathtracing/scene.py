@@ -1200,6 +1200,7 @@ class Scene:
         convert_up_axis: bool = True,
         max_texture_size: int | None = None,
         strict_sidedness: bool = False,
+        enable_emissive_materials: bool = True,
     ) -> bool:
         """Load a composed USD stage into this scene.
 
@@ -1220,6 +1221,7 @@ class Scene:
                 convert_up_axis=convert_up_axis,
                 max_texture_size=max_texture_size,
                 strict_sidedness=strict_sidedness,
+                enable_emissive_materials=enable_emissive_materials,
             )
         )
 

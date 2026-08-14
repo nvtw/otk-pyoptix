@@ -254,7 +254,13 @@ def _preview_texture(shader_input) -> Path | None:
     return _asset_path(file_input.Get()) if file_input else None
 
 
-def _material_to_pbr(material, UsdShade, texture_index, packed_orm_index=None) -> dict[str, Any]:
+def _material_to_pbr(
+    material,
+    UsdShade,
+    texture_index,
+    packed_orm_index=None,
+    enable_emissive_materials: bool = True,
+) -> dict[str, Any]:
     shader = _surface_shader(material, UsdShade)
     values = _material_inputs(material, shader)
     shader_id = str(shader.GetIdAttr().Get() or "") if shader else ""
@@ -307,7 +313,11 @@ def _material_to_pbr(material, UsdShade, texture_index, packed_orm_index=None) -
     if shader_id == "UsdPreviewSurface":
         base = _as_float_tuple(values.get("diffuseColor"), 3, (0.18, 0.18, 0.18))
         opacity = float(values.get("opacity", 1.0))
-        emissive = _as_float_tuple(values.get("emissiveColor"), 3, (0.0, 0.0, 0.0))
+        emissive = (
+            _as_float_tuple(values.get("emissiveColor"), 3, (0.0, 0.0, 0.0))
+            if enable_emissive_materials
+            else (0.0, 0.0, 0.0)
+        )
         roughness = float(values.get("roughness", 0.5))
         metallic = float(values.get("metallic", 0.0))
         orm_index = -1
@@ -333,7 +343,9 @@ def _material_to_pbr(material, UsdShade, texture_index, packed_orm_index=None) -
             "base_color_texture": texture("diffuseColor", srgb=True),
             "normal_texture": texture("normal"),
             "metallic_roughness_texture": orm_texture,
-            "emissive_texture": texture("emissiveColor", srgb=True),
+            "emissive_texture": texture("emissiveColor", srgb=True)
+            if enable_emissive_materials
+            else {},
             "occlusion_texture": texture("occlusion"),
         }
 
@@ -353,8 +365,10 @@ def _material_to_pbr(material, UsdShade, texture_index, packed_orm_index=None) -
         base = tuple(component * brightness for component in diffuse_tint)
     else:
         base = diffuse_tint if diffuse_tint != (1.0, 1.0, 1.0) else diffuse_constant
-    emission_enabled = bool(values.get("enable_emission", False)) or (
-        "emissive_color_normal" in values or "emissive_color_grazing" in values
+    emission_enabled = enable_emissive_materials and (
+        bool(values.get("enable_emission", False))
+        or "emissive_color_normal" in values
+        or "emissive_color_grazing" in values
     )
     emissive = _as_float_tuple(
         values.get("emissive_color", values.get("emissive_color_normal")),
@@ -403,7 +417,9 @@ def _material_to_pbr(material, UsdShade, texture_index, packed_orm_index=None) -
         "normal_texture": normal_texture,
         # Marbles ORM is already packed as glTF expects: R=AO, G=roughness, B=metallic.
         "metallic_roughness_texture": orm_texture,
-        "emissive_texture": texture("emissive_texture", "emissive_color_texture", srgb=True),
+        "emissive_texture": texture("emissive_texture", "emissive_color_texture", srgb=True)
+        if enable_emissive_materials
+        else {},
         "occlusion_texture": orm_texture,
     }
 
@@ -561,6 +577,7 @@ def load_scene_from_usd(
     convert_up_axis: bool = True,
     max_texture_size: int | None = None,
     strict_sidedness: bool = False,
+    enable_emissive_materials: bool = True,
 ) -> bool:
     """Load composed USD meshes and common PreviewSurface/MDL PBR materials."""
     path = Path(usd_path).expanduser().resolve()
@@ -725,7 +742,13 @@ def load_scene_from_usd(
             return material_ids[key]
         key = str(material.GetPath())
         if key not in material_ids:
-            kwargs = _material_to_pbr(material, UsdShade, texture_index, packed_orm_index)
+            kwargs = _material_to_pbr(
+                material,
+                UsdShade,
+                texture_index,
+                packed_orm_index,
+                enable_emissive_materials,
+            )
             columns = 1
             rows = 1
             for texture_name in (

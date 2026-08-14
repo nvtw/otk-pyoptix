@@ -295,6 +295,7 @@ class PathTracerAPI:
         strict_sidedness: bool = False,
         load_usd_environment: bool = False,
         usd_environment_scale: float = 1.0,
+        enable_emissive_materials: bool = True,
     ) -> bool:
         """Load USD geometry and PBR materials through the optional OpenUSD bindings."""
         ok = bool(
@@ -306,6 +307,7 @@ class PathTracerAPI:
                 convert_up_axis=convert_up_axis,
                 max_texture_size=max_texture_size,
                 strict_sidedness=strict_sidedness,
+                enable_emissive_materials=enable_emissive_materials,
             )
         )
         if ok and load_usd_environment:

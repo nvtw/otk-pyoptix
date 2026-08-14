@@ -1057,6 +1057,7 @@ class PathTracingViewerBackend:
         strict_sidedness: bool = False,
         load_usd_environment: bool = False,
         usd_environment_scale: float = 1.0,
+        enable_emissive_materials: bool = True,
     ) -> bool:
         """Load a composed USD stage into the OptiX renderer."""
         self._ensure_initialized()
@@ -1067,6 +1068,7 @@ class PathTracingViewerBackend:
             convert_up_axis=convert_up_axis,
             max_texture_size=max_texture_size,
             strict_sidedness=strict_sidedness,
+            enable_emissive_materials=enable_emissive_materials,
             load_usd_environment=load_usd_environment,
             usd_environment_scale=usd_environment_scale,
         )
