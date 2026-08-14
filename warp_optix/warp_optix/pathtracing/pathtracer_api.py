@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
 import sys
 from collections.abc import Iterable
@@ -29,6 +30,8 @@ from warp_optix._runtime.transform_utils import build_transform_matrix
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .ptx_compiler import get_optix_include_dir
 from .scene import Mesh
+
+logger = logging.getLogger(__name__)
 
 
 class PathTracerAPI:
@@ -313,9 +316,14 @@ class PathTracerAPI:
         if ok and load_usd_environment:
             environment_path = self._require_scene().usd_environment_path
             if environment_path is None:
-                logger.warning("USD stage contains no supported DomeLight environment texture: %s", usd_path)
+                logger.warning(
+                    "USD stage contains no supported DomeLight environment texture: %s",
+                    usd_path,
+                )
             else:
-                self.set_environment_hdr(str(environment_path), scaling=float(usd_environment_scale))
+                self.set_environment_hdr(
+                    str(environment_path), scaling=float(usd_environment_scale)
+                )
         if ok and build_scene:
             self.build_scene()
         return ok
@@ -504,6 +512,25 @@ class PathTracerAPI:
         self._viewer.camera.target = np.asarray(list(target), dtype=np.float32)
         self._viewer.camera.up = np.asarray(list(up), dtype=np.float32)
         self._viewer.camera.fov = float(fov)
+
+    def bind_device_camera(
+        self,
+        positions,
+        targets,
+        *,
+        fov=45.0,
+        up=(0.0, 1.0, 0.0),
+        camera_transform=None,
+    ):
+        """Bind graph-written CUDA eye and target arrays to the path tracer."""
+        self.initialize()
+        self._viewer.bind_device_camera(
+            positions, targets, fov=fov, up=up, camera_transform=camera_transform
+        )
+
+    def unbind_device_camera(self):
+        """Restore the host-driven path tracer camera."""
+        self._viewer.unbind_device_camera()
 
     def set_camera_angles(
         self,

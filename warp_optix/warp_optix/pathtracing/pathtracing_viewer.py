@@ -77,6 +77,66 @@ def _accumulate_sample(
     accum[y, x] = a + (s - a) * t
 
 
+@wp.kernel(enable_backward=False)
+def _prepare_device_camera(
+    positions: wp.array(dtype=wp.vec3),
+    targets: wp.array(dtype=wp.vec3),
+    up_directions: wp.array(dtype=wp.vec3),
+    fovs: wp.array(dtype=wp.float32),
+    camera_transform: wp.mat44,
+    aspect: float,
+    initialized: wp.array(dtype=wp.int32),
+    states: wp.array(dtype=pwk.DeviceCameraState),
+):
+    position4 = camera_transform * wp.vec4(
+        positions[0][0], positions[0][1], positions[0][2], 1.0
+    )
+    target4 = camera_transform * wp.vec4(
+        targets[0][0], targets[0][1], targets[0][2], 1.0
+    )
+    up4 = camera_transform * wp.vec4(
+        up_directions[0][0], up_directions[0][1], up_directions[0][2], 0.0
+    )
+    position = wp.vec3(position4[0], position4[1], position4[2])
+    forward = wp.vec3(target4[0], target4[1], target4[2]) - position
+    if wp.length(forward) <= 1.0e-8:
+        forward = wp.vec3(0.0, 0.0, -1.0)
+    else:
+        forward = wp.normalize(forward)
+    world_up = wp.vec3(up4[0], up4[1], up4[2])
+    right = wp.cross(forward, world_up)
+    if wp.length(right) <= 1.0e-8:
+        right = wp.vec3(1.0, 0.0, 0.0)
+    else:
+        right = wp.normalize(right)
+    up = wp.normalize(wp.cross(right, forward))
+    tan_half_fov = wp.tan(wp.radians(wp.clamp(fovs[0], 5.0, 120.0)) * 0.5)
+
+    state = states[0]
+    if initialized[0] == 0:
+        state.previous_position = position
+        state.previous_forward = forward
+        state.previous_right = right
+        state.previous_up = up
+        state.previous_tan_half_fov = tan_half_fov
+        state.previous_aspect = aspect
+        initialized[0] = 1
+    else:
+        state.previous_position = state.position
+        state.previous_forward = state.forward
+        state.previous_right = state.right
+        state.previous_up = state.up
+        state.previous_tan_half_fov = state.tan_half_fov
+        state.previous_aspect = state.aspect
+    state.position = position
+    state.forward = forward
+    state.right = right
+    state.up = up
+    state.tan_half_fov = tan_half_fov
+    state.aspect = aspect
+    states[0] = state
+
+
 class PathTracingViewer:
     """
     OptiX Path Tracing Viewer.
@@ -197,6 +257,15 @@ class PathTracingViewer:
         self._launch_params_buffer = None
         self._launch_params = None
         self._instance_transform_count = 0
+        self._device_camera_positions = None
+        self._device_camera_targets = None
+        self._device_camera_up = None
+        self._device_camera_fovs = None
+        self._device_camera_transform = wp.mat44(
+            *np.eye(4, dtype=np.float32).reshape(-1)
+        )
+        self._device_camera_initialized = None
+        self._device_camera_state = None
 
         # CUDA surface objects
         self._color_surface = None
@@ -908,6 +977,82 @@ class PathTracingViewer:
 
         return pos, forward, right, up
 
+    def bind_device_camera(
+        self,
+        positions: wp.array,
+        targets: wp.array,
+        *,
+        fov: float | wp.array = 45.0,
+        up=(0.0, 1.0, 0.0),
+        camera_transform: np.ndarray | None = None,
+    ) -> None:
+        """Bind graph-written CUDA eye and target arrays to the renderer."""
+        if positions.dtype != wp.vec3 or targets.dtype != wp.vec3:
+            raise TypeError("positions and targets must be wp.array[wp.vec3]")
+        if positions.shape[0] < 1 or targets.shape[0] < 1:
+            raise ValueError("positions and targets must contain at least one element")
+        if positions.device != targets.device or not positions.device.is_cuda:
+            raise ValueError("positions and targets must share a CUDA device")
+        self._device_camera_positions = positions
+        self._device_camera_targets = targets
+        self._device_camera_up = wp.array([up], dtype=wp.vec3, device=positions.device)
+        if hasattr(fov, "dtype"):
+            if (
+                fov.dtype != wp.float32
+                or fov.shape[0] < 1
+                or fov.device != positions.device
+            ):
+                raise ValueError(
+                    "fov must be a non-empty wp.array[float] on the camera device"
+                )
+            self._device_camera_fovs = fov
+        else:
+            self._device_camera_fovs = wp.array(
+                [float(fov)], dtype=float, device=positions.device
+            )
+        transform = (
+            np.eye(4, dtype=np.float32)
+            if camera_transform is None
+            else camera_transform
+        )
+        transform = np.asarray(transform, dtype=np.float32).reshape(4, 4)
+        self._device_camera_transform = wp.mat44(*transform.reshape(-1))
+        self._device_camera_initialized = wp.zeros(
+            1, dtype=wp.int32, device=positions.device
+        )
+        self._device_camera_state = wp.empty(
+            1, dtype=pwk.DeviceCameraState, device=positions.device
+        )
+
+    def _update_device_camera(self) -> None:
+        if self._device_camera_state is None:
+            return
+        wp.launch(
+            _prepare_device_camera,
+            dim=1,
+            inputs=[
+                self._device_camera_positions,
+                self._device_camera_targets,
+                self._device_camera_up,
+                self._device_camera_fovs,
+                self._device_camera_transform,
+                float(self._render_width) / float(max(1, self._render_height)),
+                self._device_camera_initialized,
+            ],
+            outputs=[self._device_camera_state],
+            device=self._device_camera_positions.device,
+            stream=self._render_stream,
+        )
+
+    def unbind_device_camera(self) -> None:
+        """Restore the host-driven camera path."""
+        self._device_camera_positions = None
+        self._device_camera_targets = None
+        self._device_camera_up = None
+        self._device_camera_fovs = None
+        self._device_camera_initialized = None
+        self._device_camera_state = None
+
     def _update_launch_params(
         self,
         frame_index_override: int | None = None,
@@ -947,6 +1092,7 @@ class PathTracingViewer:
         p.max_bounces = wp.uint32(self.max_bounces)
         p.direct_light_samples = wp.uint32(self.direct_light_samples)
         p.output_mode = int(self.OUTPUT_FINAL)
+        p.device_camera = self._device_camera_state
 
         if self.use_halton_jitter:
             jitter_x = self._halton(frame_index_value, 2) - 0.5
@@ -974,7 +1120,9 @@ class PathTracingViewer:
             float(self.env_intensity[2]),
         )
         ambient = getattr(self._scene, "usd_ambient_light", (0.0, 0.0, 0.0))
-        p.ambient_light = wp.vec3(float(ambient[0]), float(ambient[1]), float(ambient[2]))
+        p.ambient_light = wp.vec3(
+            float(ambient[0]), float(ambient[1]), float(ambient[2])
+        )
         p.env_rotation = float(self.env_rotation)
         flags = 0
         if self._env_map is None:
@@ -1206,7 +1354,11 @@ class PathTracingViewer:
         # Keep DLSS evaluation on its normal optimized command path; CUDA graph
         # replay remains enabled for non-DLSS rendering and USD transform/TLAS
         # update batches.
-        if self._dlss_enabled or not self.enable_cuda_graphs or self._cuda_graph_error is not None:
+        if (
+            self._dlss_enabled
+            or not self.enable_cuda_graphs
+            or self._cuda_graph_error is not None
+        ):
             launch()
             return
         # OptiX/RTX records resource-use events the first time a scene and its
@@ -1282,12 +1434,17 @@ class PathTracingViewer:
             else:
                 logger.warning("DLSS RR disabled by configuration.")
             self._dlss_status_reported = True
+        self._update_device_camera()
 
         current_view = self.camera.get_view_matrix().copy()
         current_proj = self.camera.get_projection_matrix().copy()
         current_view_inv = np.linalg.inv(current_view)
         current_proj_inv = np.linalg.inv(current_proj)
-        use_external_accum = self.accumulate_samples and not self._dlss_enabled
+        use_external_accum = (
+            self.accumulate_samples
+            and not self._dlss_enabled
+            and self._device_camera_state is None
+        )
         samples_this_frame = 1 if self._dlss_enabled else self.samples_per_frame
         reset_temporal = self._update_temporal_state(
             current_view, current_proj, use_external_accum

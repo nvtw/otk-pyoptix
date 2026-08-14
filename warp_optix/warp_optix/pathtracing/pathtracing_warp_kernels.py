@@ -180,6 +180,22 @@ class PhysicalSkyParams:
 
 
 @wp.struct
+class DeviceCameraState:
+    position: wp.vec3
+    forward: wp.vec3
+    right: wp.vec3
+    up: wp.vec3
+    tan_half_fov: wp.float32
+    aspect: wp.float32
+    previous_position: wp.vec3
+    previous_forward: wp.vec3
+    previous_right: wp.vec3
+    previous_up: wp.vec3
+    previous_tan_half_fov: wp.float32
+    previous_aspect: wp.float32
+
+
+@wp.struct
 class PathtraceLaunchParams:
     tlas: wp.uint64
     width: wp.uint32
@@ -189,6 +205,7 @@ class PathtraceLaunchParams:
     direct_light_samples: wp.uint32
     output_mode: wp.int32
 
+    device_camera: wp.array(dtype=DeviceCameraState)
     cam_pos: wp.vec3
     cam_forward: wp.vec3
     cam_right: wp.vec3
@@ -376,22 +393,42 @@ def _sample_texture_rgba(
         return wp.vec4(1.0, 1.0, 1.0, 1.0)
 
     scale = wp.float32(1.0 / 255.0)
-    c00 = wp.vec4(
-        wp.float32(texels[b00]), wp.float32(texels[b00 + 1]),
-        wp.float32(texels[b00 + 2]), wp.float32(texels[b00 + 3]),
-    ) * scale
-    c10 = wp.vec4(
-        wp.float32(texels[b10]), wp.float32(texels[b10 + 1]),
-        wp.float32(texels[b10 + 2]), wp.float32(texels[b10 + 3]),
-    ) * scale
-    c01 = wp.vec4(
-        wp.float32(texels[b01]), wp.float32(texels[b01 + 1]),
-        wp.float32(texels[b01 + 2]), wp.float32(texels[b01 + 3]),
-    ) * scale
-    c11 = wp.vec4(
-        wp.float32(texels[b11]), wp.float32(texels[b11 + 1]),
-        wp.float32(texels[b11 + 2]), wp.float32(texels[b11 + 3]),
-    ) * scale
+    c00 = (
+        wp.vec4(
+            wp.float32(texels[b00]),
+            wp.float32(texels[b00 + 1]),
+            wp.float32(texels[b00 + 2]),
+            wp.float32(texels[b00 + 3]),
+        )
+        * scale
+    )
+    c10 = (
+        wp.vec4(
+            wp.float32(texels[b10]),
+            wp.float32(texels[b10 + 1]),
+            wp.float32(texels[b10 + 2]),
+            wp.float32(texels[b10 + 3]),
+        )
+        * scale
+    )
+    c01 = (
+        wp.vec4(
+            wp.float32(texels[b01]),
+            wp.float32(texels[b01 + 1]),
+            wp.float32(texels[b01 + 2]),
+            wp.float32(texels[b01 + 3]),
+        )
+        * scale
+    )
+    c11 = (
+        wp.vec4(
+            wp.float32(texels[b11]),
+            wp.float32(texels[b11 + 1]),
+            wp.float32(texels[b11 + 2]),
+            wp.float32(texels[b11 + 3]),
+        )
+        * scale
+    )
 
     c0 = c00 * (1.0 - tx) + c10 * tx
     c1 = c01 * (1.0 - tx) + c11 * tx
@@ -430,6 +467,13 @@ def _compute_ray_dir(
     pixel_center = _compute_pixel_center(params, px, py)
     in_uv = wp.vec2(pixel_center[0] / w, pixel_center[1] / h)
     d = wp.vec2(in_uv[0] * 2.0 - 1.0, in_uv[1] * 2.0 - 1.0)
+    if params.device_camera.shape[0] > 0:
+        camera = params.device_camera[0]
+        return wp.normalize(
+            camera.forward
+            + camera.right * (d[0] * camera.tan_half_fov * camera.aspect)
+            - camera.up * (d[1] * camera.tan_half_fov)
+        )
     target = _mul_mat4_cm(params.proj_inv, wp.vec4(d[0], d[1], 0.01, 1.0))
     view_dir = wp.normalize(wp.vec3(target[0], target[1], target[2]))
     return wp.normalize(_mul_mat3x3_cm(params.view_inv, view_dir))
@@ -437,6 +481,8 @@ def _compute_ray_dir(
 
 @wp.func
 def _compute_ray_origin(params: PathtraceLaunchParams) -> wp.vec3:
+    if params.device_camera.shape[0] > 0:
+        return params.device_camera[0].position
     eye = _mul_mat4_cm(params.view_inv, wp.vec4(0.0, 0.0, 0.0, 1.0))
     return wp.vec3(eye[0], eye[1], eye[2])
 
@@ -1249,9 +1295,27 @@ def _environment_term_rtg(
 
 @wp.func
 def _compute_camera_motion_vector(
-    pixel_center: wp.vec2, motion_origin: wp.vec4, prev_mvp: Mat16f, dim: wp.vec2
+    params: PathtraceLaunchParams,
+    pixel_center: wp.vec2,
+    motion_origin: wp.vec4,
+    dim: wp.vec2,
 ) -> wp.vec2:
-    old = _mul_mat4_cm(prev_mvp, motion_origin)
+    if params.device_camera.shape[0] > 0:
+        camera = params.device_camera[0]
+        relative = wp.vec3(motion_origin[0], motion_origin[1], motion_origin[2])
+        if motion_origin[3] != 0.0:
+            relative = relative - camera.previous_position
+        depth = wp.dot(relative, camera.previous_forward)
+        if wp.abs(depth) < 1.0e-8:
+            depth = wp.where(depth >= 0.0, 1.0e-8, -1.0e-8)
+        horizontal = depth * camera.previous_tan_half_fov * camera.previous_aspect
+        vertical = depth * camera.previous_tan_half_fov
+        ndc_x = wp.dot(relative, camera.previous_right) / horizontal
+        ndc_y = -wp.dot(relative, camera.previous_up) / vertical
+        ox = (ndc_x * 0.5 + 0.5) * dim[0]
+        oy = (ndc_y * 0.5 + 0.5) * dim[1]
+        return wp.vec2(ox - pixel_center[0], oy - pixel_center[1])
+    old = _mul_mat4_cm(params.prev_mvp, motion_origin)
     inv_w = 1.0 / old[3]
     ox = ((old[0] * inv_w) * 0.5 + 0.5) * dim[0]
     oy = ((old[1] * inv_w) * 0.5 + 0.5) * dim[1]
@@ -1343,9 +1407,9 @@ def _compute_object_motion_vector(
         or instance_id >= int(params.instance_count)
     ):
         return _compute_camera_motion_vector(
+            params,
             pixel_center,
             wp.vec4(world_pos[0], world_pos[1], world_pos[2], 1.0),
-            params.prev_mvp,
             dim,
         )
 
@@ -1391,9 +1455,9 @@ def _compute_object_motion_vector(
                     prev_world = _transform_point(prev_t, prev_local)
 
     return _compute_camera_motion_vector(
+        params,
         pixel_center,
         wp.vec4(prev_world[0], prev_world[1], prev_world[2], 1.0),
-        params.prev_mvp,
         dim,
     )
 
@@ -2806,7 +2870,7 @@ def primary_raygen(params: PathtraceLaunchParams):
             aux_view_z = wp.float32(DLSS_INF_DISTANCE)
             motion_origin = wp.vec4(org_dir[0], org_dir[1], org_dir[2], 0.0)
         aux_motion = _compute_camera_motion_vector(
-            pixel_center, motion_origin, params.prev_mvp, dim
+            params, pixel_center, motion_origin, dim
         )
 
         params.color_output[y, x] = wp.vec4(
@@ -2863,9 +2927,9 @@ def primary_raygen(params: PathtraceLaunchParams):
     # Motion Vector Buffer (matches C++ reference behavior).
     if is_psr:
         aux_motion = _compute_camera_motion_vector(
+            params,
             pixel_center,
             wp.vec4(virtual_origin[0], virtual_origin[1], virtual_origin[2], 1.0),
-            params.prev_mvp,
             dim,
         )
     else:

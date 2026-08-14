@@ -418,6 +418,7 @@ class PathTracingViewerBackend:
         self._keys_down: set[int] = set()
         self._user_camera_control = False
         self._camera_override_this_frame = False
+        self._device_camera_bound = False
         self._global_transform = np.eye(4, dtype=np.float32)
         self._up_axis = 1
         self.set_up_axis(up_axis)
@@ -957,7 +958,7 @@ class PathTracingViewerBackend:
         if callable(parent):
             parent(time_sec)
         self.time = float(time_sec)
-        self._camera_override_this_frame = False
+        self._camera_override_this_frame = self._device_camera_bound
 
     def _render_to_mapped_buffer(
         self, mapped_image: wp.array, _frame_index: int, _elapsed: float
@@ -986,7 +987,9 @@ class PathTracingViewerBackend:
         self._flush_scene()
         now = time.perf_counter()
         if not self._camera_override_this_frame:
-            self._update_camera_from_input(max(0.0, min(now - self._last_wall_time, 0.1)))
+            self._update_camera_from_input(
+                max(0.0, min(now - self._last_wall_time, 0.1))
+            )
         self._last_wall_time = now
         if self._presenter is None:
             self._api.render_frame()
@@ -1128,6 +1131,40 @@ class PathTracingViewerBackend:
         if fov is not None:
             self._camera_fov = float(np.clip(fov, 5.0, 120.0))
         self._sync_camera()
+
+    def set_camera_look_at_device(
+        self,
+        positions: wp.array,
+        targets: wp.array,
+        *,
+        fov: float | wp.array = 45.0,
+        renderer_space: bool = False,
+    ) -> None:
+        """Bind CUDA eye and target arrays written by an application graph.
+
+        The first element of each array is consumed directly on the render
+        stream, without a device-to-host camera update.
+        """
+        camera_transform = (
+            np.eye(4, dtype=np.float32) if renderer_space else self._global_transform
+        )
+        world_up = np.zeros(3, dtype=np.float32)
+        world_up[self._up_axis] = 1.0
+        self._api.bind_device_camera(
+            positions,
+            targets,
+            fov=fov,
+            up=world_up,
+            camera_transform=camera_transform,
+        )
+        self._device_camera_bound = True
+        self._camera_override_this_frame = True
+
+    def clear_camera_look_at_device(self) -> None:
+        """Return camera control to the normal host-driven viewer path."""
+        self._api.unbind_device_camera()
+        self._device_camera_bound = False
+        self._camera_override_this_frame = False
 
     def set_camera(self, pos, pitch: float, yaw: float):
         """Set a framework-style camera unless interactive control has taken over."""
