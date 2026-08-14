@@ -58,6 +58,9 @@ def _create_material_dtype():
             ("normalTextureScale", np.float32),
             ("pbrRoughnessFactor", np.float32),
             ("pbrMetallicFactor", np.float32),
+            ("uSubdiv", np.float32),
+            ("vSubdiv", np.float32),
+            ("baseColorScale", np.float32),
             ("alphaMode", np.int32),
             ("alphaCutoff", np.float32),
             # Transmission/Volume
@@ -273,6 +276,9 @@ class MaterialManager:
         specular: float = 1.0,
         clearcoat: float = 0.0,
         clearcoat_roughness: float = 0.1,
+        u_subdiv: float = 0.0,
+        v_subdiv: float = 0.0,
+        base_color_scale: float = 0.9,
     ) -> int:
         """Add a PBR material with custom properties."""
         mat = self._create_default_material()
@@ -283,6 +289,7 @@ class MaterialManager:
         mat["specularFactor"] = specular
         mat["clearcoatFactor"] = clearcoat
         mat["clearcoatRoughness"] = clearcoat_roughness
+        self._set_checker_overlay(mat, u_subdiv, v_subdiv, base_color_scale)
         self._materials.append(mat)
         self._dirty = True
         return len(self._materials) - 1
@@ -307,6 +314,9 @@ class MaterialManager:
         thickness: float = 0.0,
         attenuation_color: tuple = (1.0, 1.0, 1.0),
         attenuation_distance: float = 1.0e10,
+        u_subdiv: float = 0.0,
+        v_subdiv: float = 0.0,
+        base_color_scale: float = 0.9,
     ) -> int:
         """Add a glTF PBR material using reference loader-compatible fields."""
         mat = self._create_default_material()
@@ -338,6 +348,7 @@ class MaterialManager:
             float(attenuation_color[2]),
         )
         mat["attenuationDistance"] = float(max(attenuation_distance, 1.0e-6))
+        self._set_checker_overlay(mat, u_subdiv, v_subdiv, base_color_scale)
         # Keep this information available although current pipeline does not use culling flags.
         mat["unlit"] = 0
 
@@ -359,6 +370,22 @@ class MaterialManager:
         self._dirty = True
         return len(self._materials) - 1
 
+    @staticmethod
+    def _set_checker_overlay(
+        mat, u_subdiv: float, v_subdiv: float, base_color_scale: float
+    ) -> None:
+        """Configure the procedural UV checker overlay."""
+        u_subdiv = float(u_subdiv)
+        v_subdiv = float(v_subdiv)
+        base_color_scale = float(base_color_scale)
+        if u_subdiv < 0.0 or v_subdiv < 0.0:
+            raise ValueError("u_subdiv and v_subdiv must be nonnegative")
+        if not 0.0 <= base_color_scale <= 1.0:
+            raise ValueError("base_color_scale must be in the range [0, 1]")
+        mat["uSubdiv"] = u_subdiv
+        mat["vSubdiv"] = v_subdiv
+        mat["baseColorScale"] = base_color_scale
+
     def clear(self):
         """Remove all materials."""
         self._materials.clear()
@@ -375,6 +402,9 @@ class MaterialManager:
         mat["normalTextureScale"] = 1.0
         mat["pbrRoughnessFactor"] = 0.5
         mat["pbrMetallicFactor"] = 0.0
+        mat["uSubdiv"] = 0.0
+        mat["vSubdiv"] = 0.0
+        mat["baseColorScale"] = 0.9
         mat["alphaMode"] = ALPHA_OPAQUE
         mat["alphaCutoff"] = 0.5
 

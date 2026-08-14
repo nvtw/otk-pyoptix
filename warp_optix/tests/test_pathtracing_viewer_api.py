@@ -64,6 +64,9 @@ class _FakePathTracerAPI:
         specular=1.0,
         clearcoat=0.0,
         clearcoat_roughness=0.1,
+        u_subdiv=0.0,
+        v_subdiv=0.0,
+        base_color_scale=0.9,
     ):
         self.materials.append(
             (
@@ -74,6 +77,9 @@ class _FakePathTracerAPI:
                 specular,
                 clearcoat,
                 clearcoat_roughness,
+                u_subdiv,
+                v_subdiv,
+                base_color_scale,
             )
         )
         return len(self.materials) - 1
@@ -182,7 +188,7 @@ def test_reference_sky_and_srgb_color_mapping():
         api.materials[0][0], (0.60382736, 0.60382736, 0.60382736), rtol=1.0e-6
     )
     assert api.materials[0][1:3] == (0.25, 0.75)
-    assert api.materials[0][3:] == (1.5, 1.0, 0.0, 0.1)
+    assert api.materials[0][3:] == (1.5, 1.0, 0.0, 0.1, 0.0, 0.0, 0.9)
 
     viewer.set_sky_parameters(
         sun_direction=(0.0, 1.0, 0.0),
@@ -307,7 +313,7 @@ def test_logged_instances_apply_up_axis_materials_and_frame_lifecycle():
     xforms = np.array(((1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0),), dtype=np.float32)
     scales = np.array(((2.0, 3.0, 4.0),), dtype=np.float32)
     colors = np.array(((1.0, 0.0, 0.0),), dtype=np.float32)
-    materials = np.array(((0.2, 0.6, 0.0, 0.0),), dtype=np.float32)
+    materials = np.array(((0.2, 0.6, 12.5, 7.25),), dtype=np.float32)
 
     viewer.log_instances("batch", "triangle", xforms, scales, colors, materials)
     instance = api.scene._instances[0]
@@ -317,7 +323,15 @@ def test_logged_instances_apply_up_axis_materials_and_frame_lifecycle():
     )
     assert instance.visible is True
     assert api.materials[instance.material_id][1:3] == (0.2, 0.6)
-    assert api.materials[instance.material_id][3:] == (1.5, 1.0, 0.0, 0.1)
+    assert api.materials[instance.material_id][3:] == (
+        1.5,
+        1.0,
+        0.0,
+        0.1,
+        12.5,
+        7.25,
+        0.9,
+    )
 
     viewer.end_frame()
 

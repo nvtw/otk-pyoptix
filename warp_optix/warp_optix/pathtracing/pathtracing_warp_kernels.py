@@ -104,6 +104,9 @@ class CompactMaterial:
     emissive: wp.vec3
     roughness: wp.float32
     metallic: wp.float32
+    u_subdiv: wp.float32
+    v_subdiv: wp.float32
+    base_color_scale: wp.float32
     transmission: wp.float32
     ior: wp.float32
     specular_color: wp.vec3
@@ -2521,6 +2524,14 @@ def _evaluate_material_from_payload(
             base_color[2] * base_tex[2],
         )
         opacity = opacity * base_tex[3]
+
+    if mat.u_subdiv > 0.0 and mat.v_subdiv > 0.0:
+        checker_u = wp.floor(uv_base[0] * mat.u_subdiv)
+        checker_v = wp.floor(uv_base[1] * mat.v_subdiv)
+        checker_sum = checker_u + checker_v
+        checker = checker_sum - wp.floor(checker_sum * 0.5) * 2.0
+        if checker >= 1.0:
+            base_color = base_color * wp.clamp(mat.base_color_scale, 0.0, 1.0)
 
     # C++ lines 152-161: apply metallic-roughness texture
     uv_mr = _apply_uv_transform(

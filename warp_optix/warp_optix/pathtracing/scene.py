@@ -271,6 +271,8 @@ def _update_device_instance_materials(
     compact_materials[material_index, 2] = _srgb_channel_to_linear(color[2])
     compact_materials[material_index, 6] = wp.clamp(material[0], 0.0, 1.0)
     compact_materials[material_index, 7] = wp.clamp(material[1], 0.0, 1.0)
+    compact_materials[material_index, 8] = wp.max(material[2], 0.0)
+    compact_materials[material_index, 9] = wp.max(material[3], 0.0)
 
 
 def _create_vertex_buffers_dtype():
@@ -1872,6 +1874,9 @@ class Scene:
                 ("emissive", np.float32, (3,)),
                 ("roughness", np.float32),
                 ("metallic", np.float32),
+                ("uSubdiv", np.float32),
+                ("vSubdiv", np.float32),
+                ("baseColorScale", np.float32),
                 ("transmission", np.float32),
                 ("ior", np.float32),
                 ("specularColor", np.float32, (3,)),
@@ -1910,6 +1915,9 @@ class Scene:
             compact[i]["emissive"] = mat["emissiveFactor"]
             compact[i]["roughness"] = mat["pbrRoughnessFactor"]
             compact[i]["metallic"] = mat["pbrMetallicFactor"]
+            compact[i]["uSubdiv"] = mat["uSubdiv"]
+            compact[i]["vSubdiv"] = mat["vSubdiv"]
+            compact[i]["baseColorScale"] = mat["baseColorScale"]
             compact[i]["transmission"] = mat["transmissionFactor"]
             compact[i]["ior"] = mat["ior"]
             compact[i]["specularColor"] = mat["specularColorFactor"]

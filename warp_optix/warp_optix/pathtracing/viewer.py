@@ -610,10 +610,14 @@ class PathTracingViewerBackend:
         color_key = tuple(round(float(v), 2) for v in color[:3])
         roughness = round(float(np.clip(material[0], 0.0, 1.0)), 3)
         metallic = round(float(np.clip(material[1], 0.0, 1.0)), 3)
+        u_subdiv = round(max(float(material[2]), 0.0), 3)
+        v_subdiv = round(max(float(material[3]), 0.0), 3)
         key = (
             *color_key,
             roughness,
             metallic,
+            u_subdiv,
+            v_subdiv,
             self._default_ior,
             self._default_specular,
             self._default_clearcoat,
@@ -631,6 +635,8 @@ class PathTracingViewerBackend:
             specular=self._default_specular,
             clearcoat=self._default_clearcoat,
             clearcoat_roughness=self._default_clearcoat_roughness,
+            u_subdiv=u_subdiv,
+            v_subdiv=v_subdiv,
         )
         self._material_ids[key] = material_id
         self._scene_dirty = True

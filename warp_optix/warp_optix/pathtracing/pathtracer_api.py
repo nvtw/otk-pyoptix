@@ -463,6 +463,9 @@ class PathTracerAPI:
         specular: float = 1.0,
         clearcoat: float = 0.0,
         clearcoat_roughness: float = 0.1,
+        u_subdiv: float = 0.0,
+        v_subdiv: float = 0.0,
+        base_color_scale: float = 0.9,
     ) -> int:
         scene = self._require_scene()
         return int(
@@ -474,6 +477,9 @@ class PathTracerAPI:
                 specular=min(1.0, max(0.0, float(specular))),
                 clearcoat=min(1.0, max(0.0, float(clearcoat))),
                 clearcoat_roughness=min(1.0, max(0.001, float(clearcoat_roughness))),
+                u_subdiv=float(u_subdiv),
+                v_subdiv=float(v_subdiv),
+                base_color_scale=float(base_color_scale),
             )
         )
 
