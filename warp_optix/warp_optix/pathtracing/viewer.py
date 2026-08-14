@@ -1090,9 +1090,10 @@ class PathTracingViewerBackend:
         *,
         fov: float | None = None,
         renderer_space: bool = False,
+        force: bool = False,
     ) -> None:
         """Set a level camera from an eye and target in physics or renderer space."""
-        if self._user_camera_control:
+        if self._user_camera_control and not force:
             return
         position = np.asarray(position, dtype=np.float32).reshape(3)
         target = np.asarray(target, dtype=np.float32).reshape(3)
