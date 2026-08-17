@@ -43,7 +43,7 @@ class PrimaryPayload:
       9: materialId       (uint32)
      10: bitangentSign    (float)
      11: instanceId       (int as uint32)
-     12: meshId           (uint32)
+     12: frontFace        (uint32)
      13: primitiveId      (uint32)
      14-16: barycentrics   (float3)
      17-18: uv1            (float2)
@@ -56,7 +56,7 @@ class PrimaryPayload:
     material_id: wp.uint32
     bitangent_sign: wp.float32
     instance_id: wp.int32
-    mesh_id: wp.uint32
+    front_face: wp.uint32
     primitive_id: wp.uint32
     barycentrics: wp.vec3
     uv1: wp.vec2
@@ -1578,7 +1578,7 @@ def _init_primary_payload() -> PrimaryPayload:
     p.material_id = wp.uint32(0)
     p.bitangent_sign = 0.0
     p.instance_id = wp.int32(0)
-    p.mesh_id = wp.uint32(0)
+    p.front_face = wp.uint32(1)
     p.primitive_id = wp.uint32(0)
     p.barycentrics = wp.vec3(0.0, 0.0, 0.0)
     p.uv1 = wp.vec2(0.0, 0.0)
@@ -1623,6 +1623,11 @@ def _payload_get_bitangentSign(p: PrimaryPayload) -> wp.float32:
 @wp.func
 def _payload_get_instanceId(p: PrimaryPayload) -> wp.int32:
     return p.instance_id
+
+
+@wp.func
+def _payload_get_front_face(p: PrimaryPayload) -> wp.uint32:
+    return p.front_face
 
 
 @wp.func
@@ -1814,6 +1819,13 @@ def _offset_ray(p: wp.vec3, n: wp.vec3) -> wp.vec3:
     magnitude = wp.length(p)
     offset = epsilon * magnitude
     return p + n * offset
+
+
+@wp.func
+def _offset_ray_for_direction(p: wp.vec3, n: wp.vec3, direction: wp.vec3) -> wp.vec3:
+    """Offset toward the side of the surface containing the outgoing ray."""
+    offset_normal = n if wp.dot(direction, n) >= 0.0 else -n
+    return _offset_ray(p, offset_normal)
 
 
 # --- computeLobeWeights + findLobe (pbr_common.h lines 528-593) ---
@@ -2953,6 +2965,10 @@ def primary_raygen(params: PathtraceLaunchParams):
         _payload_get_uv(payload),
         _payload_get_uv1(payload),
     )
+    if pbr_mat.is_thin_walled == 0 and _payload_get_front_face(payload) == wp.uint32(0):
+        exterior_ior = pbr_mat.ior1
+        pbr_mat.ior1 = pbr_mat.ior2
+        pbr_mat.ior2 = exterior_ior
 
     aux_view_z = view_depth
 
@@ -3124,14 +3140,13 @@ def primary_raygen(params: PathtraceLaunchParams):
     sec_direction = bsdf_sample.direction
     sec_throughput = bsdf_sample.bsdf_over_pdf
     bsdf_pdf = wp.max(bsdf_sample.pdf, 0.0001)
+    sec_event_type = bsdf_sample.event_type
     is_glossy_reflection = wp.bool(
         bsdf_sample.event_type == BSDF_EVENT_GLOSSY_REFLECTION
     )
     bsdf_absorbed = wp.bool(bsdf_sample.event_type == BSDF_EVENT_ABSORB)
 
-    # Match template behavior exactly: first secondary segment starts at `origin`
-    # from Step 1 (already offset with pbrMat.Ng at the primary hit).
-    sec_origin = origin
+    sec_origin = _offset_ray_for_direction(hit_pos, pbr_mat.Ng, sec_direction)
     max_depth = (
         wp.int32(params.max_bounces)
         if params.max_bounces > wp.uint32(0)
@@ -3153,7 +3168,9 @@ def primary_raygen(params: PathtraceLaunchParams):
             1.0e16,
             0.0,
             wp.uint32(255),
-            ray_flags,
+            wp.uint32(0)
+            if (sec_event_type & BSDF_EVENT_TRANSMISSION) != 0
+            else ray_flags,
             wp.uint32(0),
             wp.uint32(2),
             wp.uint32(0),
@@ -3185,6 +3202,12 @@ def primary_raygen(params: PathtraceLaunchParams):
         sec_pbr = _evaluate_material_from_payload(
             params, sec_mat_id, sec_normal, sec_tangent, sec_bsign, sec_uv, sec_uv1
         )
+        if sec_pbr.is_thin_walled == 0 and _payload_get_front_face(
+            sec_payload
+        ) == wp.uint32(0):
+            exterior_ior = sec_pbr.ior1
+            sec_pbr.ior1 = sec_pbr.ior2
+            sec_pbr.ior2 = exterior_ior
 
         # C++ secondary_rchit.h lines 278-283: path regularization
         if use_path_reg:
@@ -3320,8 +3343,14 @@ def primary_raygen(params: PathtraceLaunchParams):
         ):
             break
 
+        completed_thick_exit = wp.bool(
+            sec_pbr.is_thin_walled == 0
+            and _payload_get_front_face(sec_payload) == wp.uint32(0)
+            and (sec_sample.event_type & BSDF_EVENT_TRANSMISSION) != 0
+        )
+
         # Russian roulette.
-        if depth >= 1:
+        if depth >= 1 and not completed_thick_exit:
             max_comp = wp.max(
                 sec_throughput[0], wp.max(sec_throughput[1], sec_throughput[2])
             )
@@ -3331,10 +3360,14 @@ def primary_raygen(params: PathtraceLaunchParams):
                 break
             sec_throughput = sec_throughput / rr_prob
 
-        sec_origin = _offset_ray(sec_hit_pos, sec_pbr.Ng)
+        sec_origin = _offset_ray_for_direction(
+            sec_hit_pos, sec_pbr.Ng, sec_sample.direction
+        )
         sec_direction = wp.normalize(sec_sample.direction)
+        sec_event_type = sec_sample.event_type
         bsdf_pdf = wp.max(sec_sample.pdf, 0.0001)
-        depth = depth + wp.int32(1)
+        if not completed_thick_exit:
+            depth = depth + wp.int32(1)
 
     # Specular albedo (pre-integrated environment term).
     v_dot_n = wp.max(wp.dot(to_eye, pbr_mat.normal), 0.0)
@@ -3909,7 +3942,7 @@ def primary_closest_hit(params: PathtraceLaunchParams):
     payload.material_id = wp.uint32(geo.material_id)
     payload.bitangent_sign = geo.bitangent_sign
     payload.instance_id = wp.int32(inst_id)
-    payload.mesh_id = wp.uint32(inst_id)
+    payload.front_face = wp.uint32(1) if wp.optix_is_front_face_hit() else wp.uint32(0)
     payload.primitive_id = wp.uint32(tri_id)
     payload.barycentrics = bary3
     payload.uv1 = geo.uv1
