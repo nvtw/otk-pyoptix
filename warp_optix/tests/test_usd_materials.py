@@ -4,6 +4,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 from warp_optix.pathtracing import usd_loader
 from warp_optix.pathtracing.usd_loader import (
@@ -12,6 +13,7 @@ from warp_optix.pathtracing.usd_loader import (
     _decode_udim,
     _fit_textures_to_budget,
     _normalize_mesh_uvs_for_udim_atlas,
+    _rebase_missing_texture,
 )
 
 
@@ -28,6 +30,19 @@ def test_texture_budget_proportionally_downscales_large_atlas():
     assert resized[0].shape[0] < textures[0].shape[0]
     assert all(texture.flags.c_contiguous for texture in resized)
     assert _fit_textures_to_budget(textures, max_bytes=4096) is textures
+
+
+def test_missing_texture_rebases_to_stage_local_texture_tree(tmp_path):
+    stage_path = tmp_path / "variant" / "scene.usd"
+    stage_path.parent.mkdir()
+    stage_path.touch()
+    texture = stage_path.parent / "textures" / "kit" / "albedo.1001.png"
+    texture.parent.mkdir(parents=True)
+    texture.touch()
+
+    broken = tmp_path / "textures" / "kit" / "albedo.<UDIM>.png"
+
+    assert _rebase_missing_texture(stage_path, broken) == texture.with_name("albedo.<UDIM>.png")
 
 
 def test_omniverse_ambient_light_metadata_is_preserved():
@@ -57,8 +72,11 @@ class _Input:
 
 
 class _Shader:
-    def __init__(self, inputs):
+    def __init__(self, inputs, shader_id="", source_asset="", sub_identifier=""):
         self._inputs = [_Input(name, value) for name, value in inputs.items()]
+        self._shader_id = shader_id
+        self._source_asset = source_asset
+        self._sub_identifier = sub_identifier
 
     def GetInputs(self):
         return self._inputs
@@ -67,7 +85,15 @@ class _Shader:
         return None
 
     def GetIdAttr(self):
-        return _Input("id", "")
+        return _Input("id", self._shader_id)
+
+    def GetSourceAsset(self, context):
+        if context != "mdl" or not self._source_asset:
+            return None
+        return type("Asset", (), {"resolvedPath": "", "path": self._source_asset})()
+
+    def GetSourceAssetSubIdentifier(self, context):
+        return self._sub_identifier if context == "mdl" else ""
 
 
 def test_separate_roughness_map_is_packed_with_metallic_constant(tmp_path):
@@ -142,6 +168,51 @@ def test_fresnel_emissive_mdl_inputs_are_preserved(monkeypatch):
     np.testing.assert_allclose(result["base_color"][:3], (0.001, 0.012, 0.0))
     np.testing.assert_allclose(result["emissive_factor"], (2.114, 7.0, 0.0))
     assert result["roughness"] == 0.05
+
+
+def test_omniglass_source_asset_selects_transmission_without_authored_inputs(monkeypatch):
+    shader = _Shader({}, source_asset="OmniGlass.mdl", sub_identifier="OmniGlass")
+    monkeypatch.setattr(usd_loader, "_surface_shader", lambda material, UsdShade: shader)
+    material = type("Material", (), {"GetInputs": lambda self: []})()
+
+    result = usd_loader._material_to_pbr(material, object(), lambda path, srgb: -1)
+
+    assert result["transmission"] == 1.0
+    assert result["roughness"] == 0.0
+    assert result["thickness"] == 1.0
+
+
+def test_omnipbr_honors_disabled_orm_and_surface_controls(monkeypatch, tmp_path):
+    orm_path = tmp_path / "orm.png"
+    orm_path.touch()
+    asset = type("Asset", (), {"resolvedPath": str(orm_path), "path": ""})()
+    shader = _Shader(
+        {
+            "ORM_texture": asset,
+            "enable_ORM_texture": False,
+            "specular_level": 0.4,
+            "albedo_add": 0.2,
+            "albedo_desaturation": 0.3,
+            "texture_scale": (2.0, 3.0),
+            "texture_translate": (0.1, 0.25),
+            "texture_rotate": 90.0,
+        },
+        source_asset="OmniPBR.mdl",
+        sub_identifier="OmniPBR",
+    )
+    monkeypatch.setattr(usd_loader, "_surface_shader", lambda material, UsdShade: shader)
+    material = type("Material", (), {"GetInputs": lambda self: []})()
+
+    result = usd_loader._material_to_pbr(material, object(), lambda path, srgb: 3)
+
+    assert result["metallic_roughness_texture"]["index"] == -1
+    assert result["occlusion_texture"]["index"] == -1
+    assert result["specular"] == 0.4
+    assert result["base_color_add"] == 0.2
+    assert result["base_color_desaturation"] == 0.3
+    assert result["base_color_texture"]["transform"]["scale"] == (2.0, 3.0)
+    assert result["base_color_texture"]["transform"]["offset"] == (0.1, 0.25)
+    assert result["base_color_texture"]["transform"]["rotation"] == pytest.approx(np.pi / 2.0)
 
 
 def test_udim_tiles_decode_to_horizontal_atlas(tmp_path):

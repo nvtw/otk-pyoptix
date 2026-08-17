@@ -1877,6 +1877,10 @@ class Scene:
                 ("uSubdiv", np.float32),
                 ("vSubdiv", np.float32),
                 ("baseColorScale", np.float32),
+                ("baseColorAdd", np.float32),
+                ("baseColorDesaturation", np.float32),
+                ("alphaMode", np.int32),
+                ("alphaCutoff", np.float32),
                 ("transmission", np.float32),
                 ("ior", np.float32),
                 ("specularColor", np.float32, (3,)),
@@ -1885,6 +1889,8 @@ class Scene:
                 ("clearcoatRoughness", np.float32),
                 ("sheenRoughness", np.float32),
                 ("occlusion", np.float32),
+                ("occlusionTexIndex", np.int32),
+                ("occlusionTexCoord", np.int32),
                 ("sheenColor", np.float32, (3,)),
                 ("diffuseTransmissionFactor", np.float32),
                 ("diffuseTransmissionColor", np.float32, (3,)),
@@ -1905,6 +1911,7 @@ class Scene:
                 ("metallicRoughnessUvTransform", np.float32, (6,)),
                 ("normalUvTransform", np.float32, (6,)),
                 ("emissiveUvTransform", np.float32, (6,)),
+                ("occlusionUvTransform", np.float32, (6,)),
                 ("clearcoatNormalUvTransform", np.float32, (6,)),
             ],
             align=True,
@@ -1918,6 +1925,10 @@ class Scene:
             compact[i]["uSubdiv"] = mat["uSubdiv"]
             compact[i]["vSubdiv"] = mat["vSubdiv"]
             compact[i]["baseColorScale"] = mat["baseColorScale"]
+            compact[i]["baseColorAdd"] = mat["pbrDiffuseFactor"][0]
+            compact[i]["baseColorDesaturation"] = mat["pbrDiffuseFactor"][1]
+            compact[i]["alphaMode"] = mat["alphaMode"]
+            compact[i]["alphaCutoff"] = mat["alphaCutoff"]
             compact[i]["transmission"] = mat["transmissionFactor"]
             compact[i]["ior"] = mat["ior"]
             compact[i]["specularColor"] = mat["specularColorFactor"]
@@ -1926,6 +1937,8 @@ class Scene:
             compact[i]["clearcoatRoughness"] = mat["clearcoatRoughness"]
             compact[i]["sheenRoughness"] = mat["sheenRoughnessFactor"]
             compact[i]["occlusion"] = mat["occlusionStrength"]
+            compact[i]["occlusionTexIndex"] = mat["occlusionTexture"]["index"]
+            compact[i]["occlusionTexCoord"] = mat["occlusionTexture"]["texCoord"]
             compact[i]["sheenColor"] = mat["sheenColorFactor"]
             compact[i]["diffuseTransmissionFactor"] = mat["diffuseTransmissionFactor"]
             compact[i]["diffuseTransmissionColor"] = mat["diffuseTransmissionColor"]
@@ -1981,6 +1994,14 @@ class Scene:
                 mat["emissiveTexture"]["uvTransform10"],
                 mat["emissiveTexture"]["uvTransform11"],
                 mat["emissiveTexture"]["uvTransform12"],
+            )
+            compact[i]["occlusionUvTransform"] = (
+                mat["occlusionTexture"]["uvTransform00"],
+                mat["occlusionTexture"]["uvTransform01"],
+                mat["occlusionTexture"]["uvTransform02"],
+                mat["occlusionTexture"]["uvTransform10"],
+                mat["occlusionTexture"]["uvTransform11"],
+                mat["occlusionTexture"]["uvTransform12"],
             )
             compact[i]["clearcoatNormalUvTransform"] = (
                 mat["clearcoatNormalTexture"]["uvTransform00"],

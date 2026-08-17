@@ -323,6 +323,7 @@ def _add_gltf_material(
         "metallic_roughness_texture": _tex_info(pbr.get("metallicRoughnessTexture")),
         "emissive_texture": _tex_info(m.get("emissiveTexture")),
         "occlusion_texture": _tex_info(m.get("occlusionTexture")),
+        "occlusion_strength": float(m.get("occlusionTexture", {}).get("strength", 1.0)),
         "transmission": float(ext.get("KHR_materials_transmission", {}).get("transmissionFactor", 0.0)),
         "ior": float(ext.get("KHR_materials_ior", {}).get("ior", 1.5)),
         "thickness": float(ext.get("KHR_materials_volume", {}).get("thicknessFactor", 0.0)),

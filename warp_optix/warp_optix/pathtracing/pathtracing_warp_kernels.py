@@ -107,6 +107,10 @@ class CompactMaterial:
     u_subdiv: wp.float32
     v_subdiv: wp.float32
     base_color_scale: wp.float32
+    base_color_add: wp.float32
+    base_color_desaturation: wp.float32
+    alpha_mode: wp.int32
+    alpha_cutoff: wp.float32
     transmission: wp.float32
     ior: wp.float32
     specular_color: wp.vec3
@@ -115,6 +119,8 @@ class CompactMaterial:
     clearcoat_roughness: wp.float32
     sheen_roughness: wp.float32
     occlusion: wp.float32
+    occlusion_tex_index: wp.int32
+    occlusion_tex_coord: wp.int32
     sheen_color: wp.vec3
     diffuse_transmission_factor: wp.float32
     diffuse_transmission_color: wp.vec3
@@ -135,6 +141,7 @@ class CompactMaterial:
     metallic_roughness_uv_transform: Vec6f
     normal_uv_transform: Vec6f
     emissive_uv_transform: Vec6f
+    occlusion_uv_transform: Vec6f
     clearcoat_normal_uv_transform: Vec6f
 
 
@@ -2525,6 +2532,23 @@ def _evaluate_material_from_payload(
         )
         opacity = opacity * base_tex[3]
 
+    if mat.base_color_desaturation > 0.0:
+        luminance = 0.2126 * base_color[0] + 0.7152 * base_color[1] + 0.0722 * base_color[2]
+        amount = wp.clamp(mat.base_color_desaturation, 0.0, 1.0)
+        base_color = base_color * (1.0 - amount) + wp.vec3(luminance) * amount
+    if mat.base_color_add != 0.0:
+        base_color = base_color + wp.vec3(mat.base_color_add)
+        base_color = wp.vec3(
+            wp.max(base_color[0], 0.0),
+            wp.max(base_color[1], 0.0),
+            wp.max(base_color[2], 0.0),
+        )
+
+    if mat.alpha_mode == wp.int32(0):
+        opacity = 1.0
+    elif mat.alpha_mode == wp.int32(1):
+        opacity = 1.0 if opacity >= mat.alpha_cutoff else 0.0
+
     if mat.u_subdiv > 0.0 and mat.v_subdiv > 0.0:
         checker_u = wp.floor(uv_base[0] * mat.u_subdiv)
         checker_v = wp.floor(uv_base[1] * mat.v_subdiv)
@@ -2538,6 +2562,7 @@ def _evaluate_material_from_payload(
         _select_uv(mat.metallic_roughness_tex_coord, uv, uv1),
         mat.metallic_roughness_uv_transform,
     )
+    mr_tex = wp.vec4(1.0)
     if mat.metallic_roughness_tex_index >= 0:
         mr_tex = _sample_texture_rgba(params, mat.metallic_roughness_tex_index, uv_mr)
         # C++ line 158: r = max(sqrt(max(outMat.roughness.x, 0)) * mr.y, MIN)
@@ -2547,6 +2572,16 @@ def _evaluate_material_from_payload(
         )
         roughness_sq = r_linear * r_linear
         metallic = wp.clamp(metallic * mr_tex[2], 0.0, 1.0)
+
+    occlusion = 1.0
+    if mat.occlusion_tex_index >= 0:
+        ao = mr_tex[0]
+        if mat.occlusion_tex_index != mat.metallic_roughness_tex_index:
+            uv_ao = _apply_uv_transform(
+                _select_uv(mat.occlusion_tex_coord, uv, uv1), mat.occlusion_uv_transform
+            )
+            ao = _sample_texture_rgba(params, mat.occlusion_tex_index, uv_ao)[0]
+        occlusion = 1.0 + wp.clamp(mat.occlusion, 0.0, 1.0) * (ao - 1.0)
 
     if params.override_roughness > 0.0:
         r_override = wp.clamp(params.override_roughness, MICROFACET_MIN_ROUGHNESS, 1.0)
@@ -2623,8 +2658,8 @@ def _evaluate_material_from_payload(
     out.ior2 = ior2
     out.clearcoat = clearcoat
     out.clearcoat_roughness = clearcoat_roughness
-    out.occlusion = 1.0
-    out.is_thin_walled = 1
+    out.occlusion = occlusion
+    out.is_thin_walled = mat.is_thin_walled
     out.sheen_color = sheen_color
     out.diffuse_transmission_color = diffuse_transmission_color
     out.Nc = Nc

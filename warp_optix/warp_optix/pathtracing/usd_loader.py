@@ -87,6 +87,25 @@ def _surface_shader(material, UsdShade):
     return None
 
 
+def _shader_source_identity(shader) -> str:
+    """Return a stable shader identity for id- and source-asset-based networks."""
+    if not shader:
+        return ""
+    shader_id = str(shader.GetIdAttr().Get() or "")
+    if shader_id:
+        return shader_id
+    for context in ("mdl", "universal", ""):
+        try:
+            source_asset = shader.GetSourceAsset(context)
+            sub_identifier = shader.GetSourceAssetSubIdentifier(context)
+        except Exception:
+            continue
+        asset_path = _asset_path(source_asset)
+        if asset_path or sub_identifier:
+            return f"{asset_path or ''}:{sub_identifier or ''}"
+    return ""
+
+
 def _asset_path(value: Any) -> Path | None:
     if value is None:
         return None
@@ -94,6 +113,29 @@ def _asset_path(value: Any) -> Path | None:
     authored = getattr(value, "path", "") or getattr(value, "authoredPath", "")
     path = str(resolved or authored)
     return Path(path) if path else None
+
+
+def _texture_candidate_exists(path: Path) -> bool:
+    if "<UDIM>" not in str(path):
+        return path.is_file()
+    return any(path.parent.glob(path.name.replace("<UDIM>", "*")))
+
+
+def _rebase_missing_texture(stage_path: Path, texture_path: Path) -> Path:
+    """Rebase a broken texture asset path to a stage-local textures directory."""
+    resolved = texture_path if texture_path.is_absolute() else stage_path.parent / texture_path
+    resolved = resolved.resolve()
+    if _texture_candidate_exists(resolved):
+        return resolved
+
+    parts = resolved.parts
+    lowered = tuple(part.lower() for part in parts)
+    if "textures" in lowered:
+        marker = lowered.index("textures")
+        candidate = stage_path.parent.joinpath(*parts[marker:]).resolve()
+        if _texture_candidate_exists(candidate):
+            return candidate
+    return resolved
 
 
 def _dome_texture(prim, UsdLux) -> Path | None:
@@ -263,7 +305,17 @@ def _material_to_pbr(
 ) -> dict[str, Any]:
     shader = _surface_shader(material, UsdShade)
     values = _material_inputs(material, shader)
-    shader_id = str(shader.GetIdAttr().Get() or "") if shader else ""
+    shader_id = _shader_source_identity(shader)
+
+    texture_scale = _as_float_tuple(values.get("texture_scale"), 2, (1.0, 1.0))
+    texture_offset = _as_float_tuple(values.get("texture_translate"), 2, (0.0, 0.0))
+    texture_rotation = np.deg2rad(float(values.get("texture_rotate", 0.0)))
+    texture_transform = {
+        "scale": texture_scale,
+        "offset": texture_offset,
+        "rotation": texture_rotation,
+    }
+    texture_uv_set = int(values.get("uv_space_index", 0))
 
     def texture(*names: str, srgb: bool = False) -> dict[str, int]:
         path = None
@@ -281,14 +333,19 @@ def _material_to_pbr(
             index, columns, rows = registered
             return {
                 "index": index,
-                "texCoord": 0,
+                "texCoord": texture_uv_set,
+                "transform": texture_transform,
                 # UV normalization is mesh-specific. RacerX B3, for example,
                 # binds a four-tile material to a chassis whose UVs span only
                 # three tiles. Keep the atlas grid as loader metadata instead
                 # of applying one material-wide transform.
                 "udim_grid": (columns, rows),
             }
-        info = {"index": registered, "texCoord": 0}
+        info = {
+            "index": registered,
+            "texCoord": texture_uv_set,
+            "transform": texture_transform,
+        }
         # A material may combine a stitched UDIM atlas (for example albedo)
         # with a single numbered tile (for example emissive.1003).  Record
         # the latter so its UVs can be remapped back from atlas space.
@@ -338,8 +395,11 @@ def _material_to_pbr(
             "metallic": 1.0 if has_orm else metallic,
             "roughness": 1.0 if has_orm else roughness,
             "ior": float(values.get("ior", 1.5)),
-            "transmission": max(0.0, 1.0 - opacity),
-            "alpha_mode": "BLEND" if opacity < 0.999 else "OPAQUE",
+            "transmission": 0.0,
+            "alpha_mode": "MASK"
+            if float(values.get("opacityThreshold", 0.0)) > 0.0
+            else ("BLEND" if opacity < 0.999 else "OPAQUE"),
+            "alpha_cutoff": float(values.get("opacityThreshold", 0.5)),
             "base_color_texture": texture("diffuseColor", srgb=True),
             "normal_texture": texture("normal"),
             "metallic_roughness_texture": orm_texture,
@@ -350,7 +410,8 @@ def _material_to_pbr(
         }
 
     # NVIDIA MDL OmniPBR/OmniGlass conventions used by Marbles.
-    is_glass = "glass_color" in values or "glass_ior" in values
+    identity_lower = shader_id.lower()
+    is_glass = "omniglass" in identity_lower or "glass_color" in values or "glass_ior" in values
     diffuse_constant = _as_float_tuple(
         values.get("diffuse_color_constant", values.get("albedo_color")),
         3,
@@ -376,16 +437,18 @@ def _material_to_pbr(
         (0.0, 0.0, 0.0),
     )
     emissive_scale = float(values.get("emissive_intensity", 0.0)) if emission_enabled else 0.0
-    orm_texture = texture("ORM_texture")
+    orm_enabled = bool(values.get("enable_ORM_texture", True))
+    orm_texture = texture("ORM_texture") if orm_enabled else {"index": -1, "texCoord": texture_uv_set}
     has_orm = orm_texture["index"] >= 0
     normal_texture = texture("normalmap_texture")
     if normal_texture["index"] >= 0:
         normal_texture["scale"] = float(values.get("bump_factor", 1.0))
     metallic = float(values.get("metallic_constant", 0.0))
+    roughness_default = 0.0 if is_glass else 0.5
     roughness = float(
         values.get(
             "frosting_roughness",
-            values.get("reflection_roughness_constant", values.get("reflection_roughness", 0.5)),
+            values.get("reflection_roughness_constant", values.get("reflection_roughness", roughness_default)),
         )
     )
     if not has_orm and packed_orm_index is not None:
@@ -413,6 +476,10 @@ def _material_to_pbr(
         "ior": float(values.get("glass_ior", 1.5)),
         "transmission": 1.0 if is_glass else 0.0,
         "alpha_mode": "BLEND" if is_glass else "OPAQUE",
+        "specular": float(values.get("specular_level", 1.0)),
+        "thickness": 0.0 if bool(values.get("thin_walled", False)) else 1.0,
+        "base_color_add": float(values.get("albedo_add", 0.0)),
+        "base_color_desaturation": float(values.get("albedo_desaturation", 0.0)),
         "base_color_texture": base_color_texture,
         "normal_texture": normal_texture,
         # Marbles ORM is already packed as glTF expects: R=AO, G=roughness, B=metallic.
@@ -628,8 +695,7 @@ def load_scene_from_usd(
     def resolve_texture(texture_path: Path | None):
         if texture_path is None:
             return None
-        resolved = texture_path if texture_path.is_absolute() else path.parent / texture_path
-        resolved = resolved.resolve()
+        resolved = _rebase_missing_texture(path, texture_path)
         if "<UDIM>" in str(resolved):
             pattern = resolved.name.replace("<UDIM>", "*")
             expression = re.compile(

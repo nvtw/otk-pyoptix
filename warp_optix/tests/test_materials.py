@@ -32,6 +32,34 @@ def test_checker_overlay_defaults_to_disabled():
     assert material["baseColorScale"] == pytest.approx(0.75)
 
 
+def test_gltf_material_preserves_extended_surface_controls():
+    manager = MaterialManager()
+
+    material_id = manager.add_gltf_material(
+        alpha_mode="MASK",
+        alpha_cutoff=0.35,
+        occlusion_texture={"index": 4, "texCoord": 1},
+        occlusion_strength=0.7,
+        specular=0.45,
+        specular_color=(0.8, 0.7, 0.6),
+        thickness=2.0,
+        base_color_add=0.1,
+        base_color_desaturation=0.2,
+    )
+    material = manager.get_material_entries()[material_id]
+
+    assert material["alphaMode"] == 1
+    assert material["alphaCutoff"] == pytest.approx(0.35)
+    assert material["occlusionTexture"]["index"] == 4
+    assert material["occlusionTexture"]["texCoord"] == 1
+    assert material["occlusionStrength"] == pytest.approx(0.7)
+    assert material["specularFactor"] == pytest.approx(0.45)
+    assert material["specularColorFactor"] == pytest.approx((0.8, 0.7, 0.6))
+    assert material["thicknessFactor"] == pytest.approx(2.0)
+    assert material["pbrDiffuseFactor"][0] == pytest.approx(0.1)
+    assert material["pbrDiffuseFactor"][1] == pytest.approx(0.2)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [

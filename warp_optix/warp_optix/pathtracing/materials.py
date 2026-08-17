@@ -309,11 +309,16 @@ class MaterialManager:
         metallic_roughness_texture: dict | None = None,
         emissive_texture: dict | None = None,
         occlusion_texture: dict | None = None,
+        occlusion_strength: float = 1.0,
         transmission: float = 0.0,
         ior: float = 1.5,
+        specular: float = 1.0,
+        specular_color: tuple = (1.0, 1.0, 1.0),
         thickness: float = 0.0,
         attenuation_color: tuple = (1.0, 1.0, 1.0),
         attenuation_distance: float = 1.0e10,
+        base_color_add: float = 0.0,
+        base_color_desaturation: float = 0.0,
         u_subdiv: float = 0.0,
         v_subdiv: float = 0.0,
         base_color_scale: float = 0.75,
@@ -341,6 +346,9 @@ class MaterialManager:
         }.get(str(alpha_mode).upper(), ALPHA_OPAQUE)
         mat["transmissionFactor"] = float(np.clip(transmission, 0.0, 1.0))
         mat["ior"] = float(max(ior, 1.0))
+        mat["specularFactor"] = float(max(specular, 0.0))
+        mat["specularColorFactor"] = tuple(float(channel) for channel in specular_color)
+        mat["occlusionStrength"] = float(np.clip(occlusion_strength, 0.0, 1.0))
         mat["thicknessFactor"] = float(max(thickness, 0.0))
         mat["attenuationColor"] = (
             float(attenuation_color[0]),
@@ -348,6 +356,8 @@ class MaterialManager:
             float(attenuation_color[2]),
         )
         mat["attenuationDistance"] = float(max(attenuation_distance, 1.0e-6))
+        mat["pbrDiffuseFactor"][0] = float(base_color_add)
+        mat["pbrDiffuseFactor"][1] = float(np.clip(base_color_desaturation, 0.0, 1.0))
         self._set_checker_overlay(mat, u_subdiv, v_subdiv, base_color_scale)
         # Keep this information available although current pipeline does not use culling flags.
         mat["unlit"] = 0
