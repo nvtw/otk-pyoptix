@@ -1249,22 +1249,8 @@ class PathTracingViewer:
         p.packed_prev_positions = self._scene._packed_prev_positions
         p.packed_material_ids = self._scene._packed_material_ids
         p.material_count = wp.uint32(self._scene.materials.count)
-        p.texture_descs = (
-            None
-            if self._scene._texture_descs is None or self._scene.texture_count == 0
-            else wp.array(
-                ptr=self._scene._texture_descs.ptr,
-                shape=(self._scene.texture_count,),
-                dtype=pwk.TextureDesc,
-            )
-        )
-        p.texture_data = self._scene._texture_data
+        p.textures = self._scene._texture_data
         p.texture_count = wp.uint32(self._scene.texture_count)
-        p.texture_data_length = wp.uint32(
-            0
-            if self._scene._texture_data is None
-            else self._scene._texture_data.shape[0]
-        )
 
         p.color_output = self._color_buffer
         p.normal_roughness_output = self._normal_roughness_buffer

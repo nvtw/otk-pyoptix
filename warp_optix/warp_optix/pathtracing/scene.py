@@ -576,8 +576,8 @@ class Scene:
         self._compact_materials = None
         self._compact_material_floats = None
         self._instance_render_prim_ids = None
-        self._texture_descs = None
         self._texture_data = None
+        self._texture_objects = []
         self._packed_indices = None
         self._packed_normals = None
         self._packed_tangents = None
@@ -711,13 +711,8 @@ class Scene:
         )
 
     @property
-    def texture_descs_address(self) -> int:
-        """Get device address of texture descriptor buffer."""
-        return self._texture_descs.ptr if self._texture_descs is not None else 0
-
-    @property
     def texture_data_address(self) -> int:
-        """Get device address of texture texel buffer."""
+        """Get the device address of the native texture-handle array."""
         return self._texture_data.ptr if self._texture_data is not None else 0
 
     @property
@@ -1293,6 +1288,7 @@ class Scene:
         apply_stage_units: bool = True,
         convert_up_axis: bool = True,
         max_texture_size: int | None = None,
+        max_texture_memory_bytes: int | None = None,
         strict_sidedness: bool = False,
         enable_emissive_materials: bool = True,
         load_usd_lights: bool = False,
@@ -1316,6 +1312,7 @@ class Scene:
                 apply_stage_units=apply_stage_units,
                 convert_up_axis=convert_up_axis,
                 max_texture_size=max_texture_size,
+                max_texture_memory_bytes=max_texture_memory_bytes,
                 strict_sidedness=strict_sidedness,
                 enable_emissive_materials=enable_emissive_materials,
                 load_usd_lights=load_usd_lights,
@@ -1501,8 +1498,8 @@ class Scene:
         self._compact_materials = None
         self._compact_material_floats = None
         self._instance_render_prim_ids = None
-        self._texture_descs = None
         self._texture_data = None
+        self._texture_objects = []
         self._packed_indices = None
         self._packed_normals = None
         self._packed_tangents = None
@@ -2079,36 +2076,25 @@ class Scene:
         self._compact_materials = wp.array(compact_bytes, dtype=wp.uint8, device="cuda")
         self._compact_material_floats = None
 
-        # Build texture descriptor/texel buffers for shader-side glTF texture sampling.
+        # Keep one CUDA texture per source image. The compact device array stores
+        # only texture handles, so aggregate texture memory is not constrained by
+        # Warp's signed 32-bit limit for a single array dimension.
         if self._gltf_textures:
-            desc_dtype = np.dtype(
-                [
-                    ("offset", np.uint32),
-                    ("width", np.uint32),
-                    ("height", np.uint32),
-                    ("_pad", np.uint32),
-                ],
-                align=True,
-            )
-            desc = np.zeros(len(self._gltf_textures), dtype=desc_dtype)
-            packed_texels = []
-            texel_offset = 0
-            for i, tex in enumerate(self._gltf_textures):
-                h, w = int(tex.shape[0]), int(tex.shape[1])
-                desc[i]["offset"] = np.uint32(texel_offset)
-                desc[i]["width"] = np.uint32(w)
-                desc[i]["height"] = np.uint32(h)
-                flat_tex = tex.reshape(-1, 4)
-                packed_texels.append(flat_tex)
-                texel_offset += flat_tex.shape[0]
-
-            desc_bytes = desc.view(np.uint8).reshape(-1)
-            self._texture_descs = wp.array(desc_bytes, dtype=wp.uint8, device="cuda")
-
-            texels = np.concatenate(packed_texels, axis=0).astype(np.uint8, copy=False)
+            self._texture_objects = [
+                wp.Texture2D(
+                    tex,
+                    filter_mode=wp.TextureFilterMode.LINEAR,
+                    address_mode=wp.TextureAddressMode.WRAP,
+                    normalized_coords=True,
+                    device="cuda",
+                )
+                for tex in self._gltf_textures
+            ]
             self._texture_data = wp.array(
-                texels.reshape(-1), dtype=wp.uint8, device="cuda"
+                self._texture_objects,
+                dtype=wp.Texture2D,
+                device="cuda",
             )
         else:
-            self._texture_descs = None
             self._texture_data = None
+            self._texture_objects = []

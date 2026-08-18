@@ -33,6 +33,38 @@ def test_texture_budget_proportionally_downscales_large_atlas():
     assert _fit_textures_to_budget(textures, max_bytes=4096) is textures
 
 
+def test_texture_budget_uses_available_gpu_memory(monkeypatch):
+    """Preserve source textures when live free VRAM provides enough headroom."""
+    import warp as wp
+
+    class DeviceStub:
+        free_memory = 4096
+
+    textures = [np.zeros((16, 16, 4), dtype=np.uint8) for _ in range(2)]
+    monkeypatch.setattr(wp, "get_device", lambda _alias: DeviceStub())
+    monkeypatch.setattr(usd_loader, "_MIN_TEXTURE_MEMORY_BUDGET_BYTES", 256)
+    monkeypatch.setattr(usd_loader, "_TEXTURE_VRAM_RESERVE_BYTES", 128)
+
+    assert _fit_textures_to_budget(textures) is textures
+
+
+def test_texture_budget_retains_headroom_on_small_gpu(monkeypatch):
+    """Downscale textures when they would consume reserved GPU headroom."""
+    import warp as wp
+
+    class DeviceStub:
+        free_memory = 1024
+
+    textures = [np.zeros((16, 16, 4), dtype=np.uint8) for _ in range(2)]
+    monkeypatch.setattr(wp, "get_device", lambda _alias: DeviceStub())
+    monkeypatch.setattr(usd_loader, "_MIN_TEXTURE_MEMORY_BUDGET_BYTES", 256)
+    monkeypatch.setattr(usd_loader, "_TEXTURE_VRAM_RESERVE_BYTES", 128)
+
+    resized = _fit_textures_to_budget(textures)
+
+    assert sum(texture.nbytes for texture in resized) <= 512
+
+
 def test_missing_texture_rebases_to_stage_local_texture_tree(tmp_path):
     stage_path = tmp_path / "variant" / "scene.usd"
     stage_path.parent.mkdir()

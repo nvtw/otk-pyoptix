@@ -146,14 +146,6 @@ class CompactMaterial:
 
 
 @wp.struct
-class TextureDesc:
-    offset: wp.uint32
-    width: wp.uint32
-    height: wp.uint32
-    pad: wp.uint32
-
-
-@wp.struct
 class EnvAccel:
     alias: wp.uint32
     q: wp.float32
@@ -270,10 +262,8 @@ class PathtraceLaunchParams:
     packed_prev_positions: wp.array(dtype=wp.float32)
     packed_material_ids: wp.array(dtype=wp.uint32)
     material_count: wp.uint32
-    texture_descs: wp.array(dtype=TextureDesc)
-    texture_data: wp.array(dtype=wp.uint8)
+    textures: wp.array(dtype=wp.Texture2D)
     texture_count: wp.uint32
-    texture_data_length: wp.uint32
 
     color_output: wp.array2d(dtype=wp.vec4)
     normal_roughness_output: wp.array2d(dtype=wp.vec4)
@@ -371,88 +361,11 @@ def _sample_texture_rgba(
     if tex_index >= int(params.texture_count):
         return wp.vec4(1.0, 1.0, 1.0, 1.0)
 
-    descs = params.texture_descs
-    texels = params.texture_data
-    d = descs[tex_index]
-
-    w = int(d.width)
-    h = int(d.height)
-    if w <= 0 or h <= 0:
-        return wp.vec4(1.0, 1.0, 1.0, 1.0)
-
-    uvw = _wrap_repeat_uv(uv)
-    fx = uvw[0] * wp.float32(w) - 0.5
-    fy = uvw[1] * wp.float32(h) - 0.5
-    x0 = int(wp.floor(fx))
-    y0 = int(wp.floor(fy))
-    tx = fx - wp.float32(x0)
-    ty = fy - wp.float32(y0)
-    x1 = x0 + 1
-    y1 = y0 + 1
-
-    ix0 = _wrap_repeat_index(x0, w)
-    ix1 = _wrap_repeat_index(x1, w)
-    iy0 = wp.clamp(y0, 0, h - 1)
-    iy1 = wp.clamp(y1, 0, h - 1)
-
-    p00 = int(d.offset) + iy0 * w + ix0
-    p10 = int(d.offset) + iy0 * w + ix1
-    p01 = int(d.offset) + iy1 * w + ix0
-    p11 = int(d.offset) + iy1 * w + ix1
-
-    b00 = p00 * 4
-    b10 = p10 * 4
-    b01 = p01 * 4
-    b11 = p11 * 4
-    if (
-        b00 + 3 >= int(params.texture_data_length)
-        or b10 + 3 >= int(params.texture_data_length)
-        or b01 + 3 >= int(params.texture_data_length)
-        or b11 + 3 >= int(params.texture_data_length)
-    ):
-        return wp.vec4(1.0, 1.0, 1.0, 1.0)
-
-    scale = wp.float32(1.0 / 255.0)
-    c00 = (
-        wp.vec4(
-            wp.float32(texels[b00]),
-            wp.float32(texels[b00 + 1]),
-            wp.float32(texels[b00 + 2]),
-            wp.float32(texels[b00 + 3]),
-        )
-        * scale
+    return wp.texture_sample(
+        params.textures[tex_index],
+        _wrap_repeat_uv(uv),
+        dtype=wp.vec4,
     )
-    c10 = (
-        wp.vec4(
-            wp.float32(texels[b10]),
-            wp.float32(texels[b10 + 1]),
-            wp.float32(texels[b10 + 2]),
-            wp.float32(texels[b10 + 3]),
-        )
-        * scale
-    )
-    c01 = (
-        wp.vec4(
-            wp.float32(texels[b01]),
-            wp.float32(texels[b01 + 1]),
-            wp.float32(texels[b01 + 2]),
-            wp.float32(texels[b01 + 3]),
-        )
-        * scale
-    )
-    c11 = (
-        wp.vec4(
-            wp.float32(texels[b11]),
-            wp.float32(texels[b11 + 1]),
-            wp.float32(texels[b11 + 2]),
-            wp.float32(texels[b11 + 3]),
-        )
-        * scale
-    )
-
-    c0 = c00 * (1.0 - tx) + c10 * tx
-    c1 = c01 * (1.0 - tx) + c11 * tx
-    return c0 * (1.0 - ty) + c1 * ty
 
 
 @wp.func

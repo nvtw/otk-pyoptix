@@ -23,7 +23,8 @@ if TYPE_CHECKING:
     from .scene import Scene
 
 logger = logging.getLogger(__name__)
-_MAX_TEXTURE_ATLAS_BYTES = 1 << 30
+_MIN_TEXTURE_MEMORY_BUDGET_BYTES = 1 << 30
+_TEXTURE_VRAM_RESERVE_BYTES = 4 << 30
 
 
 def _import_usd():
@@ -413,14 +414,28 @@ def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
 
 
 def _fit_textures_to_budget(
-    textures: list[np.ndarray], max_bytes: int = _MAX_TEXTURE_ATLAS_BYTES
+    textures: list[np.ndarray], max_bytes: int | None = None
 ) -> list[np.ndarray]:
-    """Proportionally downscale RGBA textures to fit one GPU atlas budget."""
+    """Proportionally downscale RGBA textures to fit a GPU-memory budget."""
     total_bytes = sum(texture.nbytes for texture in textures)
+    if max_bytes is None:
+        try:
+            import warp as wp  # noqa: PLC0415
+
+            free_bytes = int(wp.get_device("cuda").free_memory)
+            # Keep both half of currently free VRAM and 4 GiB available for
+            # geometry, OptiX structures, frame buffers, and DLSS-RR resources.
+            max_bytes = min(
+                free_bytes // 2,
+                max(0, free_bytes - _TEXTURE_VRAM_RESERVE_BYTES),
+            )
+            max_bytes = max(_MIN_TEXTURE_MEMORY_BUDGET_BYTES, max_bytes)
+        except Exception:
+            max_bytes = _MIN_TEXTURE_MEMORY_BUDGET_BYTES
     if total_bytes <= max_bytes:
         return textures
     if max_bytes <= 0:
-        raise ValueError("Texture atlas byte budget must be positive")
+        raise ValueError("Texture byte budget must be positive")
 
     from PIL import Image  # noqa: PLC0415
 
@@ -442,7 +457,7 @@ def _fit_textures_to_budget(
 
     resized_bytes = sum(texture.nbytes for texture in resized)
     logger.warning(
-        "USD texture atlas exceeded %.2f GiB; downscaled %d textures from %.2f GiB to %.2f GiB",
+        "USD textures exceeded the %.2f GiB GPU budget; downscaled %d textures from %.2f GiB to %.2f GiB",
         max_bytes / (1 << 30),
         len(textures),
         total_bytes / (1 << 30),
@@ -889,6 +904,7 @@ def load_scene_from_usd(
     apply_stage_units: bool = True,
     convert_up_axis: bool = True,
     max_texture_size: int | None = None,
+    max_texture_memory_bytes: int | None = None,
     strict_sidedness: bool = False,
     enable_emissive_materials: bool = True,
     load_usd_lights: bool = False,
@@ -904,6 +920,8 @@ def load_scene_from_usd(
         raise ValueError(f"OpenUSD could not open stage: {path}")
     if max_texture_size is not None and int(max_texture_size) <= 0:
         max_texture_size = None
+    if max_texture_memory_bytes is not None and int(max_texture_memory_bytes) <= 0:
+        raise ValueError("max_texture_memory_bytes must be positive")
     usd_light_radius = float(usd_light_radius)
     if usd_light_radius <= 0.0:
         raise ValueError("usd_light_radius must be positive")
@@ -1257,7 +1275,10 @@ def load_scene_from_usd(
             textures = list(executor.map(decode_texture_spec, texture_specs))
     else:
         textures = []
-    textures = _fit_textures_to_budget(textures)
+    textures = _fit_textures_to_budget(
+        textures,
+        max_bytes=max_texture_memory_bytes,
+    )
     scene.set_gltf_textures(textures, srgb_texture_indices=srgb_textures)
     logger.info(
         "[USD timing] total=%.1f ms meshes=%d verts=%d tris=%d lights=%d materials=%d textures=%d",
