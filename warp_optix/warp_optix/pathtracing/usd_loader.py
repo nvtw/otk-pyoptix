@@ -69,6 +69,37 @@ def _ambient_light_from_custom_layer_data(
     return tuple(max(0.0, component * intensity) for component in rgb)
 
 
+def _ellipsoid_surface_area(radii: tuple[float, float, float]) -> float:
+    """Approximate ellipsoid area for a transformed sphere light."""
+    a, b, c = (max(abs(float(value)), 1.0e-9) for value in radii)
+    power = 1.6075
+    return (
+        4.0
+        * math.pi
+        * ((a**power * b**power + a**power * c**power + b**power * c**power) / 3.0)
+        ** (1.0 / power)
+    )
+
+
+def _sphere_light_proxy_radiance(
+    intensity: float,
+    normalize: bool,
+    authored_radius: float,
+    world_transform: np.ndarray,
+    proxy_radius: float,
+) -> float:
+    """Preserve authored sphere-light power when changing its render radius."""
+    linear = np.asarray(world_transform, dtype=np.float64)[:3, :3]
+    radii = tuple(
+        authored_radius * float(np.linalg.norm(linear[:, axis])) for axis in range(3)
+    )
+    authored_area = _ellipsoid_surface_area(radii)
+    proxy_area = 4.0 * math.pi * proxy_radius * proxy_radius
+    return (
+        intensity / proxy_area if normalize else intensity * authored_area / proxy_area
+    )
+
+
 def _material_inputs(material, shader) -> dict[str, Any]:
     """Return authored material values, with shader defaults as a fallback."""
     values: dict[str, Any] = {}
@@ -1156,10 +1187,25 @@ def load_scene_from_usd(
                 continue
             light = UsdLux.SphereLight(prim)
             color = _as_float_tuple(light.GetColorAttr().Get(), 3, (1.0, 1.0, 1.0))
+            if bool(light.GetEnableColorTemperatureAttr().Get()):
+                temperature = float(light.GetColorTemperatureAttr().Get() or 6500.0)
+                temperature_color = _as_float_tuple(
+                    UsdLux.BlackbodyTemperatureAsRgb(temperature),
+                    3,
+                    (1.0, 1.0, 1.0),
+                )
+                color = tuple(
+                    a * b for a, b in zip(color, temperature_color, strict=True)
+                )
             intensity = max(0.0, float(light.GetIntensityAttr().Get() or 0.0))
             intensity *= 2.0 ** float(light.GetExposureAttr().Get() or 0.0)
-            if bool(light.GetNormalizeAttr().Get()):
-                intensity /= 4.0 * math.pi * usd_light_radius * usd_light_radius
+            intensity = _sphere_light_proxy_radiance(
+                intensity,
+                bool(light.GetNormalizeAttr().Get()),
+                max(0.0, float(light.GetRadiusAttr().Get() or 0.0)),
+                node_world_transforms[node_index],
+                usd_light_radius,
+            )
             position = tuple(
                 float(value) for value in node_world_transforms[node_index][:3, 3]
             )

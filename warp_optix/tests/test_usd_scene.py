@@ -140,6 +140,7 @@ def test_sphere_light_imports_as_five_centimeter_analytic_light(tmp_path):
     light.CreateColorAttr(Gf.Vec3f(0.5, 0.25, 1.0))
     light.CreateIntensityAttr(10.0)
     light.CreateExposureAttr(1.0)
+    light.CreateRadiusAttr(5.0)
     mesh = UsdGeom.Mesh.Define(stage, "/Mesh")
     mesh.CreatePointsAttr(
         [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
@@ -166,6 +167,37 @@ def test_sphere_light_imports_as_five_centimeter_analytic_light(tmp_path):
     assert disabled_scene.load_from_usd(path, load_usd_lights=False)
     assert disabled_scene.mesh_count == 1
     assert disabled_scene.light_count == 0
+
+
+def test_sphere_light_proxy_preserves_authored_power(tmp_path):
+    """Preserve USD sphere-light power while using a fixed proxy radius."""
+    path = tmp_path / "sphere_light_power.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    UsdGeom.SetStageMetersPerUnit(stage, 0.01)
+    light = UsdLux.SphereLight.Define(stage, "/Light")
+    light.CreateIntensityAttr(100.0)
+    light.CreateRadiusAttr(4.0)
+    mesh = UsdGeom.Mesh.Define(stage, "/Mesh")
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    stage.GetRootLayer().Save()
+
+    scene = Scene(None)
+    assert scene.load_from_usd(path, convert_up_axis=False, load_usd_lights=True)
+    assert scene._sphere_lights[0][3] == pytest.approx(64.0)
+
+    light.CreateNormalizeAttr(True)
+    stage.GetRootLayer().Save()
+    normalized_scene = Scene(None)
+    assert normalized_scene.load_from_usd(
+        path, convert_up_axis=False, load_usd_lights=True
+    )
+    assert normalized_scene._sphere_lights[0][3] == pytest.approx(
+        100.0 / (4.0 * np.pi * 0.05**2)
+    )
 
 
 def test_reflected_face_varying_mesh_keeps_world_shading_frame_aligned(tmp_path):

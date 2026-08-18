@@ -2486,7 +2486,7 @@ def _sample_sphere_light_contribution(
     if (
         sample.pdf <= 1.0e-8
         or sample.distance <= 0.002
-        or wp.dot(sample.direction, material.normal) <= 0.0
+        or wp.dot(sample.direction, material.Ng) <= 0.0
     ):
         return contribution
 
@@ -2531,9 +2531,7 @@ def _sample_sphere_light_contribution(
         0.0,
         wp.uint32(255),
         wp.uint32(
-            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
-            | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
-            | OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
         ),
         wp.uint32(1),
         wp.uint32(2),
