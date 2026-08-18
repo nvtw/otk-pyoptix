@@ -209,6 +209,28 @@ class PathTracerAPI:
         )
 
     @property
+    def analytic_light_intensity(self) -> float:
+        """Return the global analytic-light intensity multiplier."""
+        return float(self._viewer.analytic_light_intensity)
+
+    @analytic_light_intensity.setter
+    def analytic_light_intensity(self, value: float) -> None:
+        """Set the nonnegative analytic-light intensity multiplier."""
+        self._viewer.analytic_light_intensity = max(0.0, float(value))
+        self.reset_temporal_history()
+
+    @property
+    def emissive_material_intensity(self) -> float:
+        """Return the global emissive-material intensity multiplier."""
+        return float(self._viewer.emissive_material_intensity)
+
+    @emissive_material_intensity.setter
+    def emissive_material_intensity(self, value: float) -> None:
+        """Set the nonnegative emissive-material intensity multiplier."""
+        self._viewer.emissive_material_intensity = max(0.0, float(value))
+        self.reset_temporal_history()
+
+    @property
     def tonemap_contrast(self) -> float:
         """Return the display contrast multiplier."""
         return float(self._viewer._tonemapper.contrast)

@@ -316,6 +316,8 @@ class PathTracingViewer:
         self.sky_y_is_up = 1
         self.sky_grayscale = False
         self.env_intensity = (1.0, 1.0, 1.0)
+        self.analytic_light_intensity = 1.0
+        self.emissive_material_intensity = 1.0
         self.env_rotation = 0.0
         self.use_path_regularization = True
         self.use_psr = True
@@ -1100,6 +1102,8 @@ class PathTracingViewer:
         p.max_bounces = wp.uint32(self.max_bounces)
         p.direct_light_samples = wp.uint32(self.direct_light_samples)
         p.russian_roulette_start_bounce = wp.uint32(self.russian_roulette_start_bounce)
+        p.analytic_light_intensity = float(self.analytic_light_intensity)
+        p.emissive_material_intensity = float(self.emissive_material_intensity)
         p.output_mode = int(self.OUTPUT_FINAL)
         p.device_camera = self._device_camera_state
 

@@ -214,6 +214,63 @@ def test_collected_mdl_source_infers_common_texture_parameter_names(tmp_path):
     }
 
 
+def test_collected_mdl_source_preserves_literal_omnipbr_defaults(monkeypatch, tmp_path):
+    mdl_path = tmp_path / "handles.mdl"
+    mdl_path.write_text(
+        """
+        export material handles(*) = ::OmniPBR::OmniPBR(
+            diffuse_color_constant: color(0.8f, 0.7f, 0.6f),
+            reflection_roughness_constant: 0.05f,
+            metallic_constant: 1.f,
+            specular_level: 0.5f,
+            enable_ORM_texture: false,
+            texture_translate: float2(0.1f, 0.2f),
+            texture_scale: float2(2.f));
+        """
+    )
+    shader = _Shader(
+        {"metallic_constant": 0.75},
+        source_asset=str(mdl_path),
+        sub_identifier="handles",
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: -1)
+
+    assert result["base_color"] == (0.8, 0.7, 0.6, 1.0)
+    assert result["roughness"] == 0.05
+    assert result["metallic"] == 0.75
+    assert result["specular"] == 0.5
+    assert result["base_color_texture"]["transform"] == {
+        "scale": (2.0, 2.0),
+        "offset": (0.1, 0.2),
+        "rotation": 0.0,
+    }
+
+
+def test_omnisurface_lite_input_aliases_are_preserved(monkeypatch):
+    shader = _Shader(
+        {
+            "diffuse_reflection_color": (0.48, 0.09, 0.09),
+            "specular_reflection_roughness": 0.65,
+            "specular_reflection_weight": 0.2,
+        },
+        source_asset="OmniSurfaceLite.mdl",
+        sub_identifier="OmniSurfaceLite",
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: -1)
+
+    assert result["base_color"] == (0.48, 0.09, 0.09, 1.0)
+    assert result["roughness"] == 0.65
+    assert result["specular"] == 0.2
+
+
 def test_authored_mdl_inputs_infer_common_texture_parameter_names(
     monkeypatch, tmp_path
 ):
@@ -314,7 +371,12 @@ def test_fresnel_emissive_mdl_inputs_are_preserved(monkeypatch):
 def test_omniglass_source_asset_selects_transmission_without_authored_inputs(
     monkeypatch,
 ):
-    shader = _Shader({}, source_asset="OmniGlass.mdl", sub_identifier="OmniGlass")
+    shader = _Shader(
+        {},
+        shader_id="mdlMaterial",
+        source_asset="OmniGlass.mdl",
+        sub_identifier="OmniGlass",
+    )
     monkeypatch.setattr(
         usd_loader, "_surface_shader", lambda material, UsdShade: shader
     )

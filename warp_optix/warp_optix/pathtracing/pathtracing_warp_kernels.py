@@ -245,6 +245,8 @@ class PathtraceLaunchParams:
     sky: PhysicalSkyParams
     sphere_lights: wp.array(dtype=SphereLight)
     sphere_light_count: wp.uint32
+    analytic_light_intensity: wp.float32
+    emissive_material_intensity: wp.float32
 
     render_primitives: wp.array(dtype=RenderPrimitive)
     render_prim_count: wp.uint32
@@ -1145,7 +1147,7 @@ def _sample_sphere_light(
         sample.pdf = 1.0 / (
             2.0 * wp.pi * wp.max(one_minus_cos, 1.0e-8) * wp.float32(count)
         )
-    sample.radiance = light.radiance
+    sample.radiance = light.radiance * params.analytic_light_intensity
     return sample
 
 
@@ -2482,6 +2484,11 @@ def _sample_sphere_light_contribution(
 ) -> wp.vec3:
     """Evaluate one shadowed next-event sample from the analytic light set."""
     contribution = wp.vec3(0.0, 0.0, 0.0)
+    if (
+        params.sphere_light_count == wp.uint32(0)
+        or params.analytic_light_intensity <= 0.0
+    ):
+        return contribution
     sample = _sample_sphere_light(params, position, xi0, xi1, xi2)
     if (
         sample.pdf <= 1.0e-8
@@ -2589,10 +2596,13 @@ def _evaluate_material_from_payload(
     raw_roughness = wp.max(wp.clamp(mat.roughness, 0.0, 1.0), MICROFACET_MIN_ROUGHNESS)
     roughness_sq = raw_roughness * raw_roughness
     opacity = wp.clamp(mat.opacity, 0.0, 1.0)
-    emissive = wp.vec3(
-        wp.max(mat.emissive[0], 0.0),
-        wp.max(mat.emissive[1], 0.0),
-        wp.max(mat.emissive[2], 0.0),
+    emissive = (
+        wp.vec3(
+            wp.max(mat.emissive[0], 0.0),
+            wp.max(mat.emissive[1], 0.0),
+            wp.max(mat.emissive[2], 0.0),
+        )
+        * params.emissive_material_intensity
     )
 
     # C++ lines 125-136: set material fields from compact material
@@ -2717,17 +2727,16 @@ def _evaluate_material_from_payload(
         t = wp.cross(b, n) * bsign_new
 
     # C++ lines 192-199: apply emissive texture
-    uv_e = _apply_uv_transform(
-        _select_uv(mat.emissive_tex_coord, uv, uv1), mat.emissive_uv_transform
-    )
-    if mat.emissive_tex_index >= 0:
+    if params.emissive_material_intensity > 0.0 and mat.emissive_tex_index >= 0:
+        uv_e = _apply_uv_transform(
+            _select_uv(mat.emissive_tex_coord, uv, uv1), mat.emissive_uv_transform
+        )
         e_tex = _sample_texture_rgba(params, mat.emissive_tex_index, uv_e)
         emissive = wp.vec3(
             emissive[0] * e_tex[0],
             emissive[1] * e_tex[1],
             emissive[2] * e_tex[2],
         )
-
     out.valid = wp.uint32(1)
     out.color = emissive
     out.normal = n
@@ -3789,14 +3798,9 @@ def _evaluate_surface_hit(
     uv_n = _apply_uv_transform(
         _select_uv(mat.normal_tex_coord, uv0, uv1), mat.normal_uv_transform
     )
-    uv_e = _apply_uv_transform(
-        _select_uv(mat.emissive_tex_coord, uv0, uv1), mat.emissive_uv_transform
-    )
-
     base_tex = _sample_texture_rgba(params, mat.base_color_tex_index, uv_base)
     mr_tex = _sample_texture_rgba(params, mat.metallic_roughness_tex_index, uv_mr)
     n_tex = _sample_texture_rgba(params, mat.normal_tex_index, uv_n)
-    e_tex = _sample_texture_rgba(params, mat.emissive_tex_index, uv_e)
 
     base_color = wp.vec3(
         mat.base_color[0] * base_tex[0],
@@ -3809,11 +3813,17 @@ def _evaluate_surface_hit(
         roughness = wp.clamp(params.override_roughness, MICROFACET_MIN_ROUGHNESS, 1.0)
     if params.override_metallic > 0.0:
         metallic = wp.clamp(params.override_metallic, 0.0, 1.0)
-    emissive = wp.vec3(
-        mat.emissive[0] * e_tex[0],
-        mat.emissive[1] * e_tex[1],
-        mat.emissive[2] * e_tex[2],
-    )
+    emissive = mat.emissive * params.emissive_material_intensity
+    if params.emissive_material_intensity > 0.0 and mat.emissive_tex_index >= 0:
+        uv_e = _apply_uv_transform(
+            _select_uv(mat.emissive_tex_coord, uv0, uv1), mat.emissive_uv_transform
+        )
+        e_tex = _sample_texture_rgba(params, mat.emissive_tex_index, uv_e)
+        emissive = wp.vec3(
+            emissive[0] * e_tex[0],
+            emissive[1] * e_tex[1],
+            emissive[2] * e_tex[2],
+        )
 
     if mat.normal_tex_index >= 0:
         n_tan = wp.vec3(

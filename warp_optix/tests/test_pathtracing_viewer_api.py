@@ -42,6 +42,8 @@ class _FakePathTracerAPI:
         self.tonemap_saturation = 1.0
         self.auto_exposure_enabled = False
         self.auto_exposure_config = None
+        self.analytic_light_intensity = 1.0
+        self.emissive_material_intensity = 1.0
         self.usd_scene = None
         self.usd_load = None
 
@@ -205,9 +207,13 @@ def test_reference_sky_and_srgb_color_mapping():
     viewer.tonemap_saturation = 1.25
     viewer.tonemap_contrast = 1.1
     viewer.tonemap_exposure = 0.75
+    viewer.analytic_light_intensity = 0.4
+    viewer.emissive_material_intensity = 0.6
     assert viewer.tonemap_exposure == 0.75
     assert viewer.tonemap_saturation == 1.25
     assert viewer.tonemap_contrast == 1.1
+    assert viewer.analytic_light_intensity == 0.4
+    assert viewer.emissive_material_intensity == 0.6
 
     viewer.configure_auto_exposure(True, min_ev=-5.0, max_ev=7.0)
     assert viewer.auto_exposure_enabled
@@ -242,6 +248,24 @@ def test_sky_parameters_normalize_sun_direction():
     )
     with pytest.raises(ValueError, match="nonzero"):
         api.set_sky_parameters((0.0, 0.0, 0.0))
+
+
+def test_light_intensity_controls_clamp_and_reset_history():
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(
+        analytic_light_intensity=1.0,
+        emissive_material_intensity=1.0,
+        _dlss_reset_history=False,
+    )
+
+    api.analytic_light_intensity = -1.0
+    assert api.analytic_light_intensity == 0.0
+    assert api._viewer._dlss_reset_history is True
+
+    api._viewer._dlss_reset_history = False
+    api.emissive_material_intensity = 0.25
+    assert api.emissive_material_intensity == 0.25
+    assert api._viewer._dlss_reset_history is True
 
 
 def test_load_scene_from_usd_forwards_options_and_builds():

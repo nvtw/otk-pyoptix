@@ -183,7 +183,7 @@ def _shader_source_identity(shader) -> str:
     if not shader:
         return ""
     shader_id = str(shader.GetIdAttr().Get() or "")
-    if shader_id:
+    if shader_id and shader_id != "mdlMaterial":
         return shader_id
     for context in ("mdl", "universal", ""):
         try:
@@ -194,7 +194,7 @@ def _shader_source_identity(shader) -> str:
         asset_path = _asset_path(source_asset)
         if asset_path or sub_identifier:
             return f"{asset_path or ''}:{sub_identifier or ''}"
-    return ""
+    return shader_id
 
 
 def _asset_path(value: Any) -> Path | None:
@@ -299,6 +299,58 @@ def _mdl_texture_inputs(shader) -> dict[str, Path]:
     if mdl_path is None:
         return {}
     return dict(_parse_mdl_texture_inputs(mdl_path))
+
+
+@lru_cache(maxsize=None)
+def _parse_mdl_literal_inputs(mdl_path: Path) -> tuple[tuple[str, Any], ...]:
+    """Parse simple named literal arguments from a collected MDL asset."""
+    if not mdl_path.is_file():
+        return ()
+    source = mdl_path.read_text(errors="replace")
+    values: dict[str, Any] = {}
+    vector_pattern = re.compile(r"\b(\w+)\s*:\s*(color|float2)\s*\(([^()]*)\)")
+    for name, kind, components in vector_pattern.findall(source):
+        try:
+            parsed = tuple(
+                float(component.strip().removesuffix("f"))
+                for component in components.split(",")
+            )
+        except ValueError:
+            continue
+        expected_size = 3 if kind == "color" else 2
+        if len(parsed) == 1:
+            parsed *= expected_size
+        if len(parsed) == expected_size:
+            values[name] = parsed
+
+    scalar_pattern = re.compile(
+        r"\b(\w+)\s*:\s*(true|false|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?f?)\b"
+    )
+    for name, literal in scalar_pattern.findall(source):
+        if literal == "true":
+            values[name] = True
+        elif literal == "false":
+            values[name] = False
+        else:
+            try:
+                values[name] = float(literal.removesuffix("f"))
+            except ValueError:
+                continue
+    return tuple(values.items())
+
+
+def _mdl_literal_inputs(shader) -> dict[str, Any]:
+    """Return supported scalar and vector defaults from an MDL source."""
+    if not shader:
+        return {}
+    try:
+        source_asset = shader.GetSourceAsset("mdl")
+    except Exception:
+        return {}
+    mdl_path = _asset_path(source_asset)
+    if mdl_path is None:
+        return {}
+    return dict(_parse_mdl_literal_inputs(mdl_path))
 
 
 def _normalize_texture_inputs(values: dict[str, Any]) -> None:
@@ -528,7 +580,8 @@ def _material_to_pbr(
     enable_emissive_materials: bool = True,
 ) -> dict[str, Any]:
     shader = _surface_shader(material, UsdShade)
-    values = _mdl_texture_inputs(shader)
+    values = _mdl_literal_inputs(shader)
+    values.update(_mdl_texture_inputs(shader))
     values.update(_material_inputs(material, shader))
     shader_id = _shader_source_identity(shader)
 
@@ -643,7 +696,10 @@ def _material_to_pbr(
         or "glass_ior" in values
     )
     diffuse_constant = _as_float_tuple(
-        values.get("diffuse_color_constant", values.get("albedo_color")),
+        values.get(
+            "diffuse_color_constant",
+            values.get("albedo_color", values.get("diffuse_reflection_color")),
+        ),
         3,
         (0.18, 0.18, 0.18),
     )
@@ -686,7 +742,10 @@ def _material_to_pbr(
             "frosting_roughness",
             values.get(
                 "reflection_roughness_constant",
-                values.get("reflection_roughness", roughness_default),
+                values.get(
+                    "reflection_roughness",
+                    values.get("specular_reflection_roughness", roughness_default),
+                ),
             ),
         )
     )
@@ -717,7 +776,9 @@ def _material_to_pbr(
         "ior": float(values.get("glass_ior", 1.5)),
         "transmission": 1.0 if is_glass else 0.0,
         "alpha_mode": "BLEND" if is_glass else "OPAQUE",
-        "specular": float(values.get("specular_level", 1.0)),
+        "specular": float(
+            values.get("specular_level", values.get("specular_reflection_weight", 1.0))
+        ),
         "thickness": 0.0 if bool(values.get("thin_walled", False)) else 1.0,
         "base_color_add": float(values.get("albedo_add", 0.0)),
         "base_color_desaturation": float(values.get("albedo_desaturation", 0.0)),
