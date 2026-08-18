@@ -170,7 +170,7 @@ def test_sphere_light_imports_as_five_centimeter_analytic_light(tmp_path):
 
 
 def test_sphere_light_proxy_preserves_authored_power(tmp_path):
-    """Preserve USD sphere-light power while using a fixed proxy radius."""
+    """Use authored radius by default and preserve power for explicit proxies."""
     path = tmp_path / "sphere_light_power.usda"
     stage = Usd.Stage.CreateNew(str(path))
     UsdGeom.SetStageMetersPerUnit(stage, 0.01)
@@ -185,8 +185,20 @@ def test_sphere_light_proxy_preserves_authored_power(tmp_path):
     mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
     stage.GetRootLayer().Save()
 
+    authored_scene = Scene(None)
+    assert authored_scene.load_from_usd(
+        path, convert_up_axis=False, load_usd_lights=True
+    )
+    assert authored_scene._sphere_lights[0][1] == pytest.approx(0.04)
+    assert authored_scene._sphere_lights[0][3] == pytest.approx(100.0)
+
     scene = Scene(None)
-    assert scene.load_from_usd(path, convert_up_axis=False, load_usd_lights=True)
+    assert scene.load_from_usd(
+        path,
+        convert_up_axis=False,
+        load_usd_lights=True,
+        usd_light_radius=0.05,
+    )
     assert scene._sphere_lights[0][3] == pytest.approx(64.0)
 
     light.CreateNormalizeAttr(True)
@@ -195,8 +207,9 @@ def test_sphere_light_proxy_preserves_authored_power(tmp_path):
     assert normalized_scene.load_from_usd(
         path, convert_up_axis=False, load_usd_lights=True
     )
+    assert normalized_scene._sphere_lights[0][1] == pytest.approx(0.04)
     assert normalized_scene._sphere_lights[0][3] == pytest.approx(
-        100.0 / (4.0 * np.pi * 0.05**2)
+        100.0 / (4.0 * np.pi * 0.04**2)
     )
 
 

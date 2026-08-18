@@ -335,7 +335,7 @@ class PathTracerAPI:
         usd_environment_scale: float = 1.0,
         enable_emissive_materials: bool = True,
         load_usd_lights: bool = False,
-        usd_light_radius: float = 0.05,
+        usd_light_radius: float | None = None,
     ) -> bool:
         """Load USD geometry and PBR materials through the optional OpenUSD bindings."""
         ok = bool(

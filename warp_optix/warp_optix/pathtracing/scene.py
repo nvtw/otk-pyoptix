@@ -1292,7 +1292,7 @@ class Scene:
         strict_sidedness: bool = False,
         enable_emissive_materials: bool = True,
         load_usd_lights: bool = False,
-        usd_light_radius: float = 0.05,
+        usd_light_radius: float | None = None,
     ) -> bool:
         """Load a composed USD stage into this scene.
 

@@ -1109,7 +1109,7 @@ class PathTracingViewerBackend:
         usd_environment_scale: float = 1.0,
         enable_emissive_materials: bool = True,
         load_usd_lights: bool = False,
-        usd_light_radius: float = 0.05,
+        usd_light_radius: float | None = None,
     ) -> bool:
         """Load a composed USD stage into the OptiX renderer."""
         self._ensure_initialized()

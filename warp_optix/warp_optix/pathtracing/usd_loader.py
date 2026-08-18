@@ -81,23 +81,31 @@ def _ellipsoid_surface_area(radii: tuple[float, float, float]) -> float:
     )
 
 
-def _sphere_light_proxy_radiance(
+def _sphere_light_proxy_properties(
     intensity: float,
     normalize: bool,
     authored_radius: float,
     world_transform: np.ndarray,
-    proxy_radius: float,
-) -> float:
-    """Preserve authored sphere-light power when changing its render radius."""
+    proxy_radius: float | None,
+) -> tuple[float, float]:
+    """Resolve render radius and radiance while preserving authored power."""
     linear = np.asarray(world_transform, dtype=np.float64)[:3, :3]
     radii = tuple(
         authored_radius * float(np.linalg.norm(linear[:, axis])) for axis in range(3)
     )
     authored_area = _ellipsoid_surface_area(radii)
-    proxy_area = 4.0 * math.pi * proxy_radius * proxy_radius
-    return (
-        intensity / proxy_area if normalize else intensity * authored_area / proxy_area
+    render_radius = (
+        math.sqrt(authored_area / (4.0 * math.pi))
+        if proxy_radius is None
+        else proxy_radius
     )
+    render_area = 4.0 * math.pi * render_radius * render_radius
+    radiance = (
+        intensity / render_area
+        if normalize
+        else intensity * authored_area / render_area
+    )
+    return render_radius, radiance
 
 
 def _material_inputs(material, shader) -> dict[str, Any]:
@@ -939,7 +947,7 @@ def load_scene_from_usd(
     strict_sidedness: bool = False,
     enable_emissive_materials: bool = True,
     load_usd_lights: bool = False,
-    usd_light_radius: float = 0.05,
+    usd_light_radius: float | None = None,
 ) -> bool:
     """Load composed USD meshes and common PreviewSurface/MDL PBR materials."""
     path = Path(usd_path).expanduser().resolve()
@@ -953,8 +961,9 @@ def load_scene_from_usd(
         max_texture_size = None
     if max_texture_memory_bytes is not None and int(max_texture_memory_bytes) <= 0:
         raise ValueError("max_texture_memory_bytes must be positive")
-    usd_light_radius = float(usd_light_radius)
-    if usd_light_radius <= 0.0:
+    if usd_light_radius is not None:
+        usd_light_radius = float(usd_light_radius)
+    if usd_light_radius is not None and usd_light_radius <= 0.0:
         raise ValueError("usd_light_radius must be positive")
     scene.usd_environment_path = None
     scene.usd_ambient_light = (0.0, 0.0, 0.0)
@@ -1199,7 +1208,7 @@ def load_scene_from_usd(
                 )
             intensity = max(0.0, float(light.GetIntensityAttr().Get() or 0.0))
             intensity *= 2.0 ** float(light.GetExposureAttr().Get() or 0.0)
-            intensity = _sphere_light_proxy_radiance(
+            render_radius, intensity = _sphere_light_proxy_properties(
                 intensity,
                 bool(light.GetNormalizeAttr().Get()),
                 max(0.0, float(light.GetRadiusAttr().Get() or 0.0)),
@@ -1211,7 +1220,7 @@ def load_scene_from_usd(
             )
             scene.add_light_sphere(
                 position=position,
-                radius=usd_light_radius,
+                radius=render_radius,
                 color=color,
                 intensity=intensity,
             )
