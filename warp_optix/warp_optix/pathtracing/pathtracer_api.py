@@ -48,6 +48,7 @@ class PathTracerAPI:
         samples_per_frame: int = 1,
         max_bounces: int = 4,
         direct_light_samples: int = 1,
+        russian_roulette_start_bounce: int = 3,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -63,6 +64,7 @@ class PathTracerAPI:
             samples_per_frame=samples_per_frame,
             max_bounces=max_bounces,
             direct_light_samples=direct_light_samples,
+            russian_roulette_start_bounce=russian_roulette_start_bounce,
         )
         self._built = False
         self._running = True
@@ -132,6 +134,11 @@ class PathTracerAPI:
         return int(self._viewer.direct_light_samples)
 
     @property
+    def russian_roulette_start_bounce(self) -> int:
+        """Return the first bounce eligible for stochastic termination."""
+        return int(self._viewer.russian_roulette_start_bounce)
+
+    @property
     def samples_per_frame(self) -> int:
         """Return the samples rendered per frame when DLSS is disabled."""
         return int(self._viewer.samples_per_frame)
@@ -145,12 +152,14 @@ class PathTracerAPI:
         *,
         max_bounces: int | None = None,
         direct_light_samples: int | None = None,
+        russian_roulette_start_bounce: int | None = None,
         samples_per_frame: int | None = None,
     ) -> None:
         """Adjust path depth and sampling budgets."""
         self._viewer.set_ray_budget(
             max_bounces=max_bounces,
             direct_light_samples=direct_light_samples,
+            russian_roulette_start_bounce=russian_roulette_start_bounce,
             samples_per_frame=samples_per_frame,
         )
 
@@ -173,6 +182,31 @@ class PathTracerAPI:
     def tonemap_exposure(self, value: float) -> None:
         """Set the nonnegative linear exposure multiplier."""
         self._viewer._tonemapper.exposure = max(0.0, float(value))
+
+    @property
+    def auto_exposure_enabled(self) -> bool:
+        """Return whether temporal automatic exposure is enabled."""
+        return bool(self._viewer._tonemapper.auto_exposure)
+
+    def configure_auto_exposure(
+        self,
+        enabled: bool,
+        *,
+        target_luminance: float | None = None,
+        min_ev: float | None = None,
+        max_ev: float | None = None,
+        brighten_speed: float | None = None,
+        darken_speed: float | None = None,
+    ) -> None:
+        """Configure GPU temporal automatic exposure."""
+        self._viewer._tonemapper.configure_auto_exposure(
+            enabled,
+            target_luminance=target_luminance,
+            min_ev=min_ev,
+            max_ev=max_ev,
+            brighten_speed=brighten_speed,
+            darken_speed=darken_speed,
+        )
 
     @property
     def tonemap_contrast(self) -> float:
@@ -299,6 +333,8 @@ class PathTracerAPI:
         load_usd_environment: bool = False,
         usd_environment_scale: float = 1.0,
         enable_emissive_materials: bool = True,
+        load_usd_lights: bool = False,
+        usd_light_radius: float = 0.05,
     ) -> bool:
         """Load USD geometry and PBR materials through the optional OpenUSD bindings."""
         ok = bool(
@@ -311,6 +347,8 @@ class PathTracerAPI:
                 max_texture_size=max_texture_size,
                 strict_sidedness=strict_sidedness,
                 enable_emissive_materials=enable_emissive_materials,
+                load_usd_lights=load_usd_lights,
+                usd_light_radius=usd_light_radius,
             )
         )
         if ok and load_usd_environment:

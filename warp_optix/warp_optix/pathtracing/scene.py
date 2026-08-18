@@ -565,6 +565,8 @@ class Scene:
         self.materials = MaterialManager()
         self._meshes = []
         self._instances = []
+        self._sphere_lights = []
+        self._sphere_light_data = None
 
         # GPU buffers
         self._render_primitives = None
@@ -635,6 +637,35 @@ class Scene:
     @property
     def instance_count(self) -> int:
         return len(self._instances)
+
+    @property
+    def light_count(self) -> int:
+        """Return the number of analytic lights."""
+        return len(self._sphere_lights)
+
+    def add_light_sphere(
+        self,
+        position: tuple[float, float, float],
+        radius: float,
+        color: tuple[float, float, float],
+        intensity: float,
+    ) -> int:
+        """Add a constant-radiance analytic sphere light."""
+        radius = float(radius)
+        intensity = float(intensity)
+        if radius <= 0.0:
+            raise ValueError("radius must be positive")
+        if intensity < 0.0:
+            raise ValueError("intensity must be nonnegative")
+        self._sphere_lights.append(
+            (
+                tuple(float(value) for value in position),
+                radius,
+                tuple(float(value) for value in color),
+                intensity,
+            )
+        )
+        return len(self._sphere_lights) - 1
 
     @property
     def tlas_handle(self) -> int:
@@ -780,11 +811,17 @@ class Scene:
             if np.issubdtype(tex.dtype, np.integer):
                 tex_u8 = np.ascontiguousarray(tex, dtype=np.uint8)
             else:
-                tex_u8 = np.clip(np.asarray(tex) * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+                tex_u8 = np.clip(np.asarray(tex) * 255.0 + 0.5, 0.0, 255.0).astype(
+                    np.uint8
+                )
             if tex_idx in srgb_indices:
                 tex_u8 = tex_u8.copy()
-                linear = srgb_to_linear_rgb(tex_u8[..., :3].astype(np.float32) * (1.0 / 255.0))
-                tex_u8[..., :3] = np.clip(linear * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+                linear = srgb_to_linear_rgb(
+                    tex_u8[..., :3].astype(np.float32) * (1.0 / 255.0)
+                )
+                tex_u8[..., :3] = np.clip(linear * 255.0 + 0.5, 0.0, 255.0).astype(
+                    np.uint8
+                )
             converted.append(tex_u8)
         if append:
             self._gltf_textures.extend(converted)
@@ -910,9 +947,13 @@ class Scene:
     ):
         """Retain a composed USD transform hierarchy for dynamic updates."""
         parents = np.asarray(parents, dtype=np.int32).reshape(-1)
-        local = np.ascontiguousarray(local_transforms, dtype=np.float32).reshape(-1, 4, 4)
+        local = np.ascontiguousarray(local_transforms, dtype=np.float32).reshape(
+            -1, 4, 4
+        )
         if len(parents) != len(local):
-            raise ValueError("USD hierarchy parents and transforms must have equal length")
+            raise ValueError(
+                "USD hierarchy parents and transforms must have equal length"
+            )
         if np.any(parents >= np.arange(len(parents), dtype=np.int32)):
             raise ValueError("USD hierarchy parents must precede their children")
 
@@ -930,7 +971,9 @@ class Scene:
         self._usd_local_transforms = local
         self._usd_world_transforms = world
         self._usd_instance_ids = np.asarray(instance_ids, dtype=np.int32).reshape(-1)
-        self._usd_instance_node_ids = np.asarray(instance_node_ids, dtype=np.int32).reshape(-1)
+        self._usd_instance_node_ids = np.asarray(
+            instance_node_ids, dtype=np.int32
+        ).reshape(-1)
         self._usd_level_nodes = [
             np.flatnonzero(depths == depth).astype(np.int32)
             for depth in range(int(depths.max(initial=0)) + 1)
@@ -1252,6 +1295,8 @@ class Scene:
         max_texture_size: int | None = None,
         strict_sidedness: bool = False,
         enable_emissive_materials: bool = True,
+        load_usd_lights: bool = False,
+        usd_light_radius: float = 0.05,
     ) -> bool:
         """Load a composed USD stage into this scene.
 
@@ -1273,6 +1318,8 @@ class Scene:
                 max_texture_size=max_texture_size,
                 strict_sidedness=strict_sidedness,
                 enable_emissive_materials=enable_emissive_materials,
+                load_usd_lights=load_usd_lights,
+                usd_light_radius=usd_light_radius,
             )
         )
 
@@ -1426,6 +1473,8 @@ class Scene:
         """Clear all meshes and instances."""
         self._meshes.clear()
         self._instances.clear()
+        self._sphere_lights.clear()
+        self._sphere_light_data = None
         self._gas_handles.clear()
         self._gas_buffers.clear()
         self._ias_handle = None
@@ -1837,14 +1886,29 @@ class Scene:
         )
         self._build_usd_transform_buffers()
 
+        light_data = np.zeros((len(self._sphere_lights), 8), dtype=np.float32)
+        for index, (position, radius, color, intensity) in enumerate(
+            self._sphere_lights
+        ):
+            light_data[index, :3] = position
+            light_data[index, 3] = radius
+            light_data[index, 4:7] = np.asarray(color) * intensity
+        self._sphere_light_data = (
+            wp.array(light_data, dtype=wp.float32, device="cuda")
+            if len(light_data)
+            else None
+        )
+
         # Build SceneDescription
         sd_dtype = _create_scene_description_dtype()
         scene_desc = np.zeros(1, dtype=sd_dtype)
         scene_desc[0]["materialAddress"] = self.materials.gpu_address
         scene_desc[0]["renderNodeAddress"] = self._render_nodes.ptr
         scene_desc[0]["renderPrimitiveAddress"] = self._render_primitives.ptr
-        scene_desc[0]["lightAddress"] = 0
-        scene_desc[0]["numLights"] = 0
+        scene_desc[0]["lightAddress"] = (
+            0 if self._sphere_light_data is None else self._sphere_light_data.ptr
+        )
+        scene_desc[0]["numLights"] = len(self._sphere_lights)
 
         sd_bytes = scene_desc.view(np.uint8).reshape(-1)
         self._scene_desc = wp.array(sd_bytes, dtype=wp.uint8, device="cuda")

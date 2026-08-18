@@ -7,9 +7,10 @@ import numpy as np
 import pytest
 
 from warp_optix.pathtracing.scene import Scene
+from warp_optix.pathtracing.usd_loader import _bound_material, _mesh_arrays
 
 pxr = pytest.importorskip("pxr")
-from pxr import Gf, Sdf, Usd, UsdGeom  # noqa: E402
+from pxr import Gf, Sdf, Usd, UsdGeom, UsdLux, UsdShade  # noqa: E402
 
 
 def _write_transform_stage(path):
@@ -40,7 +41,9 @@ def test_usd_scene_retains_paths_and_local_geometry(tmp_path):
     assert usd_scene.source_path == str(path.resolve())
     assert usd_scene.get_prim("/body").IsValid()
     np.testing.assert_allclose(scene._meshes[0].vertices[0], (0.0, 0.0, 0.0))
-    np.testing.assert_allclose(usd_scene.get_world_transform(mesh)[:3, 3], (2.0, 0.0, 0.0))
+    np.testing.assert_allclose(
+        usd_scene.get_world_transform(mesh)[:3, 3], (2.0, 0.0, 0.0)
+    )
     assert usd_scene.instance_ids(body) == ()
     assert usd_scene.instance_ids(mesh) == (0,)
 
@@ -52,12 +55,117 @@ def test_usd_scene_retains_paths_and_local_geometry(tmp_path):
     updated = np.eye(4, dtype=np.float32)
     updated[:3, 3] = (4.0, 5.0, 6.0)
     usd_scene.update_local_transform(body, updated)
-    np.testing.assert_allclose(usd_scene.get_world_transform(mesh)[:3, 3], (4.0, 5.0, 6.0))
-    np.testing.assert_allclose(scene._instance_transform_cache[0, :3, 3], (4.0, 5.0, 6.0))
+    np.testing.assert_allclose(
+        usd_scene.get_world_transform(mesh)[:3, 3], (4.0, 5.0, 6.0)
+    )
+    np.testing.assert_allclose(
+        scene._instance_transform_cache[0, :3, 3], (4.0, 5.0, 6.0)
+    )
 
     scene.clear()
     with pytest.raises(RuntimeError, match="invalidated"):
         usd_scene.get_world_transform(mesh)
+
+
+def test_direct_material_relationship_without_applied_api_resolves(tmp_path):
+    stage = Usd.Stage.CreateInMemory()
+    material = UsdShade.Material.Define(stage, "/Material")
+    subset = UsdGeom.Subset.Define(stage, "/Subset")
+    subset.GetPrim().CreateRelationship("material:binding").SetTargets(
+        [material.GetPath()]
+    )
+
+    assert not subset.GetPrim().HasAPI(UsdShade.MaterialBindingAPI)
+    assert _bound_material(subset.GetPrim(), UsdShade).GetPath() == material.GetPath()
+
+
+def test_mesh_arrays_selects_unreal_st_zero_uv_set():
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/Mesh")
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    expected = [Gf.Vec2f(0.1, 0.2), Gf.Vec2f(0.3, 0.4), Gf.Vec2f(0.5, 0.6)]
+    UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
+        "st_0", Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying
+    ).Set(expected)
+
+    arrays = _mesh_arrays(mesh, UsdGeom)
+
+    np.testing.assert_allclose(arrays[2], expected)
+
+
+@pytest.mark.parametrize(
+    ("name", "type_name", "values"),
+    [
+        (
+            "uv0",
+            Sdf.ValueTypeNames.Float2Array,
+            [Gf.Vec2f(0.1, 0.2), Gf.Vec2f(0.3, 0.4), Gf.Vec2f(0.5, 0.6)],
+        ),
+        (
+            "map1",
+            Sdf.ValueTypeNames.TexCoord2dArray,
+            [Gf.Vec2d(0.1, 0.2), Gf.Vec2d(0.3, 0.4), Gf.Vec2d(0.5, 0.6)],
+        ),
+    ],
+)
+def test_mesh_arrays_accepts_common_uv_names_and_types(name, type_name, values):
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/Mesh")
+    mesh.CreatePointsAttr(
+        [
+            Gf.Vec3f(0.0, 0.0, 0.0),
+            Gf.Vec3f(1.0, 0.0, 0.0),
+            Gf.Vec3f(0.0, 1.0, 0.0),
+        ]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    UsdGeom.PrimvarsAPI(mesh).CreatePrimvar(
+        name, type_name, UsdGeom.Tokens.faceVarying
+    ).Set(values)
+
+    np.testing.assert_allclose(_mesh_arrays(mesh, UsdGeom)[2], values)
+
+
+def test_sphere_light_imports_as_five_centimeter_analytic_light(tmp_path):
+    path = tmp_path / "sphere_light.usda"
+    stage = Usd.Stage.CreateNew(str(path))
+    UsdGeom.SetStageMetersPerUnit(stage, 0.01)
+    light = UsdLux.SphereLight.Define(stage, "/Light")
+    light.AddTranslateOp().Set(Gf.Vec3d(100.0, 200.0, 300.0))
+    light.CreateColorAttr(Gf.Vec3f(0.5, 0.25, 1.0))
+    light.CreateIntensityAttr(10.0)
+    light.CreateExposureAttr(1.0)
+    mesh = UsdGeom.Mesh.Define(stage, "/Mesh")
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    stage.GetRootLayer().Save()
+
+    scene = Scene(None)
+    assert scene.load_from_usd(path, convert_up_axis=False, load_usd_lights=True)
+    assert scene.mesh_count == 1
+    assert len(scene._instances) == 1
+    assert scene.light_count == 1
+    position, radius, color, intensity = scene._sphere_lights[0]
+    np.testing.assert_allclose(position, (1.0, 2.0, 3.0))
+    assert radius == pytest.approx(0.05)
+    np.testing.assert_allclose(color, (0.5, 0.25, 1.0))
+    assert intensity == pytest.approx(20.0)
+    assert (
+        scene.usd_scene.instance_ids(scene.usd_scene.require_transform("/Light")) == ()
+    )
+
+    disabled_scene = Scene(None)
+    assert disabled_scene.load_from_usd(path, load_usd_lights=False)
+    assert disabled_scene.mesh_count == 1
+    assert disabled_scene.light_count == 0
 
 
 def test_reflected_face_varying_mesh_keeps_world_shading_frame_aligned(tmp_path):
@@ -81,7 +189,10 @@ def test_reflected_face_varying_mesh_keeps_world_shading_frame_aligned(tmp_path)
     loaded = scene._meshes[0]
     world = scene._instance_transform_cache[0]
     world_positions = (
-        np.concatenate((loaded.vertices, np.ones((len(loaded.vertices), 1), dtype=np.float32)), axis=1)
+        np.concatenate(
+            (loaded.vertices, np.ones((len(loaded.vertices), 1), dtype=np.float32)),
+            axis=1,
+        )
         @ world.T
     )[:, :3]
     tri = loaded.indices[0]

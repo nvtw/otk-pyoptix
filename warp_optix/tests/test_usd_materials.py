@@ -11,6 +11,7 @@ from warp_optix.pathtracing.usd_loader import (
     _ambient_light_from_custom_layer_data,
     _decode_packed_orm,
     _decode_udim,
+    _mdl_texture_inputs,
     _fit_textures_to_budget,
     _normalize_mesh_uvs_for_udim_atlas,
     _rebase_missing_texture,
@@ -42,7 +43,9 @@ def test_missing_texture_rebases_to_stage_local_texture_tree(tmp_path):
 
     broken = tmp_path / "textures" / "kit" / "albedo.<UDIM>.png"
 
-    assert _rebase_missing_texture(stage_path, broken) == texture.with_name("albedo.<UDIM>.png")
+    assert _rebase_missing_texture(stage_path, broken) == texture.with_name(
+        "albedo.<UDIM>.png"
+    )
 
 
 def test_omniverse_ambient_light_metadata_is_preserved():
@@ -96,11 +99,113 @@ class _Shader:
         return self._sub_identifier if context == "mdl" else ""
 
 
+def test_collected_mdl_source_exposes_pbr_textures(monkeypatch, tmp_path):
+    texture_paths = {}
+    for name in ("base.png", "normal.png", "mask.png"):
+        texture_path = tmp_path / name
+        texture_path.touch()
+        texture_paths[name] = texture_path
+    mdl_path = tmp_path / "material.mdl"
+    mdl_path.write_text(
+        """
+        export material Example(
+            uniform texture_2d Num1_BaseColor = texture_2d("base.png"),
+            uniform texture_2d Num2_Normal = texture_2d("normal.png"),
+            uniform texture_2d Num3_Mask = texture_2d("mask.png"))
+        = material();
+        """
+    )
+    shader = _Shader({}, source_asset=str(mdl_path))
+    inputs = _mdl_texture_inputs(shader)
+
+    assert inputs == {
+        "diffuse_texture": texture_paths["base.png"],
+        "normalmap_texture": texture_paths["normal.png"],
+        "ORM_texture": texture_paths["mask.png"],
+    }
+
+    requests = []
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+    material = type("Material", (), {"GetInputs": lambda self: []})()
+    result = usd_loader._material_to_pbr(
+        material,
+        object(),
+        lambda path, srgb: requests.append((path, srgb)) or len(requests) - 1,
+    )
+
+    assert result["base_color_texture"]["index"] == 0
+    assert result["normal_texture"]["index"] == 2
+    assert result["metallic_roughness_texture"]["index"] == 1
+    assert requests == [
+        (texture_paths["base.png"], True),
+        (texture_paths["mask.png"], False),
+        (texture_paths["normal.png"], False),
+    ]
+
+
+def test_collected_mdl_source_infers_common_texture_parameter_names(tmp_path):
+    texture_names = (
+        "albedo.png",
+        "normal.png",
+        "roughness.png",
+        "metalness.png",
+        "emission.png",
+        "opacity.png",
+    )
+    for name in texture_names:
+        (tmp_path / name).touch()
+    mdl_path = tmp_path / "material.mdl"
+    mdl_path.write_text(
+        """
+        export material Example(
+            uniform texture_2d AlbedoMap = texture_2d("albedo.png"),
+
+
+
+            uniform texture_2d SurfaceNormalTexture = texture_2d("normal.png"),
+            uniform texture_2d SurfaceRoughnessMap = texture_2d("roughness.png"),
+            uniform texture_2d MetalnessTexture = texture_2d("metalness.png"),
+            uniform texture_2d EmissionMap = texture_2d("emission.png"),
+            uniform texture_2d OpacityMap = texture_2d("opacity.png"))
+        = material();
+        """
+    )
+
+    assert _mdl_texture_inputs(_Shader({}, source_asset=str(mdl_path))) == {
+        "diffuse_texture": tmp_path / "albedo.png",
+        "normalmap_texture": tmp_path / "normal.png",
+        "reflectionroughness_texture": tmp_path / "roughness.png",
+        "metallic_texture": tmp_path / "metalness.png",
+        "emissive_texture": tmp_path / "emission.png",
+    }
+
+
+def test_authored_mdl_inputs_infer_common_texture_parameter_names(
+    monkeypatch, tmp_path
+):
+    albedo = tmp_path / "albedo.png"
+    albedo.touch()
+    shader = _Shader({"Base_Color_Map": str(albedo)}, shader_id="CustomMdl")
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+    requests = []
+
+    result = usd_loader._material_to_pbr(
+        None, object(), lambda path, srgb: requests.append((path, srgb)) or 0
+    )
+
+    assert result["base_color_texture"]["index"] == 0
+    assert requests == [(albedo, True)]
+
+
 def test_separate_roughness_map_is_packed_with_metallic_constant(tmp_path):
     roughness_path = tmp_path / "roughness.png"
-    Image.fromarray(np.asarray([[[64, 64, 64, 255]]], dtype=np.uint8), mode="RGBA").save(
-        roughness_path
-    )
+    Image.fromarray(
+        np.asarray([[[64, 64, 64, 255]]], dtype=np.uint8), mode="RGBA"
+    ).save(roughness_path)
     spec = (
         "packed_orm",
         Path(roughness_path),
@@ -134,7 +239,9 @@ def test_omnipbr_separate_maps_select_packed_gltf_workflow(monkeypatch, tmp_path
             "metallic_constant": 1.0,
         }
     )
-    monkeypatch.setattr(usd_loader, "_surface_shader", lambda material, UsdShade: shader)
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
     requests = []
 
     material = type("Material", (), {"GetInputs": lambda self: []})()
@@ -160,7 +267,9 @@ def test_fresnel_emissive_mdl_inputs_are_preserved(monkeypatch):
             "reflection_roughness": 0.05,
         }
     )
-    monkeypatch.setattr(usd_loader, "_surface_shader", lambda material, UsdShade: shader)
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
     material = type("Material", (), {"GetInputs": lambda self: []})()
 
     result = usd_loader._material_to_pbr(material, object(), lambda path, srgb: -1)
@@ -170,9 +279,13 @@ def test_fresnel_emissive_mdl_inputs_are_preserved(monkeypatch):
     assert result["roughness"] == 0.05
 
 
-def test_omniglass_source_asset_selects_transmission_without_authored_inputs(monkeypatch):
+def test_omniglass_source_asset_selects_transmission_without_authored_inputs(
+    monkeypatch,
+):
     shader = _Shader({}, source_asset="OmniGlass.mdl", sub_identifier="OmniGlass")
-    monkeypatch.setattr(usd_loader, "_surface_shader", lambda material, UsdShade: shader)
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
     material = type("Material", (), {"GetInputs": lambda self: []})()
 
     result = usd_loader._material_to_pbr(material, object(), lambda path, srgb: -1)
@@ -200,7 +313,9 @@ def test_omnipbr_honors_disabled_orm_and_surface_controls(monkeypatch, tmp_path)
         source_asset="OmniPBR.mdl",
         sub_identifier="OmniPBR",
     )
-    monkeypatch.setattr(usd_loader, "_surface_shader", lambda material, UsdShade: shader)
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
     material = type("Material", (), {"GetInputs": lambda self: []})()
 
     result = usd_loader._material_to_pbr(material, object(), lambda path, srgb: 3)
@@ -212,7 +327,9 @@ def test_omnipbr_honors_disabled_orm_and_surface_controls(monkeypatch, tmp_path)
     assert result["base_color_desaturation"] == 0.3
     assert result["base_color_texture"]["transform"]["scale"] == (2.0, 3.0)
     assert result["base_color_texture"]["transform"]["offset"] == (0.1, 0.25)
-    assert result["base_color_texture"]["transform"]["rotation"] == pytest.approx(np.pi / 2.0)
+    assert result["base_color_texture"]["transform"]["rotation"] == pytest.approx(
+        np.pi / 2.0
+    )
 
 
 def test_udim_tiles_decode_to_horizontal_atlas(tmp_path):
@@ -223,14 +340,18 @@ def test_udim_tiles_decode_to_horizontal_atlas(tmp_path):
         (1003, (0, 0, 255, 255)),
     ):
         tile_path = tmp_path / f"color.{tile}.png"
-        Image.fromarray(np.full((2, 2, 4), color, dtype=np.uint8), mode="RGBA").save(tile_path)
+        Image.fromarray(np.full((2, 2, 4), color, dtype=np.uint8), mode="RGBA").save(
+            tile_path
+        )
         paths.append((tile, tile_path))
 
     atlas = _decode_udim(tuple(paths))
 
     assert atlas.shape == (2, 6, 4)
     assert atlas.dtype == np.uint8
-    np.testing.assert_array_equal(atlas[0, (0, 2, 4), :3], np.eye(3, dtype=np.uint8) * 255)
+    np.testing.assert_array_equal(
+        atlas[0, (0, 2, 4), :3], np.eye(3, dtype=np.uint8) * 255
+    )
 
 
 def test_udim_size_limit_applies_per_tile_not_to_completed_atlas(tmp_path):

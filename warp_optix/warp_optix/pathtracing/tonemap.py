@@ -44,9 +44,21 @@ OUTPUT_SPEC_HITDIST = 8
 @wp.func
 def to_srgb(color: wp.vec3) -> wp.vec3:
     """Linear->sRGB transfer function."""
-    r = wp.where(color[0] <= 0.0031308, color[0] * 12.92, wp.pow(wp.max(color[0], 0.0), 1.0 / 2.4) * 1.055 - 0.055)
-    g = wp.where(color[1] <= 0.0031308, color[1] * 12.92, wp.pow(wp.max(color[1], 0.0), 1.0 / 2.4) * 1.055 - 0.055)
-    b = wp.where(color[2] <= 0.0031308, color[2] * 12.92, wp.pow(wp.max(color[2], 0.0), 1.0 / 2.4) * 1.055 - 0.055)
+    r = wp.where(
+        color[0] <= 0.0031308,
+        color[0] * 12.92,
+        wp.pow(wp.max(color[0], 0.0), 1.0 / 2.4) * 1.055 - 0.055,
+    )
+    g = wp.where(
+        color[1] <= 0.0031308,
+        color[1] * 12.92,
+        wp.pow(wp.max(color[1], 0.0), 1.0 / 2.4) * 1.055 - 0.055,
+    )
+    b = wp.where(
+        color[2] <= 0.0031308,
+        color[2] * 12.92,
+        wp.pow(wp.max(color[2], 0.0), 1.0 / 2.4) * 1.055 - 0.055,
+    )
     return wp.vec3(r, g, b)
 
 
@@ -130,9 +142,15 @@ def tonemap_aces(color: wp.vec3) -> wp.vec3:
 def tonemap_agx(color: wp.vec3) -> wp.vec3:
     """AgX tonemapper (returns linear display-referred color, matches shader)."""
     c = wp.vec3(
-        0.842479062253094 * color[0] + 0.0423282422610123 * color[1] + 0.0423756549057051 * color[2],
-        0.0784335999999992 * color[0] + 0.878468636469772 * color[1] + 0.0784336 * color[2],
-        0.0792237451477643 * color[0] + 0.0791661274605434 * color[1] + 0.879142973793104 * color[2],
+        0.842479062253094 * color[0]
+        + 0.0423282422610123 * color[1]
+        + 0.0423756549057051 * color[2],
+        0.0784335999999992 * color[0]
+        + 0.878468636469772 * color[1]
+        + 0.0784336 * color[2],
+        0.0792237451477643 * color[0]
+        + 0.0791661274605434 * color[1]
+        + 0.879142973793104 * color[2],
     )
     min_ev = -12.47393
     max_ev = 4.026069
@@ -150,9 +168,15 @@ def tonemap_agx(color: wp.vec3) -> wp.vec3:
     v = wp.vec3(c[0] * v[0] + 0.1191, c[1] * v[1] + 0.1191, c[2] * v[2] + 0.1191)
     v = wp.vec3(c[0] * v[0] - 0.0023, c[1] * v[1] - 0.0023, c[2] * v[2] - 0.0023)
     return wp.vec3(
-        1.19687900512017 * v[0] + -0.0528968517574562 * v[1] + -0.0529716355144438 * v[2],
-        -0.0980208811401368 * v[0] + 1.15190312990417 * v[1] + -0.0980434501171241 * v[2],
-        -0.0990297440797205 * v[0] + -0.0989611768448433 * v[1] + 1.15107367264116 * v[2],
+        1.19687900512017 * v[0]
+        + -0.0528968517574562 * v[1]
+        + -0.0529716355144438 * v[2],
+        -0.0980208811401368 * v[0]
+        + 1.15190312990417 * v[1]
+        + -0.0980434501171241 * v[2],
+        -0.0990297440797205 * v[0]
+        + -0.0989611768448433 * v[1]
+        + 1.15107367264116 * v[2],
     )
 
 
@@ -178,12 +202,68 @@ def tonemap_khronos_pbr(color: wp.vec3) -> wp.vec3:
 def tonemap_aces_srgb(color: wp.vec3) -> wp.vec3:
     """Apply hue-preserving ACES highlight rolloff and encode as sRGB."""
     peak = wp.max(color[0], wp.max(color[1], color[2]))
-    mapped_peak = peak * (2.51 * peak + 0.03) / (
-        peak * (2.43 * peak + 0.59) + 0.14
-    )
+    mapped_peak = peak * (2.51 * peak + 0.03) / (peak * (2.43 * peak + 0.59) + 0.14)
     scale = wp.clamp(mapped_peak, 0.0, 1.0) / wp.max(peak, 1.0e-6)
     mapped = wp.vec3(color[0] * scale, color[1] * scale, color[2] * scale)
     return to_srgb(mapped)
+
+
+@wp.kernel
+def _reset_auto_exposure_stats(stats: wp.array(dtype=wp.float32)):
+    stats[0] = 0.0
+    stats[1] = 0.0
+
+
+@wp.kernel
+def _meter_auto_exposure(
+    hdr_input: wp.array2d(dtype=wp.vec4),
+    stats: wp.array(dtype=wp.float32),
+    width: int,
+    height: int,
+    min_luminance_ev: float,
+    max_luminance_ev: float,
+):
+    """Accumulate a center-weighted log-average luminance on a 4x4 grid."""
+    tile_x, tile_y = wp.tid()
+    x = tile_x * 4 + 2
+    y = tile_y * 4 + 2
+    if x >= width or y >= height:
+        return
+    color = hdr_input[y, x]
+    luminance = color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722
+    min_luminance = wp.pow(2.0, min_luminance_ev)
+    max_luminance = wp.pow(2.0, max_luminance_ev)
+    luminance = wp.clamp(luminance, min_luminance, max_luminance)
+    nx = (wp.float32(x) + 0.5) / wp.float32(width) * 2.0 - 1.0
+    ny = (wp.float32(y) + 0.5) / wp.float32(height) * 2.0 - 1.0
+    weight = 1.0 / (1.0 + 4.0 * (nx * nx + ny * ny))
+    log_luminance = wp.log(luminance) / wp.log(2.0)
+    wp.atomic_add(stats, 0, log_luminance * weight)
+    wp.atomic_add(stats, 1, weight)
+
+
+@wp.kernel
+def _adapt_auto_exposure(
+    stats: wp.array(dtype=wp.float32),
+    exposure_ev: wp.array(dtype=wp.float32),
+    target_luminance: float,
+    min_exposure_ev: float,
+    max_exposure_ev: float,
+    brighten_speed: float,
+    darken_speed: float,
+    delta_time: float,
+):
+    """Temporally adapt exposure in EV without a CPU readback."""
+    average_log_luminance = stats[0] / wp.max(stats[1], 1.0e-6)
+    target_ev = wp.clamp(
+        wp.log(wp.max(target_luminance, 1.0e-6)) / wp.log(2.0) - average_log_luminance,
+        min_exposure_ev,
+        max_exposure_ev,
+    )
+    current_ev = exposure_ev[0]
+    speed = brighten_speed if target_ev > current_ev else darken_speed
+    alpha = 1.0 - wp.exp(-wp.max(speed, 0.0) * wp.max(delta_time, 0.0))
+    exposure_ev[0] = current_ev + (target_ev - current_ev) * alpha
 
 
 @wp.kernel
@@ -193,6 +273,8 @@ def tonemap_kernel(
     width: int,
     height: int,
     exposure: float,
+    auto_exposure_ev: wp.array(dtype=wp.float32),
+    auto_exposure_enabled: int,
     method: int,
     is_active: int,
     brightness: float,
@@ -222,7 +304,10 @@ def tonemap_kernel(
     # This compensates the camera-space Y flip applied in projection.
     source_y = height - 1 - y
     hdr = hdr_input[source_y, x]
-    color = wp.vec3(hdr[0], hdr[1], hdr[2]) * exposure
+    exposure_multiplier = exposure
+    if auto_exposure_enabled == 1:
+        exposure_multiplier *= wp.pow(2.0, auto_exposure_ev[0])
+    color = wp.vec3(hdr[0], hdr[1], hdr[2]) * exposure_multiplier
 
     if is_active == 1:
         if method == TONEMAP_FILMIC:
@@ -378,6 +463,16 @@ class Tonemapper:
         self.contrast = 1.0
         self.saturation = 1.0
         self.vignette = 0.0
+        self.auto_exposure = False
+        self.auto_exposure_target = 0.18
+        self.auto_exposure_min_ev = -6.0
+        self.auto_exposure_max_ev = 6.0
+        self.auto_exposure_brighten_speed = 1.5
+        self.auto_exposure_darken_speed = 3.0
+        self.auto_exposure_min_luminance_ev = -12.0
+        self.auto_exposure_max_luminance_ev = 16.0
+        self._auto_exposure_stats = wp.zeros(2, dtype=wp.float32, device="cuda")
+        self._auto_exposure_ev = wp.zeros(1, dtype=wp.float32, device="cuda")
 
         # Output buffer
         self._ldr_output = wp.zeros((height, width), dtype=wp.vec4, device="cuda")
@@ -394,13 +489,74 @@ class Tonemapper:
             self.height = height
             self._ldr_output = wp.zeros((height, width), dtype=wp.vec4, device="cuda")
 
-    def process(self, hdr_input: wp.array):
+    def configure_auto_exposure(
+        self,
+        enabled: bool,
+        *,
+        target_luminance: float | None = None,
+        min_ev: float | None = None,
+        max_ev: float | None = None,
+        brighten_speed: float | None = None,
+        darken_speed: float | None = None,
+    ) -> None:
+        """Configure temporal automatic exposure."""
+        self.auto_exposure = bool(enabled)
+        if target_luminance is not None:
+            self.auto_exposure_target = max(float(target_luminance), 1.0e-6)
+        if min_ev is not None:
+            self.auto_exposure_min_ev = float(min_ev)
+        if max_ev is not None:
+            self.auto_exposure_max_ev = float(max_ev)
+        if self.auto_exposure_min_ev > self.auto_exposure_max_ev:
+            raise ValueError("min_ev must not exceed max_ev")
+        if brighten_speed is not None:
+            self.auto_exposure_brighten_speed = max(float(brighten_speed), 0.0)
+        if darken_speed is not None:
+            self.auto_exposure_darken_speed = max(float(darken_speed), 0.0)
+
+    def process(self, hdr_input: wp.array, delta_time: float = 1.0 / 60.0):
         """
         Apply tonemapping to HDR input.
 
         Args:
             hdr_input: HDR input image (wp.array2d of vec4)
+            delta_time: Elapsed display time used for eye adaptation.
         """
+        if self.auto_exposure:
+            wp.launch(
+                _reset_auto_exposure_stats,
+                dim=1,
+                inputs=[self._auto_exposure_stats],
+                device="cuda",
+            )
+            wp.launch(
+                _meter_auto_exposure,
+                dim=((self.width + 3) // 4, (self.height + 3) // 4),
+                inputs=[
+                    hdr_input,
+                    self._auto_exposure_stats,
+                    int(self.width),
+                    int(self.height),
+                    self.auto_exposure_min_luminance_ev,
+                    self.auto_exposure_max_luminance_ev,
+                ],
+                device="cuda",
+            )
+            wp.launch(
+                _adapt_auto_exposure,
+                dim=1,
+                inputs=[
+                    self._auto_exposure_stats,
+                    self._auto_exposure_ev,
+                    self.auto_exposure_target,
+                    self.auto_exposure_min_ev,
+                    self.auto_exposure_max_ev,
+                    self.auto_exposure_brighten_speed,
+                    self.auto_exposure_darken_speed,
+                    float(delta_time),
+                ],
+                device="cuda",
+            )
         wp.launch(
             tonemap_kernel,
             dim=(self.width, self.height),
@@ -410,6 +566,8 @@ class Tonemapper:
                 int(self.width),
                 int(self.height),
                 self.exposure,
+                self._auto_exposure_ev,
+                1 if self.auto_exposure else 0,
                 int(self.method),
                 1 if self.is_active else 0,
                 self.brightness,

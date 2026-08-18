@@ -162,6 +162,13 @@ class EnvAccel:
 
 
 @wp.struct
+class SphereLight:
+    position_radius: wp.vec4
+    radiance: wp.vec3
+    pad: wp.float32
+
+
+@wp.struct
 class TransformMatrix3x4:
     row0: wp.vec4
     row1: wp.vec4
@@ -213,6 +220,7 @@ class PathtraceLaunchParams:
     frame_index: wp.uint32
     max_bounces: wp.uint32
     direct_light_samples: wp.uint32
+    russian_roulette_start_bounce: wp.uint32
     output_mode: wp.int32
 
     device_camera: wp.array(dtype=DeviceCameraState)
@@ -243,6 +251,8 @@ class PathtraceLaunchParams:
     env_accel: wp.array(dtype=EnvAccel)
     env_accel_count: wp.uint32
     sky: PhysicalSkyParams
+    sphere_lights: wp.array(dtype=SphereLight)
+    sphere_light_count: wp.uint32
 
     render_primitives: wp.array(dtype=RenderPrimitive)
     render_prim_count: wp.uint32
@@ -1147,6 +1157,83 @@ class LightSample:
     direction: wp.vec3
     radiance: wp.vec3
     pdf: wp.float32
+
+
+@wp.struct
+class SphereLightSample:
+    direction: wp.vec3
+    radiance: wp.vec3
+    pdf: wp.float32
+    distance: wp.float32
+
+
+@wp.func
+def _sample_sphere_light(
+    params: PathtraceLaunchParams,
+    position: wp.vec3,
+    xi0: wp.float32,
+    xi1: wp.float32,
+    xi2: wp.float32,
+) -> SphereLightSample:
+    """Sample one analytic sphere light uniformly over its visible solid angle."""
+    sample = SphereLightSample()
+    sample.direction = wp.vec3(0.0, 0.0, 1.0)
+    sample.radiance = wp.vec3(0.0, 0.0, 0.0)
+    sample.pdf = 0.0
+    sample.distance = 0.0
+    count = int(params.sphere_light_count)
+    if count <= 0:
+        return sample
+
+    scaled_index = xi0 * wp.float32(count)
+    index = wp.min(int(scaled_index), count - 1)
+    light = params.sphere_lights[index]
+    center = wp.vec3(
+        light.position_radius[0],
+        light.position_radius[1],
+        light.position_radius[2],
+    )
+    radius = wp.max(light.position_radius[3], 1.0e-5)
+    to_center = center - position
+    distance_squared = wp.dot(to_center, to_center)
+    radius_squared = radius * radius
+    if distance_squared <= radius_squared * 1.0001:
+        z = xi1 * 2.0 - 1.0
+        phi = xi2 * 2.0 * wp.pi
+        radial = wp.sqrt(wp.max(1.0 - z * z, 0.0))
+        sample.direction = wp.vec3(radial * wp.cos(phi), z, radial * wp.sin(phi))
+        sample.distance = radius
+        sample.pdf = 1.0 / (4.0 * wp.pi * wp.float32(count))
+    else:
+        distance = wp.sqrt(distance_squared)
+        axis = to_center / distance
+        cos_theta_max = wp.sqrt(wp.max(1.0 - radius_squared / distance_squared, 0.0))
+        one_minus_cos = radius_squared / (
+            distance_squared * wp.max(1.0 + cos_theta_max, 1.0e-6)
+        )
+        cos_theta = 1.0 - xi1 * one_minus_cos
+        sin_theta = wp.sqrt(wp.max(1.0 - cos_theta * cos_theta, 0.0))
+        phi = xi2 * 2.0 * wp.pi
+        helper = (
+            wp.vec3(0.0, 0.0, 1.0)
+            if wp.abs(axis[2]) < 0.999
+            else wp.vec3(1.0, 0.0, 0.0)
+        )
+        tangent = wp.normalize(wp.cross(helper, axis))
+        bitangent = wp.cross(axis, tangent)
+        sample.direction = wp.normalize(
+            tangent * (sin_theta * wp.cos(phi))
+            + bitangent * (sin_theta * wp.sin(phi))
+            + axis * cos_theta
+        )
+        center_t = wp.dot(to_center, sample.direction)
+        discriminant = radius_squared - (distance_squared - center_t * center_t)
+        sample.distance = center_t - wp.sqrt(wp.max(discriminant, 0.0))
+        sample.pdf = 1.0 / (
+            2.0 * wp.pi * wp.max(one_minus_cos, 1.0e-8) * wp.float32(count)
+        )
+    sample.radiance = light.radiance
+    return sample
 
 
 @wp.func
@@ -2468,6 +2555,85 @@ def _make_invalid_shaded_hit() -> ShadedHitData:
 
 
 @wp.func
+def _sample_sphere_light_contribution(
+    params: PathtraceLaunchParams,
+    position: wp.vec3,
+    material: ShadedHitData,
+    to_eye: wp.vec3,
+    base_color: wp.vec3,
+    specular_color: wp.vec3,
+    xi0: wp.float32,
+    xi1: wp.float32,
+    xi2: wp.float32,
+    xi_lobe: wp.float32,
+) -> wp.vec3:
+    """Evaluate one shadowed next-event sample from the analytic light set."""
+    contribution = wp.vec3(0.0, 0.0, 0.0)
+    sample = _sample_sphere_light(params, position, xi0, xi1, xi2)
+    if (
+        sample.pdf <= 1.0e-8
+        or sample.distance <= 0.002
+        or wp.dot(sample.direction, material.normal) <= 0.0
+    ):
+        return contribution
+
+    evaluated = _bsdf_evaluate(
+        to_eye,
+        sample.direction,
+        material.normal,
+        material.Ng,
+        material.Nc,
+        material.T,
+        material.B,
+        base_color,
+        specular_color,
+        material.roughness,
+        material.metallic,
+        material.specular_scalar,
+        material.sheen_roughness,
+        material.sheen_color,
+        material.ior1,
+        material.ior2,
+        material.transmission,
+        material.diffuse_transmission_factor,
+        material.diffuse_transmission_color,
+        material.clearcoat,
+        material.clearcoat_roughness,
+        material.occlusion,
+        material.is_thin_walled,
+        xi_lobe,
+    )
+    if evaluated.pdf <= 1.0e-8:
+        return contribution
+
+    shadow = ShadowPayload()
+    shadow.visible = wp.uint32(0)
+    shadow.seed = wp.uint32(0)
+    wp.optix_trace(
+        params.tlas,
+        _offset_ray_for_direction(position, material.Ng, sample.direction),
+        sample.direction,
+        0.001,
+        wp.max(sample.distance - 0.001, 0.001),
+        0.0,
+        wp.uint32(255),
+        wp.uint32(
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
+            | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
+            | OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES
+        ),
+        wp.uint32(1),
+        wp.uint32(2),
+        wp.uint32(1),
+        shadow,
+    )
+    if shadow.visible == wp.uint32(1):
+        bsdf = evaluated.bsdf_diffuse + evaluated.bsdf_glossy
+        contribution = _mul_vec3(bsdf, sample.radiance) / sample.pdf
+    return contribution
+
+
+@wp.func
 def _evaluate_material_from_payload(
     params: PathtraceLaunchParams,
     material_id: wp.int32,
@@ -2545,7 +2711,9 @@ def _evaluate_material_from_payload(
         opacity = opacity * base_tex[3]
 
     if mat.base_color_desaturation > 0.0:
-        luminance = 0.2126 * base_color[0] + 0.7152 * base_color[1] + 0.0722 * base_color[2]
+        luminance = (
+            0.2126 * base_color[0] + 0.7152 * base_color[1] + 0.0722 * base_color[2]
+        )
         amount = wp.clamp(mat.base_color_desaturation, 0.0, 1.0)
         base_color = base_color * (1.0 - amount) + wp.vec3(luminance) * amount
     if mat.base_color_add != 0.0:
@@ -3081,7 +3249,30 @@ def primary_raygen(params: PathtraceLaunchParams):
             if shadow.visible == wp.uint32(1):
                 mis_weight = _power_heuristic(ls.pdf, bsdf_eval.pdf)
                 bsdf_sum = bsdf_eval.bsdf_diffuse + bsdf_eval.bsdf_glossy
-                hdr_radiance = _mul_vec3(bsdf_sum, ls.radiance) * (mis_weight / ls.pdf)
+                hdr_radiance = hdr_radiance + _mul_vec3(bsdf_sum, ls.radiance) * (
+                    mis_weight / ls.pdf
+                )
+
+    rng = _pcg_advance(rng)
+    sphere_xi0 = _pcg_rand01(rng)
+    rng = _pcg_advance(rng)
+    sphere_xi1 = _pcg_rand01(rng)
+    rng = _pcg_advance(rng)
+    sphere_xi2 = _pcg_rand01(rng)
+    rng = _pcg_advance(rng)
+    sphere_lobe_xi = _pcg_rand01(rng)
+    hdr_radiance = hdr_radiance + _sample_sphere_light_contribution(
+        params,
+        hit_pos,
+        pbr_mat,
+        to_eye,
+        base_color,
+        specular_color,
+        sphere_xi0,
+        sphere_xi1,
+        sphere_xi2,
+        sphere_lobe_xi,
+    )
 
     if (
         hdr_radiance[0] != hdr_radiance[0]
@@ -3295,6 +3486,28 @@ def primary_raygen(params: PathtraceLaunchParams):
                     )
                     radiance = radiance + _mul_vec3(sec_throughput, sec_light_contrib)
 
+        rng = _pcg_advance(rng)
+        sec_sphere_xi0 = _pcg_rand01(rng)
+        rng = _pcg_advance(rng)
+        sec_sphere_xi1 = _pcg_rand01(rng)
+        rng = _pcg_advance(rng)
+        sec_sphere_xi2 = _pcg_rand01(rng)
+        rng = _pcg_advance(rng)
+        sec_sphere_lobe_xi = _pcg_rand01(rng)
+        sec_sphere_contrib = _sample_sphere_light_contribution(
+            params,
+            sec_hit_pos,
+            sec_pbr,
+            sec_to_eye,
+            sec_base_color,
+            sec_specular_color,
+            sec_sphere_xi0,
+            sec_sphere_xi1,
+            sec_sphere_xi2,
+            sec_sphere_lobe_xi,
+        )
+        radiance = radiance + _mul_vec3(sec_throughput, sec_sphere_contrib)
+
         # Sample next bounce direction (GGX VNDF).
         rng = _pcg_advance(rng)
         sxi0 = _pcg_rand01(rng)
@@ -3350,7 +3563,10 @@ def primary_raygen(params: PathtraceLaunchParams):
         )
 
         # Russian roulette.
-        if depth >= 1 and not completed_thick_exit:
+        if (
+            depth >= int(params.russian_roulette_start_bounce)
+            and not completed_thick_exit
+        ):
             max_comp = wp.max(
                 sec_throughput[0], wp.max(sec_throughput[1], sec_throughput[2])
             )

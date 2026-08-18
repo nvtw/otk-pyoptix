@@ -173,6 +173,7 @@ class PathTracingViewer:
         samples_per_frame: int = 1,
         max_bounces: int = 4,
         direct_light_samples: int = 1,
+        russian_roulette_start_bounce: int = 3,
         use_halton_jitter: bool = True,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
@@ -197,6 +198,7 @@ class PathTracingViewer:
         self.max_bounces = max(1, int(max_bounces))
         self._pipeline_max_bounces = self.max_bounces
         self.direct_light_samples = max(1, int(direct_light_samples))
+        self.russian_roulette_start_bounce = max(1, int(russian_roulette_start_bounce))
         self.use_halton_jitter = bool(use_halton_jitter)
         self.enable_dlss_rr = bool(enable_dlss_rr)
         self.enable_set = bool(enable_set)
@@ -347,6 +349,7 @@ class PathTracingViewer:
         *,
         max_bounces: int | None = None,
         direct_light_samples: int | None = None,
+        russian_roulette_start_bounce: int | None = None,
         samples_per_frame: int | None = None,
     ) -> None:
         """Adjust runtime ray budgets without rebuilding the OptiX pipeline."""
@@ -364,6 +367,11 @@ class PathTracingViewer:
             if value < 1:
                 raise ValueError("direct_light_samples must be at least 1")
             self.direct_light_samples = value
+        if russian_roulette_start_bounce is not None:
+            value = int(russian_roulette_start_bounce)
+            if value < 1:
+                raise ValueError("russian_roulette_start_bounce must be at least 1")
+            self.russian_roulette_start_bounce = value
         if samples_per_frame is not None:
             value = int(samples_per_frame)
             if value < 1:
@@ -1091,6 +1099,7 @@ class PathTracingViewer:
         p.frame_index = wp.uint32(frame_index_value)
         p.max_bounces = wp.uint32(self.max_bounces)
         p.direct_light_samples = wp.uint32(self.direct_light_samples)
+        p.russian_roulette_start_bounce = wp.uint32(self.russian_roulette_start_bounce)
         p.output_mode = int(self.OUTPUT_FINAL)
         p.device_camera = self._device_camera_state
 
@@ -1181,6 +1190,16 @@ class PathTracingViewer:
         sky.grayscale = int(self.sky_grayscale)
         p.sky = sky
 
+        p.sphere_lights = (
+            None
+            if self._scene._sphere_light_data is None
+            else wp.array(
+                ptr=self._scene._sphere_light_data.ptr,
+                shape=(self._scene.light_count,),
+                dtype=pwk.SphereLight,
+            )
+        )
+        p.sphere_light_count = wp.uint32(self._scene.light_count)
         p.render_primitives = (
             None
             if self._scene._render_primitives is None or self._scene.mesh_count == 0

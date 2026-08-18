@@ -40,6 +40,8 @@ class _FakePathTracerAPI:
         self.tonemap_exposure = 1.0
         self.tonemap_contrast = 1.0
         self.tonemap_saturation = 1.0
+        self.auto_exposure_enabled = False
+        self.auto_exposure_config = None
         self.usd_scene = None
         self.usd_load = None
 
@@ -134,6 +136,10 @@ class _FakePathTracerAPI:
     def set_environment_color(self, color):
         self.environment_color = tuple(color)
 
+    def configure_auto_exposure(self, enabled, **kwargs):
+        self.auto_exposure_enabled = bool(enabled)
+        self.auto_exposure_config = kwargs
+
     def clear_scene(self):
         self.scene = _FakeScene()
 
@@ -203,6 +209,15 @@ def test_reference_sky_and_srgb_color_mapping():
     assert viewer.tonemap_saturation == 1.25
     assert viewer.tonemap_contrast == 1.1
 
+    viewer.configure_auto_exposure(True, min_ev=-5.0, max_ev=7.0)
+    assert viewer.auto_exposure_enabled
+    assert api.auto_exposure_config == {
+        "target_luminance": None,
+        "min_ev": -5.0,
+        "max_ev": 7.0,
+        "brighten_speed": None,
+        "darken_speed": None,
+    }
     np.testing.assert_allclose(
         api.sky["ground_color"], (0.21404114, 0.05087609, 0.52252155), rtol=1.0e-6
     )
@@ -231,7 +246,9 @@ def test_sky_parameters_normalize_sun_direction():
 
 def test_load_scene_from_usd_forwards_options_and_builds():
     calls = []
-    scene = SimpleNamespace(load_from_usd=lambda *args, **kwargs: calls.append((args, kwargs)) or True)
+    scene = SimpleNamespace(
+        load_from_usd=lambda *args, **kwargs: calls.append((args, kwargs)) or True
+    )
     api = PathTracerAPI.__new__(PathTracerAPI)
     api._viewer = SimpleNamespace(_scene=scene)
     api.initialize = lambda: True
@@ -254,6 +271,8 @@ def test_load_scene_from_usd_forwards_options_and_builds():
                 "max_texture_size": None,
                 "strict_sidedness": False,
                 "enable_emissive_materials": True,
+                "load_usd_lights": False,
+                "usd_light_radius": 0.05,
             },
         ),
         ("build", {}),
@@ -276,7 +295,9 @@ def test_resize_releases_old_dlss_resources_before_native_reallocation(monkeypat
     viewer._sync_prev_camera_matrices_to_current = lambda: events.append(("camera",))
     viewer._destroy_dlss_rr = lambda **kwargs: events.append(("destroy", kwargs))
     viewer._init_dlss_rr = lambda: events.append(("init",))
-    monkeypatch.setattr(viewer_module.wp, "synchronize_stream", lambda stream: events.append(("sync",)))
+    monkeypatch.setattr(
+        viewer_module.wp, "synchronize_stream", lambda stream: events.append(("sync",))
+    )
 
     viewer.resize(3840, 2160)
 
@@ -527,6 +548,8 @@ def test_viewer_loads_usd_through_public_backend_api():
             "max_texture_size": 2048,
             "strict_sidedness": False,
             "enable_emissive_materials": True,
+            "load_usd_lights": False,
+            "usd_light_radius": 0.05,
             "load_usd_environment": True,
             "usd_environment_scale": 1.0,
         },
@@ -537,16 +560,12 @@ def test_viewer_loads_usd_through_public_backend_api():
 
 def test_renderer_space_look_at_preserves_level_z_up_camera():
     api = _FakePathTracerAPI()
-    viewer = PathTracingViewerBackend(
-        device="cpu", headless=True, up_axis="Z", api=api
-    )
+    viewer = PathTracingViewerBackend(device="cpu", headless=True, up_axis="Z", api=api)
     viewer._ensure_initialized()
 
     position = np.array((1.0, 2.0, 3.0), dtype=np.float32)
     target = np.array((4.0, 6.0, 3.0), dtype=np.float32)
-    viewer.set_camera_look_at(
-        position, target, fov=52.0, renderer_space=True
-    )
+    viewer.set_camera_look_at(position, target, fov=52.0, renderer_space=True)
 
     camera_position, camera_target, camera_up, camera_fov = api.camera
     np.testing.assert_allclose(camera_position, position)
@@ -644,18 +663,23 @@ def test_quality_modes_and_runtime_ray_budgets():
     renderer._pipeline_max_bounces = 6
     renderer.max_bounces = 4
     renderer.direct_light_samples = 1
+    renderer.russian_roulette_start_bounce = 3
     renderer.samples_per_frame = 1
 
     renderer.set_ray_budget(
         max_bounces=2,
         direct_light_samples=3,
+        russian_roulette_start_bounce=5,
         samples_per_frame=4,
     )
 
     assert renderer.max_bounces == 2
     assert renderer.direct_light_samples == 3
+    assert renderer.russian_roulette_start_bounce == 5
     assert renderer.samples_per_frame == 4
     with pytest.raises(ValueError, match="compiled limit"):
         renderer.set_ray_budget(max_bounces=7)
     with pytest.raises(ValueError, match="at least 1"):
         renderer.set_ray_budget(direct_light_samples=0)
+    with pytest.raises(ValueError, match="at least 1"):
+        renderer.set_ray_budget(russian_roulette_start_bounce=0)

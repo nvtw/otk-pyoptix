@@ -8,9 +8,11 @@ no intermediate glTF file is written.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 from collections import defaultdict
+from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,7 +26,6 @@ logger = logging.getLogger(__name__)
 _MAX_TEXTURE_ATLAS_BYTES = 1 << 30
 
 
-
 def _import_usd():
     try:
         from pxr import Sdf, Usd, UsdGeom, UsdLux, UsdShade
@@ -32,12 +33,14 @@ def _import_usd():
         raise ImportError(
             "USD loading requires the optional OpenUSD Python bindings. "
             "Install warp_optix with the 'usd' extra (pip install "
-            "-e \"warp_optix[pathtracing,usd]\")."
+            '-e "warp_optix[pathtracing,usd]").'
         ) from exc
     return Sdf, Usd, UsdGeom, UsdLux, UsdShade
 
 
-def _as_float_tuple(value: Any, size: int, default: tuple[float, ...]) -> tuple[float, ...]:
+def _as_float_tuple(
+    value: Any, size: int, default: tuple[float, ...]
+) -> tuple[float, ...]:
     if value is None:
         return default
     try:
@@ -51,7 +54,9 @@ def _as_float_tuple(value: Any, size: int, default: tuple[float, ...]) -> tuple[
     return values
 
 
-def _ambient_light_from_custom_layer_data(custom_layer_data: Any) -> tuple[float, float, float]:
+def _ambient_light_from_custom_layer_data(
+    custom_layer_data: Any,
+) -> tuple[float, float, float]:
     """Read Omniverse sceneDb ambient irradiance from USD layer metadata."""
     data = dict(custom_layer_data or {})
     render_settings = dict(data.get("renderSettings", {}) or {})
@@ -67,9 +72,21 @@ def _material_inputs(material, shader) -> dict[str, Any]:
     """Return authored material values, with shader defaults as a fallback."""
     values: dict[str, Any] = {}
     if shader:
-        values.update({str(i.GetBaseName()): i.Get() for i in shader.GetInputs() if i.Get() is not None})
+        values.update(
+            {
+                str(i.GetBaseName()): i.Get()
+                for i in shader.GetInputs()
+                if i.Get() is not None
+            }
+        )
     if material:
-        values.update({str(i.GetBaseName()): i.Get() for i in material.GetInputs() if i.Get() is not None})
+        values.update(
+            {
+                str(i.GetBaseName()): i.Get()
+                for i in material.GetInputs()
+                if i.Get() is not None
+            }
+        )
     return values
 
 
@@ -85,6 +102,40 @@ def _surface_shader(material, UsdShade):
         if child.IsA(UsdShade.Shader):
             return UsdShade.Shader(child)
     return None
+
+
+def _bound_material(prim, UsdShade):
+    """Resolve direct bindings even when MaterialBindingAPI was not applied."""
+    if not prim:
+        return None
+    if not prim.HasAPI(UsdShade.MaterialBindingAPI):
+        relationships = sorted(
+            (
+                relationship
+                for relationship in prim.GetRelationships()
+                if relationship.GetName().startswith("material:binding")
+            ),
+            key=lambda relationship: relationship.GetName() != "material:binding",
+        )
+        for relationship in relationships:
+            targets = relationship.GetTargets()
+            if targets:
+                material = UsdShade.Material(prim.GetStage().GetPrimAtPath(targets[0]))
+                if material:
+                    return material
+    return UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()[0]
+
+
+def _material_bind_subsets(prim, UsdGeom, UsdShade):
+    """Return material subsets without requiring an applied binding schema."""
+    if prim.HasAPI(UsdShade.MaterialBindingAPI):
+        return UsdShade.MaterialBindingAPI(prim).GetMaterialBindSubsets()
+    return [
+        UsdGeom.Subset(child)
+        for child in prim.GetChildren()
+        if child.IsA(UsdGeom.Subset)
+        and str(UsdGeom.Subset(child).GetFamilyNameAttr().Get()) == "materialBind"
+    ]
 
 
 def _shader_source_identity(shader) -> str:
@@ -109,6 +160,8 @@ def _shader_source_identity(shader) -> str:
 def _asset_path(value: Any) -> Path | None:
     if value is None:
         return None
+    if isinstance(value, (str, Path)):
+        return Path(value) if value else None
     resolved = getattr(value, "resolvedPath", "")
     authored = getattr(value, "path", "") or getattr(value, "authoredPath", "")
     path = str(resolved or authored)
@@ -121,9 +174,106 @@ def _texture_candidate_exists(path: Path) -> bool:
     return any(path.parent.glob(path.name.replace("<UDIM>", "*")))
 
 
+_MDL_TEXTURE_INPUT_ALIASES = {
+    "Num1_BaseColor": "diffuse_texture",
+    "Num1_BaseColor_1": "diffuse_texture",
+    "Num2_Normal": "normalmap_texture",
+    "Num2_Normal_1": "normalmap_texture",
+    "Num3_Mask": "ORM_texture",
+    "Num3_Mask_1": "ORM_texture",
+    "Num4_Emissive": "emissive_texture",
+    "diffuse_texture": "diffuse_texture",
+    "normalmap_texture": "normalmap_texture",
+    "ORM_texture": "ORM_texture",
+    "reflectionroughness_texture": "reflectionroughness_texture",
+    "metallic_texture": "metallic_texture",
+}
+
+
+def _mdl_texture_semantic(name: str) -> str | None:
+    """Infer a supported PBR input from a common MDL texture parameter name."""
+    exact = _MDL_TEXTURE_INPUT_ALIASES.get(name)
+    if exact is not None:
+        return exact
+    normalized = re.sub(r"[^a-z0-9]", "", name.lower())
+    if "opacity" in normalized or "transmission" in normalized:
+        return None
+    if "normal" in normalized or "bump" in normalized:
+        return "normalmap_texture"
+    if "emiss" in normalized or "emission" in normalized:
+        return "emissive_texture"
+    if (
+        normalized.startswith("orm")
+        or "ormtexture" in normalized
+        or "ormmap" in normalized
+        or "mask" in normalized
+    ):
+        return "ORM_texture"
+    if "rough" in normalized:
+        return "reflectionroughness_texture"
+    if "metal" in normalized:
+        return "metallic_texture"
+    if any(token in normalized for token in ("basecolor", "albedo", "diffuse")):
+        return "diffuse_texture"
+    return None
+
+
+@lru_cache(maxsize=None)
+def _parse_mdl_texture_inputs(mdl_path: Path) -> tuple[tuple[str, Path], ...]:
+    """Parse texture defaults from a collected MDL source asset."""
+    if not mdl_path.is_file():
+        return ()
+    source = mdl_path.read_text(errors="replace")
+    declarations = dict(
+        re.findall(
+            r'(?:uniform\s+)?texture_2d\s+(\w+)\s*=\s*texture_2d\(\s*"([^"]+)"',
+            source,
+        )
+    )
+    declarations.update(
+        re.findall(
+            r'\b(\w+)\s*:\s*texture_2d\(\s*"([^"]+)"',
+            source,
+        )
+    )
+    values = {}
+    for declaration, relative_path in declarations.items():
+        input_name = _mdl_texture_semantic(declaration)
+        if input_name is None or input_name in values:
+            continue
+        texture_path = (mdl_path.parent / relative_path).resolve()
+        if _texture_candidate_exists(texture_path):
+            values[input_name] = texture_path
+    return tuple(values.items())
+
+
+def _mdl_texture_inputs(shader) -> dict[str, Path]:
+    """Return supported PBR texture inputs from an MDL source asset."""
+    if not shader:
+        return {}
+    try:
+        source_asset = shader.GetSourceAsset("mdl")
+    except Exception:
+        return {}
+    mdl_path = _asset_path(source_asset)
+    if mdl_path is None:
+        return {}
+    return dict(_parse_mdl_texture_inputs(mdl_path))
+
+
+def _normalize_texture_inputs(values: dict[str, Any]) -> None:
+    """Add canonical aliases for authored texture inputs with common names."""
+    for name, value in tuple(values.items()):
+        semantic = _mdl_texture_semantic(name)
+        if semantic is not None and _asset_path(value) is not None:
+            values.setdefault(semantic, value)
+
+
 def _rebase_missing_texture(stage_path: Path, texture_path: Path) -> Path:
     """Rebase a broken texture asset path to a stage-local textures directory."""
-    resolved = texture_path if texture_path.is_absolute() else stage_path.parent / texture_path
+    resolved = (
+        texture_path if texture_path.is_absolute() else stage_path.parent / texture_path
+    )
     resolved = resolved.resolve()
     if _texture_candidate_exists(resolved):
         return resolved
@@ -169,7 +319,9 @@ def _decode_texture(path: Path, max_size: int | None = None) -> np.ndarray:
     return np.ascontiguousarray(arr, dtype=np.uint8)
 
 
-def _decode_udim(tiles: tuple[tuple[int, Path], ...], max_size: int | None = None) -> np.ndarray:
+def _decode_udim(
+    tiles: tuple[tuple[int, Path], ...], max_size: int | None = None
+) -> np.ndarray:
     """Decode UDIM tiles into a grid atlas using the standard 10-column layout."""
     offsets = [(number - 1001) % 10 for number, _ in tiles]
     rows = [(number - 1001) // 10 for number, _ in tiles]
@@ -189,7 +341,9 @@ def _decode_udim(tiles: tuple[tuple[int, Path], ...], max_size: int | None = Non
         for tile in images:
             resized.append(
                 np.asarray(
-                    Image.fromarray(tile, mode="RGBA").resize((width, height), Image.Resampling.LANCZOS),
+                    Image.fromarray(tile, mode="RGBA").resize(
+                        (width, height), Image.Resampling.LANCZOS
+                    ),
                     dtype=np.uint8,
                 )
             )
@@ -201,13 +355,25 @@ def _decode_udim(tiles: tuple[tuple[int, Path], ...], max_size: int | None = Non
         # Tile images are already vertically flipped; place increasing UDIM V
         # upward in UV space, which is downward in the stored image.
         storage_row = row_count - 1 - row
-        atlas[storage_row * height : (storage_row + 1) * height, column * width : (column + 1) * width] = image
+        atlas[
+            storage_row * height : (storage_row + 1) * height,
+            column * width : (column + 1) * width,
+        ] = image
     return np.ascontiguousarray(atlas, dtype=np.uint8)
 
 
 def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
     """Build glTF R=AO/G=roughness/B=metallic from separate USD maps."""
-    _, rough_path, metal_path, rough_constant, metal_constant, rough_influence, metal_influence = spec
+    (
+        _,
+        rough_path,
+        metal_path,
+        rough_constant,
+        metal_constant,
+        rough_influence,
+        metal_influence,
+    ) = spec
+
     def decode(source):
         if not source:
             return None
@@ -227,19 +393,24 @@ def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
             from PIL import Image  # noqa: PLC0415
 
             image = np.asarray(
-                Image.fromarray(image, mode="RGBA").resize((width, height), Image.Resampling.LANCZOS),
+                Image.fromarray(image, mode="RGBA").resize(
+                    (width, height), Image.Resampling.LANCZOS
+                ),
                 dtype=np.uint8,
             )
         return image[..., 0].astype(np.float32) * (1.0 / 255.0)
 
     rough_source = channel_or_constant(rough, rough_constant)
     metal_source = channel_or_constant(metal, metal_constant)
-    roughness = rough_constant * (1.0 - rough_influence) + rough_source * rough_influence
+    roughness = (
+        rough_constant * (1.0 - rough_influence) + rough_source * rough_influence
+    )
     metallic = metal_constant * (1.0 - metal_influence) + metal_source * metal_influence
     packed = np.full((height, width, 4), 255, dtype=np.uint8)
     packed[..., 1] = np.clip(roughness * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
     packed[..., 2] = np.clip(metallic * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
     return np.ascontiguousarray(packed)
+
 
 def _fit_textures_to_budget(
     textures: list[np.ndarray], max_bytes: int = _MAX_TEXTURE_ATLAS_BYTES
@@ -280,7 +451,6 @@ def _fit_textures_to_budget(
     return resized
 
 
-
 def _preview_texture(shader_input) -> Path | None:
     """Follow a UsdPreviewSurface input to a UsdUVTexture file input."""
     if not shader_input:
@@ -304,9 +474,11 @@ def _material_to_pbr(
     enable_emissive_materials: bool = True,
 ) -> dict[str, Any]:
     shader = _surface_shader(material, UsdShade)
-    values = _material_inputs(material, shader)
+    values = _mdl_texture_inputs(shader)
+    values.update(_material_inputs(material, shader))
     shader_id = _shader_source_identity(shader)
 
+    _normalize_texture_inputs(values)
     texture_scale = _as_float_tuple(values.get("texture_scale"), 2, (1.0, 1.0))
     texture_offset = _as_float_tuple(values.get("texture_translate"), 2, (0.0, 0.0))
     texture_rotation = np.deg2rad(float(values.get("texture_rotate", 0.0)))
@@ -411,7 +583,11 @@ def _material_to_pbr(
 
     # NVIDIA MDL OmniPBR/OmniGlass conventions used by Marbles.
     identity_lower = shader_id.lower()
-    is_glass = "omniglass" in identity_lower or "glass_color" in values or "glass_ior" in values
+    is_glass = (
+        "omniglass" in identity_lower
+        or "glass_color" in values
+        or "glass_ior" in values
+    )
     diffuse_constant = _as_float_tuple(
         values.get("diffuse_color_constant", values.get("albedo_color")),
         3,
@@ -436,9 +612,15 @@ def _material_to_pbr(
         3,
         (0.0, 0.0, 0.0),
     )
-    emissive_scale = float(values.get("emissive_intensity", 0.0)) if emission_enabled else 0.0
+    emissive_scale = (
+        float(values.get("emissive_intensity", 0.0)) if emission_enabled else 0.0
+    )
     orm_enabled = bool(values.get("enable_ORM_texture", True))
-    orm_texture = texture("ORM_texture") if orm_enabled else {"index": -1, "texCoord": texture_uv_set}
+    orm_texture = (
+        texture("ORM_texture")
+        if orm_enabled
+        else {"index": -1, "texCoord": texture_uv_set}
+    )
     has_orm = orm_texture["index"] >= 0
     normal_texture = texture("normalmap_texture")
     if normal_texture["index"] >= 0:
@@ -448,12 +630,17 @@ def _material_to_pbr(
     roughness = float(
         values.get(
             "frosting_roughness",
-            values.get("reflection_roughness_constant", values.get("reflection_roughness", roughness_default)),
+            values.get(
+                "reflection_roughness_constant",
+                values.get("reflection_roughness", roughness_default),
+            ),
         )
     )
     if not has_orm and packed_orm_index is not None:
         orm_index = packed_orm_index(
-            connected_path("reflectionroughness_texture", "reflection_roughness_texture"),
+            connected_path(
+                "reflectionroughness_texture", "reflection_roughness_texture"
+            ),
             connected_path("metallic_texture"),
             roughness,
             metallic,
@@ -484,14 +671,18 @@ def _material_to_pbr(
         "normal_texture": normal_texture,
         # Marbles ORM is already packed as glTF expects: R=AO, G=roughness, B=metallic.
         "metallic_roughness_texture": orm_texture,
-        "emissive_texture": texture("emissive_texture", "emissive_color_texture", srgb=True)
+        "emissive_texture": texture(
+            "emissive_texture", "emissive_color_texture", srgb=True
+        )
         if enable_emissive_materials
         else {},
         "occlusion_texture": orm_texture,
     }
 
 
-def _expanded_attribute(values, indices, interpolation: str, point_indices, face_ids, corner_ids, width: int):
+def _expanded_attribute(
+    values, indices, interpolation: str, point_indices, face_ids, corner_ids, width: int
+):
     if values is None or len(values) == 0:
         return None
     arr = np.asarray(values, dtype=np.float32).reshape(-1, width)
@@ -544,18 +735,63 @@ def _mesh_arrays(mesh, UsdGeom):
         length = np.linalg.norm(normals, axis=1, keepdims=True)
         normals /= np.maximum(length, 1.0e-20)
 
-    st = primvars.GetPrimvar("st")
-    if not st:
-        for candidate in primvars.GetPrimvarsWithValues():
-            if str(candidate.GetTypeName()) in ("texCoord2f[]", "float2[]"):
-                st = candidate
-                break
+    texcoord_types = {
+        "texcoord2f[]",
+        "texcoord2d[]",
+        "texcoord2h[]",
+        "float2[]",
+        "double2[]",
+        "half2[]",
+    }
+    st = None
+    for name in (
+        "st",
+        "st_0",
+        "st0",
+        "uv",
+        "uv_0",
+        "uv0",
+        "texcoord",
+        "texcoord_0",
+        "texcoord0",
+        "map1",
+    ):
+        candidate = primvars.GetPrimvar(name)
+        if (
+            candidate
+            and candidate.HasValue()
+            and str(candidate.GetTypeName()).lower() in texcoord_types
+        ):
+            st = candidate
+            break
+    if st is None:
+        candidates = [
+            candidate
+            for candidate in primvars.GetPrimvarsWithValues()
+            if str(candidate.GetTypeName()).lower() in texcoord_types
+        ]
+        candidates.sort(
+            key=lambda candidate: (
+                not re.match(
+                    r"^(st|uv|texcoord)_?\d+$", str(candidate.GetPrimvarName()).lower()
+                ),
+                str(candidate.GetPrimvarName()).lower(),
+            )
+        )
+        if candidates:
+            st = candidates[0]
     texcoords = None
     texcoord_interpolation = ""
     if st:
         texcoord_interpolation = str(st.GetInterpolation())
         texcoords = _expanded_attribute(
-            st.Get(), st.GetIndices(), texcoord_interpolation, point_indices, face_ids, corner_ids, 2
+            st.Get(),
+            st.GetIndices(),
+            texcoord_interpolation,
+            point_indices,
+            face_ids,
+            corner_ids,
+            2,
         )
 
     left_handed = str(mesh.GetOrientationAttr().Get()) == "leftHanded"
@@ -609,13 +845,23 @@ def _compact_corners(vertices, normals, texcoords, point_indices, used, corner_r
     """Merge corners that have exactly the same position source and attributes."""
     key_parts = [np.asarray(point_indices[used], dtype=np.uint32).reshape(-1, 1)]
     if normals is not None:
-        normal_bits = np.ascontiguousarray(normals[used], dtype=np.float32).view(np.uint32).reshape(-1, 3)
+        normal_bits = (
+            np.ascontiguousarray(normals[used], dtype=np.float32)
+            .view(np.uint32)
+            .reshape(-1, 3)
+        )
         key_parts.append(normal_bits)
     if texcoords is not None:
-        texcoord_bits = np.ascontiguousarray(texcoords[used], dtype=np.float32).view(np.uint32).reshape(-1, 2)
+        texcoord_bits = (
+            np.ascontiguousarray(texcoords[used], dtype=np.float32)
+            .view(np.uint32)
+            .reshape(-1, 2)
+        )
         key_parts.append(texcoord_bits)
     keys = np.concatenate(key_parts, axis=1)
-    _, first, compact_remap = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    _, first, compact_remap = np.unique(
+        keys, axis=0, return_index=True, return_inverse=True
+    )
     selected = used[first]
     triangles = compact_remap[corner_remap].reshape(-1, 3).astype(np.uint32)
     return selected, triangles
@@ -645,6 +891,8 @@ def load_scene_from_usd(
     max_texture_size: int | None = None,
     strict_sidedness: bool = False,
     enable_emissive_materials: bool = True,
+    load_usd_lights: bool = False,
+    usd_light_radius: float = 0.05,
 ) -> bool:
     """Load composed USD meshes and common PreviewSurface/MDL PBR materials."""
     path = Path(usd_path).expanduser().resolve()
@@ -656,6 +904,9 @@ def load_scene_from_usd(
         raise ValueError(f"OpenUSD could not open stage: {path}")
     if max_texture_size is not None and int(max_texture_size) <= 0:
         max_texture_size = None
+    usd_light_radius = float(usd_light_radius)
+    if usd_light_radius <= 0.0:
+        raise ValueError("usd_light_radius must be positive")
     scene.usd_environment_path = None
     scene.usd_ambient_light = (0.0, 0.0, 0.0)
 
@@ -683,9 +934,12 @@ def load_scene_from_usd(
             # (x, y, z) -> (-y, x, z)
             axis_transform[:3, :3] = ((0, 1, 0), (-1, 0, 0), (0, 0, 1))
         extra_transform = extra_transform @ axis_transform
+    unit_scale = 1.0
     if apply_stage_units:
         unit_scale = float(UsdGeom.GetStageMetersPerUnit(stage))
-        extra_transform = extra_transform @ np.diag((unit_scale, unit_scale, unit_scale, 1.0))
+        extra_transform = extra_transform @ np.diag(
+            (unit_scale, unit_scale, unit_scale, 1.0)
+        )
     texture_paths: dict[Any, int] = {}
     packed_orm_paths: dict[tuple, int] = {}
     missing_texture_paths: set[Path] = set()
@@ -699,7 +953,9 @@ def load_scene_from_usd(
         if "<UDIM>" in str(resolved):
             pattern = resolved.name.replace("<UDIM>", "*")
             expression = re.compile(
-                "^" + re.escape(resolved.name).replace(re.escape("<UDIM>"), r"(1\d{3})") + "$"
+                "^"
+                + re.escape(resolved.name).replace(re.escape("<UDIM>"), r"(1\d{3})")
+                + "$"
             )
             matches = []
             for candidate in resolved.parent.glob(pattern):
@@ -781,7 +1037,11 @@ def load_scene_from_usd(
         if not xformable:
             return ensure_transform_node(prim.GetParent())
 
-        local = np.asarray(xformable.GetLocalTransformation(), dtype=np.float64).reshape(4, 4).T
+        local = (
+            np.asarray(xformable.GetLocalTransformation(), dtype=np.float64)
+            .reshape(4, 4)
+            .T
+        )
         parent_index = None
         if not xformable.GetResetXformStack():
             parent_index = ensure_transform_node(prim.GetParent())
@@ -796,7 +1056,9 @@ def load_scene_from_usd(
         node_parents.append(parent_index)
         local = np.asarray(local, dtype=np.float32)
         node_local_transforms.append(local)
-        world = local if parent_index < 0 else node_world_transforms[parent_index] @ local
+        world = (
+            local if parent_index < 0 else node_world_transforms[parent_index] @ local
+        )
         node_world_transforms.append(np.asarray(world, dtype=np.float32))
         return node_index
 
@@ -852,24 +1114,52 @@ def load_scene_from_usd(
             material_uv_grids[result] = (columns, rows)
         return material_ids[key]
 
-    stats = {"meshes": 0, "triangles": 0, "vertices": 0}
+    stats = {"meshes": 0, "triangles": 0, "vertices": 0, "lights": 0}
     predicate = Usd.PrimIsActive & Usd.PrimIsDefined & ~Usd.PrimIsAbstract
     prim_range = Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies(predicate))
     for prim in prim_range:
-        ensure_transform_node(prim)
+        node_index = ensure_transform_node(prim)
         if scene.usd_environment_path is None:
             dome_texture = _dome_texture(prim, UsdLux)
             if dome_texture is not None:
-                resolved = dome_texture if dome_texture.is_absolute() else path.parent / dome_texture
+                resolved = (
+                    dome_texture
+                    if dome_texture.is_absolute()
+                    else path.parent / dome_texture
+                )
                 resolved = resolved.resolve()
                 if resolved.is_file():
                     scene.usd_environment_path = resolved
                 else:
                     logger.warning("USD DomeLight texture does not exist: %s", resolved)
+        if load_usd_lights and prim.IsA(UsdLux.SphereLight):
+            imageable = UsdGeom.Imageable(prim)
+            if str(imageable.ComputeVisibility()) == "invisible":
+                continue
+            light = UsdLux.SphereLight(prim)
+            color = _as_float_tuple(light.GetColorAttr().Get(), 3, (1.0, 1.0, 1.0))
+            intensity = max(0.0, float(light.GetIntensityAttr().Get() or 0.0))
+            intensity *= 2.0 ** float(light.GetExposureAttr().Get() or 0.0)
+            if bool(light.GetNormalizeAttr().Get()):
+                intensity /= 4.0 * math.pi * usd_light_radius * usd_light_radius
+            position = tuple(
+                float(value) for value in node_world_transforms[node_index][:3, 3]
+            )
+            scene.add_light_sphere(
+                position=position,
+                radius=usd_light_radius,
+                color=color,
+                intensity=intensity,
+            )
+            stats["lights"] += 1
+            continue
         if not prim.IsA(UsdGeom.Mesh):
             continue
         imageable = UsdGeom.Imageable(prim)
-        if str(imageable.ComputeVisibility()) == "invisible" or str(imageable.ComputePurpose()) not in purposes:
+        if (
+            str(imageable.ComputeVisibility()) == "invisible"
+            or str(imageable.ComputePurpose()) not in purposes
+        ):
             continue
         mesh = UsdGeom.Mesh(prim)
         node_index = ensure_transform_node(prim)
@@ -878,10 +1168,14 @@ def load_scene_from_usd(
             continue
         vertices, normals, texcoords, triangles, point_indices = arrays
 
-        bound = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()[0]
-        face_materials = np.full(len(mesh.GetFaceVertexCountsAttr().Get()), material_id(bound), dtype=np.int64)
-        for subset in UsdShade.MaterialBindingAPI(prim).GetMaterialBindSubsets():
-            subset_material = UsdShade.MaterialBindingAPI(subset.GetPrim()).ComputeBoundMaterial()[0]
+        bound = _bound_material(prim, UsdShade)
+        face_materials = np.full(
+            len(mesh.GetFaceVertexCountsAttr().Get()),
+            material_id(bound),
+            dtype=np.int64,
+        )
+        for subset in _material_bind_subsets(prim, UsdGeom, UsdShade):
+            subset_material = _bound_material(subset.GetPrim(), UsdShade)
             if subset_material:
                 subset_faces = np.asarray(subset.GetIndicesAttr().Get(), dtype=np.int64)
                 face_materials[subset_faces] = material_id(subset_material)
@@ -909,7 +1203,10 @@ def load_scene_from_usd(
             # while inverse-transpose normal transformation does not include
             # that orientation sign. Apply it to the object-space shading
             # frame so instanced USD meshes match an equivalent baked GLB.
-            if selected_normals is not None and np.linalg.det(node_world_transforms[node_index][:3, :3]) < 0.0:
+            if (
+                selected_normals is not None
+                and np.linalg.det(node_world_transforms[node_index][:3, :3]) < 0.0
+            ):
                 selected_normals = -selected_normals
             out_mesh = Mesh(
                 vertices[selected],
@@ -963,11 +1260,12 @@ def load_scene_from_usd(
     textures = _fit_textures_to_budget(textures)
     scene.set_gltf_textures(textures, srgb_texture_indices=srgb_textures)
     logger.info(
-        "[USD timing] total=%.1f ms meshes=%d verts=%d tris=%d materials=%d textures=%d",
+        "[USD timing] total=%.1f ms meshes=%d verts=%d tris=%d lights=%d materials=%d textures=%d",
         (time.perf_counter() - start) * 1000.0,
         stats["meshes"],
         stats["vertices"],
         stats["triangles"],
+        stats["lights"],
         len(material_ids),
         len(textures),
     )
