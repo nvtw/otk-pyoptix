@@ -19,12 +19,15 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from .lighting import RENDERER_RADIANCE_PER_NIT
+
 if TYPE_CHECKING:
     from .scene import Scene
 
 logger = logging.getLogger(__name__)
 _MIN_TEXTURE_MEMORY_BUDGET_BYTES = 1 << 30
 _TEXTURE_VRAM_RESERVE_BYTES = 4 << 30
+_MIP_CHAIN_MEMORY_FACTOR = 4.0 / 3.0
 
 
 def _import_usd():
@@ -108,25 +111,22 @@ def _sphere_light_proxy_properties(
     return render_radius, radiance
 
 
-def _material_inputs(material, shader) -> dict[str, Any]:
+def _material_inputs(material, shader, attributes=None) -> dict[str, Any]:
     """Return authored material values, with shader defaults as a fallback."""
     values: dict[str, Any] = {}
+    inputs = []
     if shader:
-        values.update(
-            {
-                str(i.GetBaseName()): i.Get()
-                for i in shader.GetInputs()
-                if i.Get() is not None
-            }
-        )
+        inputs.extend(shader.GetInputs())
     if material:
-        values.update(
-            {
-                str(i.GetBaseName()): i.Get()
-                for i in material.GetInputs()
-                if i.Get() is not None
-            }
-        )
+        inputs.extend(material.GetInputs())
+    for shader_input in inputs:
+        value = shader_input.Get()
+        if value is None:
+            continue
+        name = str(shader_input.GetBaseName())
+        values[name] = value
+        if attributes is not None:
+            attributes[name] = shader_input.GetAttr()
     return values
 
 
@@ -145,24 +145,9 @@ def _surface_shader(material, UsdShade):
 
 
 def _bound_material(prim, UsdShade):
-    """Resolve direct bindings even when MaterialBindingAPI was not applied."""
+    """Resolve a material using USD binding inheritance and strength rules."""
     if not prim:
         return None
-    if not prim.HasAPI(UsdShade.MaterialBindingAPI):
-        relationships = sorted(
-            (
-                relationship
-                for relationship in prim.GetRelationships()
-                if relationship.GetName().startswith("material:binding")
-            ),
-            key=lambda relationship: relationship.GetName() != "material:binding",
-        )
-        for relationship in relationships:
-            targets = relationship.GetTargets()
-            if targets:
-                material = UsdShade.Material(prim.GetStage().GetPrimAtPath(targets[0]))
-                if material:
-                    return material
     return UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()[0]
 
 
@@ -197,15 +182,35 @@ def _shader_source_identity(shader) -> str:
     return shader_id
 
 
-def _asset_path(value: Any) -> Path | None:
+def _asset_path(value: Any, attribute=None) -> Path | None:
     if value is None:
         return None
     if isinstance(value, (str, Path)):
         return Path(value) if value else None
     resolved = getattr(value, "resolvedPath", "")
     authored = getattr(value, "path", "") or getattr(value, "authoredPath", "")
-    path = str(resolved or authored)
-    return Path(path) if path else None
+    if resolved:
+        return Path(str(resolved))
+    if not authored:
+        return None
+    authored = str(authored)
+    if attribute is not None and not Path(authored).is_absolute():
+        try:
+            from pxr import Sdf  # noqa: PLC0415
+
+            for spec in attribute.GetPropertyStack():
+                default = getattr(spec, "default", None)
+                default_path = str(
+                    getattr(default, "path", "") or getattr(default, "authoredPath", "")
+                )
+                if default_path != authored:
+                    continue
+                anchored = Sdf.ComputeAssetPathRelativeToLayer(spec.layer, authored)
+                if anchored:
+                    return Path(anchored)
+        except Exception:
+            pass
+    return Path(authored)
 
 
 def _texture_candidate_exists(path: Path) -> bool:
@@ -221,6 +226,7 @@ _MDL_TEXTURE_INPUT_ALIASES = {
     "Num2_Normal_1": "normalmap_texture",
     "Num3_Mask": "ORM_texture",
     "Num3_Mask_1": "ORM_texture",
+    "Num4_Opacity": "opacity_texture",
     "Num4_Emissive": "emissive_texture",
     "diffuse_texture": "diffuse_texture",
     "normalmap_texture": "normalmap_texture",
@@ -308,6 +314,25 @@ def _parse_mdl_literal_inputs(mdl_path: Path) -> tuple[tuple[str, Any], ...]:
         return ()
     source = mdl_path.read_text(errors="replace")
     values: dict[str, Any] = {}
+    if re.search(r"::OmniUe4Base\s*\(", source):
+        values["_mdl_is_omni_ue4_base"] = True
+    if re.search(r"::OmniUe4Translucent\s*\(", source):
+        values["_mdl_is_omni_ue4_translucent"] = True
+
+    opacity_declaration = re.search(
+        r"\bNum4_Opacity\s*=\s*texture_2d\s*\(([^)]*)\)", source
+    )
+    if opacity_declaration:
+        values["_mdl_opacity_texture_srgb"] = "gamma_srgb" in opacity_declaration.group(
+            1
+        )
+    orm_declaration = re.search(
+        r"\b(?:Num3_Mask(?:_1)?|ORM_texture)\s*=\s*texture_2d\s*\(([^)]*)\)",
+        source,
+    )
+    if orm_declaration:
+        values["_mdl_orm_texture_srgb"] = "gamma_srgb" in orm_declaration.group(1)
+
     vector_pattern = re.compile(r"\b(\w+)\s*:\s*(color|float2)\s*\(([^()]*)\)")
     for name, kind, components in vector_pattern.findall(source):
         try:
@@ -336,6 +361,31 @@ def _parse_mdl_literal_inputs(mdl_path: Path) -> tuple[tuple[str, Any], ...]:
                 values[name] = float(literal.removesuffix("f"))
             except ValueError:
                 continue
+
+    declaration_pattern = re.compile(
+        r"\b(?:uniform\s+)?(?:float|bool)\s+(\w+)\s*=\s*"
+        r"(true|false|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?f?)\b"
+    )
+    for name, literal in declaration_pattern.findall(source):
+        if literal == "true":
+            values.setdefault(name, True)
+        elif literal == "false":
+            values.setdefault(name, False)
+        else:
+            try:
+                values.setdefault(name, float(literal.removesuffix("f")))
+            except ValueError:
+                continue
+
+    # Unreal's generated MDL declares clearcoat temporaries even when the
+    # surface call does not consume them. Only promote connected values.
+    surface_call = source.rsplit("::OmniUe4Base", 1)[-1]
+    if not re.search(
+        r"\b(?:clear_?coat|clearcoat_weight)\s*:\s*ClearCoat_mdl\b",
+        surface_call,
+    ):
+        values.pop("ClearCoat_mdl", None)
+        values.pop("ClearCoatRoughness_mdl", None)
     return tuple(values.items())
 
 
@@ -353,12 +403,16 @@ def _mdl_literal_inputs(shader) -> dict[str, Any]:
     return dict(_parse_mdl_literal_inputs(mdl_path))
 
 
-def _normalize_texture_inputs(values: dict[str, Any]) -> None:
+def _normalize_texture_inputs(
+    values: dict[str, Any], attributes: dict[str, Any] | None = None
+) -> None:
     """Add canonical aliases for authored texture inputs with common names."""
     for name, value in tuple(values.items()):
         semantic = _mdl_texture_semantic(name)
         if semantic is not None and _asset_path(value) is not None:
             values.setdefault(semantic, value)
+            if attributes is not None and name in attributes:
+                attributes.setdefault(semantic, attributes[name])
 
 
 def _rebase_missing_texture(stage_path: Path, texture_path: Path) -> Path:
@@ -388,7 +442,7 @@ def _dome_texture(prim, UsdLux) -> Path | None:
     # OpenUSD's schema accessor only sees inputs:texture:file, so accept both.
     for name in ("inputs:texture:file", "texture:file"):
         attr = prim.GetAttribute(name)
-        texture_path = _asset_path(attr.Get()) if attr else None
+        texture_path = _asset_path(attr.Get(), attr) if attr else None
         if texture_path:
             return texture_path
     return None
@@ -504,11 +558,84 @@ def _decode_packed_orm(spec: tuple, max_size: int | None = None) -> np.ndarray:
     return np.ascontiguousarray(packed)
 
 
+def _decode_packed_base_opacity(spec: tuple, max_size: int | None = None) -> np.ndarray:
+    """Evaluate a collected OmniUe4 opacity graph into base-color alpha."""
+    (
+        _,
+        base_path,
+        opacity_path,
+        orm_path,
+        opacity_srgb,
+        orm_srgb,
+        contrast,
+        roughness_amount,
+        roughness_multiplier,
+        opacity_multiplier,
+    ) = spec
+
+    def decode(source):
+        if source is None:
+            return None
+        if isinstance(source, tuple) and source[0] == "udim":
+            return _decode_udim(source[1], max_size=max_size)
+        return _decode_texture(source, max_size=max_size)
+
+    base = decode(base_path)
+    opacity = decode(opacity_path)
+    orm = decode(orm_path)
+    height, width = base.shape[:2]
+
+    def resize(image):
+        if image is None or image.shape[:2] == (height, width):
+            return image
+        from PIL import Image  # noqa: PLC0415
+
+        return np.asarray(
+            Image.fromarray(image, mode="RGBA").resize(
+                (width, height), Image.Resampling.LANCZOS
+            ),
+            dtype=np.uint8,
+        )
+
+    opacity = resize(opacity)
+    orm = resize(orm)
+    opacity_value = opacity[..., 0].astype(np.float32) * (1.0 / 255.0)
+    if opacity_srgb:
+        opacity_value = np.where(
+            opacity_value <= 0.04045,
+            opacity_value / 12.92,
+            ((opacity_value + 0.055) / 1.055) ** 2.4,
+        )
+    roughness = (
+        orm[..., 1].astype(np.float32) * (1.0 / 255.0)
+        if orm is not None
+        else np.ones((height, width), dtype=np.float32)
+    )
+    if orm_srgb:
+        roughness = np.where(
+            roughness <= 0.04045,
+            roughness / 12.92,
+            ((roughness + 0.055) / 1.055) ** 2.4,
+        )
+    contrasted = np.clip((2.0 * contrast + 1.0) * roughness - contrast, 0.0, 1.0)
+    inverse_amount = float(np.clip(1.0 - roughness_amount, 0.0, 1.0))
+    roughness_weight = contrasted * (1.0 - inverse_amount) + inverse_amount
+    alpha = np.clip(
+        opacity_value * roughness_weight * roughness_multiplier * opacity_multiplier,
+        0.0,
+        1.0,
+    )
+    packed = base.copy()
+    packed[..., 3] = np.clip(alpha * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+    return np.ascontiguousarray(packed, dtype=np.uint8)
+
+
 def _fit_textures_to_budget(
     textures: list[np.ndarray], max_bytes: int | None = None
 ) -> list[np.ndarray]:
-    """Proportionally downscale RGBA textures to fit a GPU-memory budget."""
+    """Proportionally downscale mipmapped RGBA textures to a GPU-memory budget."""
     total_bytes = sum(texture.nbytes for texture in textures)
+    gpu_bytes = math.ceil(total_bytes * _MIP_CHAIN_MEMORY_FACTOR)
     if max_bytes is None:
         try:
             import warp as wp  # noqa: PLC0415
@@ -523,7 +650,7 @@ def _fit_textures_to_budget(
             max_bytes = max(_MIN_TEXTURE_MEMORY_BUDGET_BYTES, max_bytes)
         except Exception:
             max_bytes = _MIN_TEXTURE_MEMORY_BUDGET_BYTES
-    if total_bytes <= max_bytes:
+    if gpu_bytes <= max_bytes:
         return textures
     if max_bytes <= 0:
         raise ValueError("Texture byte budget must be positive")
@@ -531,8 +658,9 @@ def _fit_textures_to_budget(
     from PIL import Image  # noqa: PLC0415
 
     # Pixel storage is RGBA8, so reducing both dimensions by this scale reduces
-    # aggregate memory quadratically. Leave rounding headroom for small images.
-    scale = min(1.0, (max_bytes / total_bytes) ** 0.5 * 0.99)
+    # aggregate memory quadratically. A complete 2D mip chain adds at most one
+    # third. Leave rounding headroom for small images.
+    scale = min(1.0, (max_bytes / gpu_bytes) ** 0.5 * 0.99)
     resized = []
     for texture in textures:
         height, width = texture.shape[:2]
@@ -547,12 +675,13 @@ def _fit_textures_to_budget(
         resized.append(np.ascontiguousarray(image, dtype=np.uint8))
 
     resized_bytes = sum(texture.nbytes for texture in resized)
+    resized_gpu_bytes = math.ceil(resized_bytes * _MIP_CHAIN_MEMORY_FACTOR)
     logger.warning(
-        "USD textures exceeded the %.2f GiB GPU budget; downscaled %d textures from %.2f GiB to %.2f GiB",
+        "USD textures exceeded the %.2f GiB GPU budget; downscaled %d textures from %.2f GiB to %.2f GiB including mipmaps",
         max_bytes / (1 << 30),
         len(textures),
-        total_bytes / (1 << 30),
-        resized_bytes / (1 << 30),
+        gpu_bytes / (1 << 30),
+        resized_gpu_bytes / (1 << 30),
     )
     return resized
 
@@ -569,7 +698,7 @@ def _preview_texture(shader_input) -> Path | None:
         return None
     source_shader = source[0]
     file_input = source_shader.GetInput("file")
-    return _asset_path(file_input.Get()) if file_input else None
+    return _asset_path(file_input.Get(), file_input.GetAttr()) if file_input else None
 
 
 def _material_to_pbr(
@@ -578,14 +707,16 @@ def _material_to_pbr(
     texture_index,
     packed_orm_index=None,
     enable_emissive_materials: bool = True,
+    packed_opacity_index=None,
 ) -> dict[str, Any]:
     shader = _surface_shader(material, UsdShade)
+    input_attributes: dict[str, Any] = {}
     values = _mdl_literal_inputs(shader)
     values.update(_mdl_texture_inputs(shader))
-    values.update(_material_inputs(material, shader))
+    values.update(_material_inputs(material, shader, input_attributes))
     shader_id = _shader_source_identity(shader)
 
-    _normalize_texture_inputs(values)
+    _normalize_texture_inputs(values, input_attributes)
     texture_scale = _as_float_tuple(values.get("texture_scale"), 2, (1.0, 1.0))
     texture_offset = _as_float_tuple(values.get("texture_translate"), 2, (0.0, 0.0))
     texture_rotation = np.deg2rad(float(values.get("texture_rotate", 0.0)))
@@ -599,7 +730,7 @@ def _material_to_pbr(
     def texture(*names: str, srgb: bool = False) -> dict[str, int]:
         path = None
         for name in names:
-            path = _asset_path(values.get(name))
+            path = _asset_path(values.get(name), input_attributes.get(name))
             if path:
                 break
         if path is None and shader:
@@ -636,7 +767,7 @@ def _material_to_pbr(
 
     def connected_path(*names: str) -> Path | None:
         for name in names:
-            path = _asset_path(values.get(name))
+            path = _asset_path(values.get(name), input_attributes.get(name))
             if path:
                 return path
         if shader:
@@ -690,11 +821,52 @@ def _material_to_pbr(
 
     # NVIDIA MDL OmniPBR/OmniGlass conventions used by Marbles.
     identity_lower = shader_id.lower()
+    is_omni_ue4_base = bool(values.get("_mdl_is_omni_ue4_base", False))
+    is_omni_ue4_translucent = bool(values.get("_mdl_is_omni_ue4_translucent", False))
     is_glass = (
         "omniglass" in identity_lower
         or "glass_color" in values
         or "glass_ior" in values
+        or is_omni_ue4_translucent
     )
+    packed_opacity = False
+    if is_omni_ue4_translucent:
+        base_path = connected_path("diffuse_texture")
+        opacity_path = connected_path("opacity_texture")
+        orm_path = connected_path("ORM_texture")
+        packed_index = (
+            packed_opacity_index(
+                base_path,
+                opacity_path,
+                orm_path,
+                bool(values.get("_mdl_opacity_texture_srgb", False)),
+                bool(values.get("_mdl_orm_texture_srgb", False)),
+                float(values.get("Opacity_Tex_rougness_Contrast", 0.0)),
+                float(values.get("Opacity_Tex_roughness_Amount", 0.0)),
+                float(values.get("Opacity_Tex_roughness_multi", 1.0)),
+                float(values.get("Opacity_multiplayer", 1.0)),
+            )
+            if packed_opacity_index is not None and opacity_path is not None
+            else -1
+        )
+        packed_opacity = packed_index >= 0
+        base_color_texture = (
+            {
+                "index": packed_index,
+                "texCoord": texture_uv_set,
+                "transform": texture_transform,
+            }
+            if packed_index >= 0
+            else texture("diffuse_texture", srgb=True)
+        )
+    elif is_glass and bool(values.get("use_glass_color_texture", True)):
+        base_color_texture = texture(
+            "glass_color_texture", "diffuse_texture", srgb=True
+        )
+    elif is_glass:
+        base_color_texture = {"index": -1, "texCoord": texture_uv_set}
+    else:
+        base_color_texture = texture("diffuse_texture", srgb=True)
     diffuse_constant = _as_float_tuple(
         values.get(
             "diffuse_color_constant",
@@ -704,7 +876,6 @@ def _material_to_pbr(
         (0.18, 0.18, 0.18),
     )
     diffuse_tint = _as_float_tuple(values.get("diffuse_tint"), 3, (1.0, 1.0, 1.0))
-    base_color_texture = texture("diffuse_texture", srgb=True)
     if is_glass:
         base = _as_float_tuple(values.get("glass_color"), 3, (1.0, 1.0, 1.0))
     elif base_color_texture["index"] >= 0:
@@ -712,29 +883,57 @@ def _material_to_pbr(
         base = tuple(component * brightness for component in diffuse_tint)
     else:
         base = diffuse_tint if diffuse_tint != (1.0, 1.0, 1.0) else diffuse_constant
+    emissive_texture = (
+        texture("emissive_texture", "emissive_color_texture", srgb=True)
+        if enable_emissive_materials
+        else {}
+    )
+    has_emissive_texture = emissive_texture.get("index", -1) >= 0
     emission_enabled = enable_emissive_materials and (
         bool(values.get("enable_emission", False))
         or "emissive_color_normal" in values
         or "emissive_color_grazing" in values
+        or (is_omni_ue4_base and has_emissive_texture)
     )
     emissive = _as_float_tuple(
         values.get("emissive_color", values.get("emissive_color_normal")),
         3,
         (0.0, 0.0, 0.0),
     )
-    emissive_scale = (
-        float(values.get("emissive_intensity", 0.0)) if emission_enabled else 0.0
-    )
+    if is_omni_ue4_base and has_emissive_texture:
+        # OmniUe4Base::emissive_multiplier() is 20 * 128. Convert the
+        # resulting physical radiance with the same scale as USD lights.
+        emissive = (1.0, 1.0, 1.0)
+        emissive_scale = (
+            float(values.get("EmissiveMultiplayer", 1.0))
+            * 2560.0
+            * RENDERER_RADIANCE_PER_NIT
+        )
+    else:
+        emissive_scale = (
+            float(values.get("emissive_intensity", 0.0)) if emission_enabled else 0.0
+        )
     orm_enabled = bool(values.get("enable_ORM_texture", True))
     orm_texture = (
-        texture("ORM_texture")
+        texture("ORM_texture", srgb=bool(values.get("_mdl_orm_texture_srgb", False)))
         if orm_enabled
         else {"index": -1, "texCoord": texture_uv_set}
     )
     has_orm = orm_texture["index"] >= 0
     normal_texture = texture("normalmap_texture")
     if normal_texture["index"] >= 0:
-        normal_texture["scale"] = float(values.get("bump_factor", 1.0))
+        bump_factor = float(values.get("bump_factor", 1.0))
+        flip_u = bool(values.get("flip_tangent_u", False))
+        # Isaac's OmniPBR and OmniUe4Base both negate tangent V.
+        flip_v = bool(
+            values.get(
+                "flip_tangent_v", "omnipbr" in identity_lower or is_omni_ue4_base
+            )
+        )
+        normal_texture["scale"] = (
+            -bump_factor if flip_u else bump_factor,
+            -bump_factor if flip_v else bump_factor,
+        )
     metallic = float(values.get("metallic_constant", 0.0))
     roughness_default = 0.0 if is_glass else 0.5
     roughness = float(
@@ -764,33 +963,59 @@ def _material_to_pbr(
             orm_texture = {"index": orm_index, "texCoord": 0}
             has_orm = True
     if has_orm:
-        # glTF multiplies the packed B/G channels by these factors. Preserve
-        # the authored ORM values unchanged, matching minimaldlssrr.
-        metallic = 1.0
+        # A transmission lobe is dielectric. Let the packed map control glass
+        # roughness, but do not let an Unreal mask's metallic channel consume
+        # the transmission weight and turn the surface opaque.
+        metallic = 0.0 if is_glass else 1.0
         roughness = 1.0
+    transmission = 1.0 if is_glass else 0.0
+    opacity = 1.0
+    opacity_fresnel = None
+    ior = float(values.get("glass_ior", 1.5))
+    thin_walled = bool(values.get("thin_walled", False))
+    if is_omni_ue4_translucent:
+        opacity_low = float(values.get("Opacity_low", 0.0))
+        opacity_high = float(values.get("Opacity_hi", opacity_low))
+        opacity_multiplier = float(values.get("Opacity_multiplayer", 1.0))
+        if not packed_opacity:
+            opacity_fresnel = (
+                float(np.clip(opacity_low * opacity_multiplier, 0.0, 1.0)),
+                float(np.clip(opacity_high * opacity_multiplier, 0.0, 1.0)),
+                max(float(values.get("Opacity_Fallof", 1.0)), 0.0),
+            )
+        opacity = 1.0
+        transmission = 1.0
+        ior = max(1.0, float(values.get("Refraction_hi", 1.0)))
+        thin_walled = True
     return {
-        "base_color": (*base, 1.0),
+        "base_color": (*base, opacity),
         "emissive_factor": tuple(v * emissive_scale for v in emissive),
+        "opacity_fresnel": opacity_fresnel,
         "metallic": metallic,
         "roughness": roughness,
-        "ior": float(values.get("glass_ior", 1.5)),
-        "transmission": 1.0 if is_glass else 0.0,
+        "ior": ior,
+        "transmission": transmission,
         "alpha_mode": "BLEND" if is_glass else "OPAQUE",
+        "transmission_color": (1.0, 1.0, 1.0) if opacity_fresnel is not None else None,
         "specular": float(
-            values.get("specular_level", values.get("specular_reflection_weight", 1.0))
+            values.get(
+                "specular_level",
+                values.get(
+                    "specular_reflection_weight", values.get("Specular_mdl", 1.0)
+                ),
+            )
         ),
-        "thickness": 0.0 if bool(values.get("thin_walled", False)) else 1.0,
+        "clearcoat": float(values.get("ClearCoat_mdl", 0.0)),
+        "clearcoat_roughness": float(values.get("ClearCoatRoughness_mdl", 0.1)),
+        "occlusion_strength": float(values.get("AOamount", 1.0)),
+        "thickness": 0.0 if thin_walled else 1.0,
         "base_color_add": float(values.get("albedo_add", 0.0)),
         "base_color_desaturation": float(values.get("albedo_desaturation", 0.0)),
         "base_color_texture": base_color_texture,
         "normal_texture": normal_texture,
         # Marbles ORM is already packed as glTF expects: R=AO, G=roughness, B=metallic.
         "metallic_roughness_texture": orm_texture,
-        "emissive_texture": texture(
-            "emissive_texture", "emissive_color_texture", srgb=True
-        )
-        if enable_emissive_materials
-        else {},
+        "emissive_texture": emissive_texture,
         "occlusion_texture": orm_texture,
     }
 
@@ -1061,6 +1286,7 @@ def load_scene_from_usd(
         )
     texture_paths: dict[Any, int] = {}
     packed_orm_paths: dict[tuple, int] = {}
+    packed_opacity_paths: dict[tuple, int] = {}
     missing_texture_paths: set[Path] = set()
     texture_specs: list[Path | tuple] = []
     srgb_textures: set[int] = set()
@@ -1135,6 +1361,42 @@ def load_scene_from_usd(
             texture_specs.append(key)
         return packed_orm_paths[key]
 
+    def packed_opacity_index(
+        base_path: Path | None,
+        opacity_path: Path | None,
+        orm_path: Path | None,
+        opacity_srgb: bool,
+        orm_srgb: bool,
+        contrast: float,
+        roughness_amount: float,
+        roughness_multiplier: float,
+        opacity_multiplier: float,
+    ) -> int:
+        base_path = resolve_texture(base_path)
+        opacity_path = resolve_texture(opacity_path)
+        orm_path = resolve_texture(orm_path)
+        if base_path is None or opacity_path is None:
+            return -1
+        key = (
+            "packed_base_opacity",
+            base_path,
+            opacity_path,
+            orm_path,
+            bool(opacity_srgb),
+            bool(orm_srgb),
+            float(contrast),
+            float(roughness_amount),
+            float(roughness_multiplier),
+            float(opacity_multiplier),
+        )
+        if key not in packed_opacity_paths:
+            index = len(texture_specs)
+            packed_opacity_paths[key] = index
+            texture_specs.append(key)
+            # sRGB conversion changes RGB only; alpha remains linear opacity.
+            srgb_textures.add(index)
+        return packed_opacity_paths[key]
+
     material_ids: dict[str, int] = {}
     material_uv_grids: dict[int, tuple[int, int]] = {}
     node_paths: list[str] = []
@@ -1195,6 +1457,7 @@ def load_scene_from_usd(
                 texture_index,
                 packed_orm_index,
                 enable_emissive_materials,
+                packed_opacity_index,
             )
             columns = 1
             rows = 1
@@ -1268,7 +1531,9 @@ def load_scene_from_usd(
                     a * b for a, b in zip(color, temperature_color, strict=True)
                 )
             intensity = max(0.0, float(light.GetIntensityAttr().Get() or 0.0))
-            intensity *= 2.0 ** float(light.GetExposureAttr().Get() or 0.0)
+            intensity *= (
+                2.0 ** float(light.GetExposureAttr().Get() or 0.0)
+            ) * RENDERER_RADIANCE_PER_NIT
             render_radius, intensity = _sphere_light_proxy_properties(
                 intensity,
                 bool(light.GetNormalizeAttr().Get()),
@@ -1381,6 +1646,8 @@ def load_scene_from_usd(
             return _decode_texture(spec, max_size=max_texture_size)
         if spec[0] == "udim":
             return _decode_udim(spec[1], max_size=max_texture_size)
+        if spec[0] == "packed_base_opacity":
+            return _decode_packed_base_opacity(spec, max_size=max_texture_size)
         return _decode_packed_orm(spec, max_size=max_texture_size)
 
     if texture_specs:

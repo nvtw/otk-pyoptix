@@ -39,6 +39,7 @@ from warp_optix._runtime.sbt import SbtKernelManager
 from . import pathtracing_warp_kernels as pwk
 from .camera import Camera
 from .environment_map import EnvironmentMap
+from .lighting import RENDERER_RADIANCE_PER_NIT
 from .scene import Scene
 from .tonemap import Tonemapper
 
@@ -298,7 +299,11 @@ class PathTracingViewer:
         self._last_output_mode = self.output_mode
 
         # Physical sky defaults aligned with the upstream DLSS-RR sample behavior.
-        self.sky_rgb_unit_conversion = (1.0 / 80000.0, 1.0 / 80000.0, 1.0 / 80000.0)
+        self.sky_rgb_unit_conversion = (
+            RENDERER_RADIANCE_PER_NIT,
+            RENDERER_RADIANCE_PER_NIT,
+            RENDERER_RADIANCE_PER_NIT,
+        )
         self.sky_multiplier = 1.0
         self.sky_haze = 0.5
         self.sky_redblueshift = 0.05
@@ -314,7 +319,7 @@ class PathTracingViewer:
         self.sky_sun_disk_scale = 1.0
         self.sky_sun_glow_intensity = 1.0
         self.sky_y_is_up = 1
-        self.sky_grayscale = False
+        self.sky_grayscale = 0.0
         self.env_intensity = (1.0, 1.0, 1.0)
         self.analytic_light_intensity = 1.0
         self.emissive_material_intensity = 1.0
@@ -898,8 +903,8 @@ class PathTracingViewer:
             self._module = module_result
 
         # Match C++ SBT layout: 2 ray subtypes (primary + secondary/shadow).
-        # Primary (offset 0): closest hit only, no anyhit — used by primary AND bounce rays.
-        # Secondary (offset 1): closest hit + anyhit (simple block) — used by shadow/visibility rays.
+        # Primary (offset 0): shaded camera and bounce rays with alpha any-hit.
+        # Secondary (offset 1): shadow/visibility rays with alpha any-hit.
         self._sbt_manager = SbtKernelManager(
             optix, self._ctx, self._module, num_ray_subtypes=2
         )
@@ -916,6 +921,9 @@ class PathTracingViewer:
             HitKernel(
                 woptix.get_entry_name(
                     pwk.primary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT
+                ),
+                any_hit=woptix.get_entry_name(
+                    pwk.primary_any_hit, woptix.OptixKernelType.ANY_HIT
                 ),
             ),
             HitKernel(
@@ -1191,7 +1199,7 @@ class PathTracingViewer:
         sky.sun_disk_scale = float(self.sky_sun_disk_scale)
         sky.sun_glow_intensity = float(self.sky_sun_glow_intensity)
         sky.y_is_up = int(self.sky_y_is_up)
-        sky.grayscale = int(self.sky_grayscale)
+        sky.grayscale = float(self.sky_grayscale)
         p.sky = sky
 
         p.sphere_lights = (

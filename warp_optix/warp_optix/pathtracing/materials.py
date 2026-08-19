@@ -55,7 +55,7 @@ def _create_material_dtype():
             # Base PBR properties
             ("pbrBaseColorFactor", np.float32, (4,)),
             ("emissiveFactor", np.float32, (3,)),
-            ("normalTextureScale", np.float32),
+            ("normalTextureScale", np.float32, (2,)),
             ("pbrRoughnessFactor", np.float32),
             ("pbrMetallicFactor", np.float32),
             ("uSubdiv", np.float32),
@@ -63,8 +63,12 @@ def _create_material_dtype():
             ("baseColorScale", np.float32),
             ("alphaMode", np.int32),
             ("alphaCutoff", np.float32),
+            ("opacityFresnelLow", np.float32),
+            ("opacityFresnelHigh", np.float32),
+            ("opacityFresnelFalloff", np.float32),
             # Transmission/Volume
             ("transmissionFactor", np.float32),
+            ("transmissionColorFactor", np.float32, (3,)),
             ("ior", np.float32),
             ("attenuationColor", np.float32, (3,)),
             ("thicknessFactor", np.float32),
@@ -304,6 +308,7 @@ class MaterialManager:
         alpha_mode: str = "OPAQUE",
         alpha_cutoff: float = 0.5,
         double_sided: bool = False,
+        opacity_fresnel: tuple[float, float, float] | None = None,
         base_color_texture: dict | None = None,
         normal_texture: dict | None = None,
         metallic_roughness_texture: dict | None = None,
@@ -314,9 +319,12 @@ class MaterialManager:
         ior: float = 1.5,
         specular: float = 1.0,
         specular_color: tuple = (1.0, 1.0, 1.0),
+        clearcoat: float = 0.0,
+        clearcoat_roughness: float = 0.1,
         thickness: float = 0.0,
         attenuation_color: tuple = (1.0, 1.0, 1.0),
         attenuation_distance: float = 1.0e10,
+        transmission_color: tuple | None = None,
         base_color_add: float = 0.0,
         base_color_desaturation: float = 0.0,
         u_subdiv: float = 0.0,
@@ -344,10 +352,20 @@ class MaterialManager:
             "MASK": ALPHA_MASK,
             "BLEND": ALPHA_BLEND,
         }.get(str(alpha_mode).upper(), ALPHA_OPAQUE)
+        if opacity_fresnel is not None:
+            mat["opacityFresnelLow"] = float(np.clip(opacity_fresnel[0], 0.0, 1.0))
+            mat["opacityFresnelHigh"] = float(np.clip(opacity_fresnel[1], 0.0, 1.0))
+            mat["opacityFresnelFalloff"] = float(max(opacity_fresnel[2], 0.0))
         mat["transmissionFactor"] = float(np.clip(transmission, 0.0, 1.0))
+        if transmission_color is not None:
+            mat["transmissionColorFactor"] = tuple(
+                float(channel) for channel in transmission_color
+            )
         mat["ior"] = float(max(ior, 1.0))
         mat["specularFactor"] = float(max(specular, 0.0))
         mat["specularColorFactor"] = tuple(float(channel) for channel in specular_color)
+        mat["clearcoatFactor"] = float(np.clip(clearcoat, 0.0, 1.0))
+        mat["clearcoatRoughness"] = float(np.clip(clearcoat_roughness, 0.0, 1.0))
         mat["occlusionStrength"] = float(np.clip(occlusion_strength, 0.0, 1.0))
         mat["thicknessFactor"] = float(max(thickness, 0.0))
         mat["attenuationColor"] = (
@@ -363,7 +381,10 @@ class MaterialManager:
         mat["unlit"] = 0
 
         if normal_texture:
-            mat["normalTextureScale"] = float(normal_texture.get("scale", 1.0))
+            scale = normal_texture.get("scale", 1.0)
+            if np.isscalar(scale):
+                scale = (scale, scale)
+            mat["normalTextureScale"] = (float(scale[0]), float(scale[1]))
 
         def _set_tex(field: str, info: dict | None):
             if not info:
@@ -409,7 +430,7 @@ class MaterialManager:
         # Base PBR
         mat["pbrBaseColorFactor"] = (1.0, 1.0, 1.0, 1.0)
         mat["emissiveFactor"] = (0.0, 0.0, 0.0)
-        mat["normalTextureScale"] = 1.0
+        mat["normalTextureScale"] = (1.0, 1.0)
         mat["pbrRoughnessFactor"] = 0.5
         mat["pbrMetallicFactor"] = 0.0
         mat["uSubdiv"] = 0.0
@@ -417,9 +438,15 @@ class MaterialManager:
         mat["baseColorScale"] = 0.75
         mat["alphaMode"] = ALPHA_OPAQUE
         mat["alphaCutoff"] = 0.5
+        mat["opacityFresnelLow"] = -1.0
+        mat["opacityFresnelHigh"] = 1.0
+        mat["opacityFresnelFalloff"] = 1.0
 
         # Transmission
         mat["transmissionFactor"] = 0.0
+        # Negative means transmission follows the evaluated, textured base color.
+        mat["transmissionColorFactor"] = (-1.0, -1.0, -1.0)
+
         mat["ior"] = 1.5
         mat["attenuationColor"] = (1.0, 1.0, 1.0)
         mat["thicknessFactor"] = 0.0

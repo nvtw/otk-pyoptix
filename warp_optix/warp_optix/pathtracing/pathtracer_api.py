@@ -658,7 +658,7 @@ class PathTracerAPI:
         sun_disk_scale: float = 1.0,
         sun_glow_intensity: float = 1.0,
         y_is_up: int = 1,
-        grayscale: bool = False,
+        grayscale: float | bool = 0.0,
     ):
         self.initialize()
         direction = np.asarray(tuple(float(v) for v in sun_direction), dtype=np.float32)
@@ -679,7 +679,7 @@ class PathTracerAPI:
         self._viewer.sky_sun_disk_scale = float(sun_disk_scale)
         self._viewer.sky_sun_glow_intensity = float(sun_glow_intensity)
         self._viewer.sky_y_is_up = int(y_is_up)
-        self._viewer.sky_grayscale = bool(grayscale)
+        self._viewer.sky_grayscale = float(np.clip(float(grayscale), 0.0, 1.0))
 
     def set_environment_hdr(self, hdr_path: str, scaling: float = 1.0):
         self.initialize()

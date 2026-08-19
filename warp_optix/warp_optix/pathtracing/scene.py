@@ -1943,6 +1943,8 @@ class Scene:
                 ("alphaMode", np.int32),
                 ("alphaCutoff", np.float32),
                 ("transmission", np.float32),
+                ("transmissionColor", np.float32, (3,)),
+                ("textureSize", np.float32),
                 ("ior", np.float32),
                 ("specularColor", np.float32, (3,)),
                 ("specular", np.float32),
@@ -1959,6 +1961,9 @@ class Scene:
                 ("clearcoatNormalTexIndex", np.int32),
                 ("clearcoatNormalTexCoord", np.int32),
                 ("opacity", np.float32),
+                ("opacityFresnelLow", np.float32),
+                ("opacityFresnelHigh", np.float32),
+                ("opacityFresnelFalloff", np.float32),
                 ("baseColorTexIndex", np.int32),
                 ("baseColorTexCoord", np.int32),
                 ("metallicRoughnessTexIndex", np.int32),
@@ -1967,7 +1972,7 @@ class Scene:
                 ("normalTexCoord", np.int32),
                 ("emissiveTexIndex", np.int32),
                 ("emissiveTexCoord", np.int32),
-                ("normalScale", np.float32),
+                ("normalScale", np.float32, (2,)),
                 ("baseColorUvTransform", np.float32, (6,)),
                 ("metallicRoughnessUvTransform", np.float32, (6,)),
                 ("normalUvTransform", np.float32, (6,)),
@@ -1991,6 +1996,21 @@ class Scene:
             compact[i]["alphaMode"] = mat["alphaMode"]
             compact[i]["alphaCutoff"] = mat["alphaCutoff"]
             compact[i]["transmission"] = mat["transmissionFactor"]
+            compact[i]["transmissionColor"] = mat["transmissionColorFactor"]
+            texture_size = 1
+            for texture_field in (
+                "pbrBaseColorTexture",
+                "normalTexture",
+                "pbrMetallicRoughnessTexture",
+                "emissiveTexture",
+                "occlusionTexture",
+                "clearcoatNormalTexture",
+            ):
+                texture_index = int(mat[texture_field]["index"])
+                if 0 <= texture_index < len(self._gltf_textures):
+                    texture = self._gltf_textures[texture_index]
+                    texture_size = max(texture_size, texture.shape[0], texture.shape[1])
+            compact[i]["textureSize"] = float(texture_size)
             compact[i]["ior"] = mat["ior"]
             compact[i]["specularColor"] = mat["specularColorFactor"]
             compact[i]["specular"] = mat["specularFactor"]
@@ -2011,6 +2031,9 @@ class Scene:
                 "texCoord"
             ]
             compact[i]["opacity"] = mat["pbrBaseColorFactor"][3]
+            compact[i]["opacityFresnelLow"] = mat["opacityFresnelLow"]
+            compact[i]["opacityFresnelHigh"] = mat["opacityFresnelHigh"]
+            compact[i]["opacityFresnelFalloff"] = mat["opacityFresnelFalloff"]
             compact[i]["baseColorTexIndex"] = mat["pbrBaseColorTexture"]["index"]
             compact[i]["baseColorTexCoord"] = mat["pbrBaseColorTexture"]["texCoord"]
             compact[i]["metallicRoughnessTexIndex"] = mat[
@@ -2083,6 +2106,7 @@ class Scene:
             self._texture_objects = [
                 wp.Texture2D(
                     tex,
+                    num_mip_levels=0,
                     filter_mode=wp.TextureFilterMode.LINEAR,
                     address_mode=wp.TextureAddressMode.WRAP,
                     normalized_coords=True,

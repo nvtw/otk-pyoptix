@@ -79,6 +79,32 @@ def test_direct_material_relationship_without_applied_api_resolves(tmp_path):
     assert _bound_material(subset.GetPrim(), UsdShade).GetPath() == material.GetPath()
 
 
+def test_stronger_ancestor_overrides_unapplied_referenced_subset_binding(tmp_path):
+    asset_path = tmp_path / "asset.usda"
+    asset_stage = Usd.Stage.CreateNew(str(asset_path))
+    asset_root = UsdGeom.Xform.Define(asset_stage, "/Asset")
+    asset_stage.SetDefaultPrim(asset_root.GetPrim())
+    UsdGeom.Mesh.Define(asset_stage, "/Asset/Mesh")
+    subset = UsdGeom.Subset.Define(asset_stage, "/Asset/Mesh/subset")
+    original = UsdShade.Material.Define(asset_stage, "/Asset/Looks/Original")
+    subset.GetPrim().CreateRelationship("material:binding").SetTargets(
+        [original.GetPath()]
+    )
+    asset_stage.GetRootLayer().Save()
+
+    stage = Usd.Stage.CreateInMemory()
+    referenced_root = UsdGeom.Xform.Define(stage, "/ReferencedAsset")
+    referenced_root.GetPrim().GetReferences().AddReference(str(asset_path))
+    override = UsdShade.Material.Define(stage, "/Looks/Override")
+    UsdShade.MaterialBindingAPI.Apply(referenced_root.GetPrim()).Bind(
+        override, bindingStrength=UsdShade.Tokens.strongerThanDescendants
+    )
+    referenced_subset = stage.GetPrimAtPath("/ReferencedAsset/Mesh/subset")
+
+    assert not referenced_subset.HasAPI(UsdShade.MaterialBindingAPI)
+    assert _bound_material(referenced_subset, UsdShade).GetPath() == override.GetPath()
+
+
 def test_mesh_arrays_selects_unreal_st_zero_uv_set():
     stage = Usd.Stage.CreateInMemory()
     mesh = UsdGeom.Mesh.Define(stage, "/Mesh")
@@ -158,7 +184,7 @@ def test_sphere_light_imports_as_five_centimeter_analytic_light(tmp_path):
     np.testing.assert_allclose(position, (1.0, 2.0, 3.0))
     assert radius == pytest.approx(0.05)
     np.testing.assert_allclose(color, (0.5, 0.25, 1.0))
-    assert intensity == pytest.approx(20.0)
+    assert intensity == pytest.approx(20.0 / 80000.0)
     assert (
         scene.usd_scene.instance_ids(scene.usd_scene.require_transform("/Light")) == ()
     )
@@ -190,7 +216,7 @@ def test_sphere_light_proxy_preserves_authored_power(tmp_path):
         path, convert_up_axis=False, load_usd_lights=True
     )
     assert authored_scene._sphere_lights[0][1] == pytest.approx(0.04)
-    assert authored_scene._sphere_lights[0][3] == pytest.approx(100.0)
+    assert authored_scene._sphere_lights[0][3] == pytest.approx(100.0 / 80000.0)
 
     scene = Scene(None)
     assert scene.load_from_usd(
@@ -199,7 +225,7 @@ def test_sphere_light_proxy_preserves_authored_power(tmp_path):
         load_usd_lights=True,
         usd_light_radius=0.05,
     )
-    assert scene._sphere_lights[0][3] == pytest.approx(64.0)
+    assert scene._sphere_lights[0][3] == pytest.approx(64.0 / 80000.0)
 
     light.CreateNormalizeAttr(True)
     stage.GetRootLayer().Save()
@@ -209,7 +235,7 @@ def test_sphere_light_proxy_preserves_authored_power(tmp_path):
     )
     assert normalized_scene._sphere_lights[0][1] == pytest.approx(0.04)
     assert normalized_scene._sphere_lights[0][3] == pytest.approx(
-        100.0 / (4.0 * np.pi * 0.04**2)
+        100.0 / (80000.0 * 4.0 * np.pi * 0.04**2)
     )
 
 

@@ -242,12 +242,30 @@ def test_sky_parameters_normalize_sun_direction():
 
     api.set_sky_parameters((0.0, 2.0, 1.0), grayscale=True)
 
-    assert api._viewer.sky_grayscale is True
+    assert api._viewer.sky_grayscale == 1.0
+    api.set_sky_parameters((0.0, 2.0, 1.0), grayscale=0.35)
+    assert api._viewer.sky_grayscale == pytest.approx(0.35)
     np.testing.assert_allclose(
         api._viewer.sky_sun_direction, (0.0, 0.8944272, 0.4472136), rtol=1.0e-6
     )
     with pytest.raises(ValueError, match="nonzero"):
         api.set_sky_parameters((0.0, 0.0, 0.0))
+
+
+def test_night_preset_enables_moon_and_visible_sky():
+    """Enable an antipodal moon disk and a nonblack night atmosphere."""
+    api = _FakePathTracerAPI()
+    viewer = PathTracingViewerBackend(device="cpu", headless=True, api=api)
+
+    viewer.set_time_of_day("night")
+
+    assert api.sky["sun_direction"][1] < 0.0
+    assert api.sky["sun_disk_intensity"] == pytest.approx(1.0)
+    assert api.sky["sun_disk_scale"] == pytest.approx(1.0)
+    assert api.sky["sun_glow_intensity"] == pytest.approx(0.15)
+    night_peak = max(api.sky["night_color"])
+    assert night_peak > 0.0
+    assert night_peak < 0.001
 
 
 def test_light_intensity_controls_clamp_and_reset_history():

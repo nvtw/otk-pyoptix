@@ -8,7 +8,9 @@ import pytest
 from PIL import Image
 from warp_optix.pathtracing import usd_loader
 from warp_optix.pathtracing.usd_loader import (
+    _MIP_CHAIN_MEMORY_FACTOR,
     _ambient_light_from_custom_layer_data,
+    _decode_packed_base_opacity,
     _decode_packed_orm,
     _decode_udim,
     _mdl_texture_inputs,
@@ -26,7 +28,7 @@ def test_texture_budget_proportionally_downscales_large_atlas():
 
     resized = _fit_textures_to_budget(textures, max_bytes=512)
 
-    assert sum(texture.nbytes for texture in resized) <= 512
+    assert sum(texture.nbytes for texture in resized) * _MIP_CHAIN_MEMORY_FACTOR <= 512
     assert resized[0].shape == resized[1].shape
     assert resized[0].shape[0] < textures[0].shape[0]
     assert all(texture.flags.c_contiguous for texture in resized)
@@ -38,7 +40,7 @@ def test_texture_budget_uses_available_gpu_memory(monkeypatch):
     import warp as wp
 
     class DeviceStub:
-        free_memory = 4096
+        free_memory = 8192
 
     textures = [np.zeros((16, 16, 4), dtype=np.uint8) for _ in range(2)]
     monkeypatch.setattr(wp, "get_device", lambda _alias: DeviceStub())
@@ -80,6 +82,54 @@ def test_missing_texture_rebases_to_stage_local_texture_tree(tmp_path):
     )
 
 
+def test_referenced_mdl_udim_resolves_from_authoring_layer(tmp_path):
+    pytest.importorskip("pxr")
+    from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade
+
+    texture_dir = tmp_path / "textures"
+    texture_dir.mkdir()
+    tile_path = texture_dir / "albedo.1001.png"
+    Image.new("RGBA", (2, 2), (160, 120, 80, 255)).save(tile_path)
+
+    asset_dir = tmp_path / "assets"
+    asset_dir.mkdir()
+    asset_path = asset_dir / "asset.usda"
+    asset_stage = Usd.Stage.CreateNew(str(asset_path))
+    asset_root = UsdGeom.Xform.Define(asset_stage, "/Asset")
+    asset_stage.SetDefaultPrim(asset_root.GetPrim())
+    mesh = UsdGeom.Mesh.Define(asset_stage, "/Asset/Mesh")
+    mesh.CreatePointsAttr(
+        [Gf.Vec3f(0.0, 0.0, 0.0), Gf.Vec3f(1.0, 0.0, 0.0), Gf.Vec3f(0.0, 1.0, 0.0)]
+    )
+    mesh.CreateFaceVertexCountsAttr([3])
+    mesh.CreateFaceVertexIndicesAttr([0, 1, 2])
+    material = UsdShade.Material.Define(asset_stage, "/Asset/Looks/Material")
+    shader = UsdShade.Shader.Define(asset_stage, "/Asset/Looks/Material/Shader")
+    shader.CreateIdAttr("CustomMdl")
+    shader.CreateInput("diffuse_texture", Sdf.ValueTypeNames.Asset).Set(
+        Sdf.AssetPath("../textures/albedo.<UDIM>.png")
+    )
+    shader.CreateOutput("surface", Sdf.ValueTypeNames.Token)
+    material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), "surface")
+    UsdShade.MaterialBindingAPI.Apply(mesh.GetPrim()).Bind(material)
+    asset_stage.GetRootLayer().Save()
+
+    scene_path = tmp_path / "scene.usda"
+    stage = Usd.Stage.CreateNew(str(scene_path))
+    referenced_root = UsdGeom.Xform.Define(stage, "/ReferencedAsset")
+    referenced_root.GetPrim().GetReferences().AddReference(str(asset_path))
+    stage.GetRootLayer().Save()
+
+    from warp_optix.pathtracing.scene import Scene
+
+    scene = Scene(None)
+    assert scene.load_from_usd(
+        scene_path, apply_stage_units=False, max_texture_memory_bytes=1 << 20
+    )
+    assert scene.texture_count == 1
+    np.testing.assert_array_equal(scene._gltf_textures[0][0, 0], (90, 48, 20, 255))
+
+
 def test_omniverse_ambient_light_metadata_is_preserved():
     custom_data = {
         "renderSettings": {
@@ -104,6 +154,9 @@ class _Input:
 
     def Get(self):
         return self._value
+
+    def GetAttr(self):
+        return None
 
 
 class _Shader:
@@ -387,6 +440,324 @@ def test_omniglass_source_asset_selects_transmission_without_authored_inputs(
     assert result["transmission"] == 1.0
     assert result["roughness"] == 0.0
     assert result["thickness"] == 1.0
+
+
+def test_collected_omni_ue4_translucent_wrapper_preserves_glass(monkeypatch, tmp_path):
+    """Preserve authored Fresnel opacity for UE translucent glass."""
+    for name in ("color.png", "normal.png", "mask.png"):
+        (tmp_path / name).touch()
+    mdl_path = tmp_path / "custom_material.mdl"
+    mdl_path.write_text(
+        """
+        export material custom_material(
+            uniform texture_2d Num1_BaseColor = texture_2d("color.png"),
+            uniform texture_2d Num2_Normal = texture_2d("normal.png"),
+            uniform texture_2d Num3_Mask = texture_2d("mask.png"),
+            float Opacity_low = 0.2,
+            float Opacity_hi = 0.35,
+            float Opacity_Fallof = 2.0,
+            float Opacity_multiplayer = 1.0,
+            uniform float Refraction_hi = 1.1)
+        = ::OmniUe4Translucent(
+            base_color: color(1.0),
+            opacity: Opacity_low * Opacity_multiplayer,
+            refraction: Refraction_hi);
+        """
+    )
+    shader = _Shader(
+        {},
+        source_asset=str(mdl_path),
+        sub_identifier="custom_material",
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+    requests = []
+
+    result = usd_loader._material_to_pbr(
+        None,
+        object(),
+        lambda path, srgb: requests.append((path, srgb)) or len(requests) - 1,
+    )
+
+    assert result["base_color"][3] == pytest.approx(1.0)
+    assert result["opacity_fresnel"] == pytest.approx((0.2, 0.35, 2.0))
+    assert result["transmission"] == 1.0
+    assert result["transmission_color"] == pytest.approx((1.0, 1.0, 1.0))
+    assert result["metallic"] == 0.0
+    assert result["ior"] == pytest.approx(1.1)
+    assert result["thickness"] == 0.0
+    assert result["alpha_mode"] == "BLEND"
+    assert result["base_color_texture"]["index"] == 0
+    assert result["metallic_roughness_texture"]["index"] == 1
+    assert result["normal_texture"]["index"] == 2
+    assert requests == [
+        (tmp_path / "color.png", True),
+        (tmp_path / "mask.png", False),
+        (tmp_path / "normal.png", False),
+    ]
+
+
+def test_collected_translucent_wrapper_packs_authored_opacity(monkeypatch, tmp_path):
+    """Pack an authored MDL opacity graph into base-color alpha."""
+    for name in ("color.png", "normal.png", "mask.png", "opacity.png"):
+        (tmp_path / name).touch()
+    mdl_path = tmp_path / "custom_material.mdl"
+    mdl_path.write_text(
+        """
+        export material custom_material(
+            uniform texture_2d Num1_BaseColor = texture_2d("color.png", ::tex::gamma_srgb),
+            uniform texture_2d Num2_Normal = texture_2d("normal.png", ::tex::gamma_linear),
+            uniform texture_2d Num3_Mask = texture_2d("mask.png", ::tex::gamma_linear),
+            uniform texture_2d Num4_Opacity = texture_2d("opacity.png", ::tex::gamma_srgb),
+            float Opacity_Tex_rougness_Contrast = 0.25,
+            float Opacity_Tex_roughness_Amount = 0.75,
+            float Opacity_Tex_roughness_multi = 0.5,
+            float Opacity_multiplayer = 0.8)
+        = ::OmniUe4Translucent(opacity: 1.0);
+        """
+    )
+    shader = _Shader({}, source_asset=str(mdl_path), sub_identifier="custom_material")
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+    packed_requests = []
+
+    result = usd_loader._material_to_pbr(
+        None,
+        object(),
+        lambda path, srgb: 1,
+        packed_opacity_index=lambda *args: packed_requests.append(args) or 9,
+    )
+
+    assert result["base_color_texture"]["index"] == 9
+    assert packed_requests == [
+        (
+            tmp_path / "color.png",
+            tmp_path / "opacity.png",
+            tmp_path / "mask.png",
+            True,
+            False,
+            0.25,
+            0.75,
+            0.5,
+            0.8,
+        )
+    ]
+
+
+def test_packed_base_opacity_evaluates_mdl_graph(tmp_path):
+    """Evaluate the collected OmniUe4 opacity graph into base alpha."""
+    Image.new("RGBA", (1, 1), (128, 64, 32, 255)).save(tmp_path / "base.png")
+    Image.new("RGBA", (1, 1), (128, 0, 0, 255)).save(tmp_path / "opacity.png")
+    Image.new("RGBA", (1, 1), (0, 128, 0, 255)).save(tmp_path / "orm.png")
+    spec = (
+        "packed_base_opacity",
+        tmp_path / "base.png",
+        tmp_path / "opacity.png",
+        tmp_path / "orm.png",
+        False,
+        False,
+        0.0,
+        1.0,
+        0.5,
+        1.0,
+    )
+
+    packed = _decode_packed_base_opacity(spec)
+
+    np.testing.assert_array_equal(packed[0, 0, :3], (128, 64, 32))
+    assert packed[0, 0, 3] == pytest.approx(32, abs=1)
+
+
+def test_collected_omni_ue4_base_preserves_surface_controls(monkeypatch, tmp_path):
+    """Preserve scalar lobes and AO strength from collected OmniUe4Base MDL."""
+    for name in ("color.png", "normal.png", "mask.png"):
+        (tmp_path / name).touch()
+    mdl_path = tmp_path / "custom_material.mdl"
+    mdl_path.write_text(
+        """
+        export material custom_material(
+            uniform texture_2d Num1_BaseColor = texture_2d("color.png"),
+            uniform texture_2d Num2_Normal = texture_2d("normal.png"),
+            uniform texture_2d Num3_Mask = texture_2d("mask.png"))
+        = let {
+            float AOamount = 0.65;
+            float Specular_mdl = 0.5;
+            float ClearCoat_mdl = 1.0;
+            float ClearCoatRoughness_mdl = 0.1;
+        } in ::OmniUe4Base(
+            specular: Specular_mdl,
+            clear_coat: ClearCoat_mdl,
+            clear_coat_roughness: ClearCoatRoughness_mdl);
+        """
+    )
+    shader = _Shader(
+        {},
+        source_asset=str(mdl_path),
+        sub_identifier="custom_material",
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(
+        None,
+        object(),
+        lambda path, srgb: 0,
+    )
+
+    assert result["specular"] == pytest.approx(0.5)
+    assert result["clearcoat"] == pytest.approx(1.0)
+    assert result["clearcoat_roughness"] == pytest.approx(0.1)
+    assert result["occlusion_strength"] == pytest.approx(0.65)
+    assert result["normal_texture"]["scale"] == pytest.approx((1.0, -1.0))
+
+
+def test_collected_mdl_honors_authored_srgb_orm(monkeypatch, tmp_path):
+    """Decode an ORM texture as sRGB when its MDL declaration requires it."""
+    for name in ("color.png", "normal.png", "mask.png"):
+        (tmp_path / name).touch()
+    mdl_path = tmp_path / "custom_material.mdl"
+    mdl_path.write_text(
+        """
+        export material custom_material(
+            uniform texture_2d Num1_BaseColor = texture_2d("color.png", ::tex::gamma_srgb),
+            uniform texture_2d Num2_Normal = texture_2d("normal.png", ::tex::gamma_linear),
+            uniform texture_2d Num3_Mask = texture_2d("mask.png", ::tex::gamma_srgb))
+        = ::OmniUe4Base();
+        """
+    )
+    shader = _Shader({}, source_asset=str(mdl_path), sub_identifier="custom_material")
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+    requests = []
+
+    usd_loader._material_to_pbr(
+        None,
+        object(),
+        lambda path, srgb: requests.append((path, srgb)) or len(requests) - 1,
+    )
+
+    assert (tmp_path / "mask.png", True) in requests
+    assert (tmp_path / "normal.png", False) in requests
+
+
+def test_collected_mdl_ignores_unconnected_clearcoat_locals(monkeypatch, tmp_path):
+    """Ignore generated clearcoat locals that do not feed the surface."""
+    mdl_path = tmp_path / "wood.mdl"
+    mdl_path.write_text(
+        """
+        export material wood() = let {
+            float ClearCoat_mdl = 1.0;
+            float ClearCoatRoughness_mdl = 0.1;
+        } in ::OmniUe4Base(base_color: color(0.4), roughness: 0.7);
+        """
+    )
+    shader = _Shader({}, source_asset=str(mdl_path), sub_identifier="wood")
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: -1)
+
+    assert result["clearcoat"] == 0.0
+    assert result["clearcoat_roughness"] == pytest.approx(0.1)
+
+
+def test_collected_ue4_emissive_texture_uses_isaac_radiance_scale(
+    monkeypatch, tmp_path
+):
+    """Match Isaac Sim's OmniUe4Base emission multiplier in renderer units."""
+    (tmp_path / "emissive.png").touch()
+    mdl_path = tmp_path / "emissive.mdl"
+    mdl_path.write_text(
+        """
+        export material emissive(
+            uniform texture_2d Num4_Emissive = texture_2d(
+                "emissive.png", ::tex::gamma_srgb),
+            float EmissiveMultiplayer = 1.5)
+        = ::OmniUe4Base(emissive_color: EmissiveColor_mdl);
+        """
+    )
+    shader = _Shader({}, source_asset=str(mdl_path), sub_identifier="emissive")
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: 3)
+
+    assert result["emissive_texture"]["index"] == 3
+    assert result["emissive_factor"] == pytest.approx((0.048, 0.048, 0.048))
+
+
+def test_omniglass_uses_authored_color_texture(monkeypatch, tmp_path):
+    """Use OmniGlass color textures as sRGB base color inputs."""
+    color_path = tmp_path / "glass_color.png"
+    color_path.touch()
+    asset = type("Asset", (), {"resolvedPath": str(color_path), "path": ""})()
+    shader = _Shader(
+        {"glass_color": (0.5, 0.75, 1.0), "glass_color_texture": asset},
+        source_asset="OmniGlass.mdl",
+        sub_identifier="OmniGlass",
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+    requests = []
+
+    result = usd_loader._material_to_pbr(
+        None,
+        object(),
+        lambda path, srgb: requests.append((path, srgb)) or 4,
+    )
+
+    assert result["base_color"] == (0.5, 0.75, 1.0, 1.0)
+    assert result["base_color_texture"]["index"] == 4
+    assert requests == [(color_path, True)]
+
+
+def test_omnipbr_preserves_normal_axis_flips(monkeypatch, tmp_path):
+    """Apply authored OmniPBR tangent-axis flips to normal-map channels."""
+    normal_path = tmp_path / "normal.png"
+    normal_path.touch()
+    asset = type("Asset", (), {"resolvedPath": str(normal_path), "path": ""})()
+    shader = _Shader(
+        {
+            "normalmap_texture": asset,
+            "bump_factor": 0.75,
+            "flip_tangent_u": False,
+            "flip_tangent_v": True,
+        }
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: 2)
+
+    assert result["normal_texture"]["index"] == 2
+    assert result["normal_texture"]["scale"] == (0.75, -0.75)
+
+
+def test_omnipbr_uses_its_authored_normal_green_channel_default(monkeypatch, tmp_path):
+    """Use OmniPBR's default flipped V tangent when no override is authored."""
+    normal_path = tmp_path / "normal.png"
+    normal_path.touch()
+    asset = type("Asset", (), {"resolvedPath": str(normal_path), "path": ""})()
+    shader = _Shader(
+        {"normalmap_texture": asset},
+        source_asset="OmniPBR.mdl",
+        sub_identifier="OmniPBR",
+    )
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: 2)
+
+    assert result["normal_texture"]["scale"] == (1.0, -1.0)
 
 
 def test_omnipbr_honors_disabled_orm_and_surface_controls(monkeypatch, tmp_path):

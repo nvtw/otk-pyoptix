@@ -252,6 +252,7 @@ def _adapt_auto_exposure(
     brighten_speed: float,
     darken_speed: float,
     delta_time: float,
+    initialize: int,
 ):
     """Temporally adapt exposure in EV without a CPU readback."""
     average_log_luminance = stats[0] / wp.max(stats[1], 1.0e-6)
@@ -260,6 +261,9 @@ def _adapt_auto_exposure(
         min_exposure_ev,
         max_exposure_ev,
     )
+    if initialize != 0:
+        exposure_ev[0] = target_ev
+        return
     current_ev = exposure_ev[0]
     speed = brighten_speed if target_ev > current_ev else darken_speed
     alpha = 1.0 - wp.exp(-wp.max(speed, 0.0) * wp.max(delta_time, 0.0))
@@ -473,6 +477,7 @@ class Tonemapper:
         self.auto_exposure_max_luminance_ev = 16.0
         self._auto_exposure_stats = wp.zeros(2, dtype=wp.float32, device="cuda")
         self._auto_exposure_ev = wp.zeros(1, dtype=wp.float32, device="cuda")
+        self._auto_exposure_initialized = False
 
         # Output buffer
         self._ldr_output = wp.zeros((height, width), dtype=wp.vec4, device="cuda")
@@ -500,7 +505,10 @@ class Tonemapper:
         darken_speed: float | None = None,
     ) -> None:
         """Configure temporal automatic exposure."""
+        was_enabled = self.auto_exposure
         self.auto_exposure = bool(enabled)
+        if self.auto_exposure and not was_enabled:
+            self._auto_exposure_initialized = False
         if target_luminance is not None:
             self.auto_exposure_target = max(float(target_luminance), 1.0e-6)
         if min_ev is not None:
@@ -554,9 +562,11 @@ class Tonemapper:
                     self.auto_exposure_brighten_speed,
                     self.auto_exposure_darken_speed,
                     float(delta_time),
+                    0 if self._auto_exposure_initialized else 1,
                 ],
                 device="cuda",
             )
+            self._auto_exposure_initialized = True
         wp.launch(
             tonemap_kernel,
             dim=(self.width, self.height),
