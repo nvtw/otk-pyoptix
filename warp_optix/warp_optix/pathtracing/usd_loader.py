@@ -971,6 +971,7 @@ def _material_to_pbr(
     transmission = 1.0 if is_glass else 0.0
     opacity = 1.0
     opacity_fresnel = None
+    is_fresnel_coverage = False
     ior = float(values.get("glass_ior", 1.5))
     thin_walled = bool(values.get("thin_walled", False))
     if is_omni_ue4_translucent:
@@ -984,8 +985,18 @@ def _material_to_pbr(
                 max(float(values.get("Opacity_Fallof", 1.0)), 0.0),
             )
         opacity = 1.0
-        transmission = 1.0
         ior = max(1.0, float(values.get("Refraction_hi", 1.0)))
+        # Some OmniUe4Translucent assets use a full 0..1 facing-ratio
+        # response as a thin fuzz/coverage shell, rather than as glass. A
+        # refractive BTDF makes those shells milky and temporally unstable.
+        is_fresnel_coverage = (
+            not packed_opacity
+            and opacity_fresnel is not None
+            and opacity_fresnel[0] <= 0.01
+            and opacity_fresnel[1] >= 0.99
+            and ior <= 1.12
+        )
+        transmission = 0.0 if is_fresnel_coverage else 1.0
         thin_walled = True
     return {
         "base_color": (*base, opacity),
@@ -996,7 +1007,11 @@ def _material_to_pbr(
         "ior": ior,
         "transmission": transmission,
         "alpha_mode": "BLEND" if is_glass else "OPAQUE",
-        "transmission_color": (1.0, 1.0, 1.0) if opacity_fresnel is not None else None,
+        "transmission_color": (
+            (1.0, 1.0, 1.0)
+            if opacity_fresnel is not None and not is_fresnel_coverage
+            else None
+        ),
         "specular": float(
             values.get(
                 "specular_level",

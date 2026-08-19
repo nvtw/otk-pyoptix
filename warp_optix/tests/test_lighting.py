@@ -11,6 +11,8 @@ from warp_optix.pathtracing.pathtracing_warp_kernels import (
     _bsdf_evaluate,
     _eval_physical_sky,
     _bsdf_sample,
+    _filter_roughness_for_normal_map,
+    _intersect_sphere_lights,
     _sky_star_radiance,
     _sample_sphere_light,
 )
@@ -136,6 +138,26 @@ def _evaluate_backside_thin_transmission(output: wp.array(dtype=wp.vec4)):
     )
     value = evaluated.bsdf_diffuse + evaluated.bsdf_glossy
     output[0] = wp.vec4(value[0], value[1], value[2], evaluated.pdf)
+
+
+@wp.kernel
+def _trace_authored_lamp_light(
+    params: PathtraceLaunchParams, output: wp.array(dtype=wp.vec4)
+):
+    hit = _intersect_sphere_lights(
+        params,
+        wp.vec3(0.0, 0.0, 0.0),
+        wp.vec3(0.0, 0.0, 1.0),
+        100.0,
+    )
+    output[0] = wp.vec4(hit.radiance[0], hit.radiance[1], hit.radiance[2], hit.distance)
+    output[1] = wp.vec4(hit.pdf, 0.0, 0.0, 0.0)
+
+
+@wp.kernel
+def _filter_wool_normal_roughness(output: wp.array(dtype=wp.float32)):
+    output[0] = _filter_roughness_for_normal_map(0.04, wp.vec3(0.0, 0.0, 1.0))
+    output[1] = _filter_roughness_for_normal_map(0.04, wp.vec3(0.1, 0.0, 0.7))
 
 
 def test_sphere_light_matches_lambertian_solid_angle_integral():
@@ -269,3 +291,51 @@ def test_backside_light_contributes_through_thin_transmission():
     )
 
     assert np.all(output.numpy()[0] > 0.0)
+
+
+def test_authored_counter_lamp_is_visible_through_secondary_rays():
+    """Intersect the finite emitter used inside each authored counter lamp."""
+    radius = 0.04
+    distance = 0.20
+    color = np.asarray((0.84942085, 0.64010745, 0.47554448), dtype=np.float32)
+    radiance = color * 5.0
+
+    light = SphereLight()
+    light.position_radius = wp.vec4(0.0, 0.0, distance, radius)
+    light.radiance = wp.vec3(*radiance)
+    light.pad = 0.0
+    params = PathtraceLaunchParams()
+    params.sphere_lights = wp.array([light], dtype=SphereLight, device="cpu")
+    params.sphere_light_count = 1
+    params.analytic_light_intensity = 1.0
+    output = wp.zeros(2, dtype=wp.vec4, device="cpu")
+
+    wp.launch(
+        _trace_authored_lamp_light,
+        dim=1,
+        inputs=[params, output],
+        device="cpu",
+    )
+
+    hit, pdf = output.numpy()
+    np.testing.assert_allclose(hit[:3], radiance, rtol=1.0e-6)
+    np.testing.assert_allclose(hit[3], distance - radius, rtol=1.0e-6)
+    cos_theta_max = np.sqrt(1.0 - radius * radius / (distance * distance))
+    expected_pdf = 1.0 / (2.0 * np.pi * (1.0 - cos_theta_max))
+    np.testing.assert_allclose(pdf[0], expected_pdf, rtol=1.0e-5)
+
+
+def test_filtered_wool_normal_broadens_unresolved_specular_lobe():
+    """Broaden roughness when a wool normal-map mip contains unresolved variance."""
+    output = wp.zeros(2, dtype=wp.float32, device="cpu")
+
+    wp.launch(
+        _filter_wool_normal_roughness,
+        dim=1,
+        inputs=[output],
+        device="cpu",
+    )
+
+    resolved, filtered = output.numpy()
+    np.testing.assert_allclose(resolved, 0.04, atol=1.0e-7)
+    assert filtered > resolved

@@ -7,7 +7,6 @@ import warp as wp
 import warp_optix as woptix
 from warp_optix._runtime.constants import (
     OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
-    OPTIX_RAY_FLAG_DISABLE_ANYHIT,
     OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT,
     OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
 )
@@ -1251,6 +1250,67 @@ def _sample_sphere_light(
         )
     sample.radiance = light.radiance * params.analytic_light_intensity
     return sample
+
+
+@wp.struct
+class SphereLightRayHit:
+    radiance: wp.vec3
+    pdf: wp.float32
+    distance: wp.float32
+
+
+@wp.func
+def _intersect_sphere_lights(
+    params: PathtraceLaunchParams,
+    origin: wp.vec3,
+    direction: wp.vec3,
+    max_distance: wp.float32,
+) -> SphereLightRayHit:
+    """Return the nearest finite analytic emitter along a secondary ray."""
+    hit = SphereLightRayHit()
+    hit.radiance = wp.vec3(0.0)
+    hit.pdf = 0.0
+    hit.distance = max_distance
+    count = int(params.sphere_light_count)
+    if count <= 0 or params.analytic_light_intensity <= 0.0:
+        return hit
+
+    index = wp.int32(0)
+    while index < count:
+        light = params.sphere_lights[index]
+        center = wp.vec3(
+            light.position_radius[0],
+            light.position_radius[1],
+            light.position_radius[2],
+        )
+        radius = wp.max(light.position_radius[3], 1.0e-5)
+        offset = origin - center
+        half_b = wp.dot(offset, direction)
+        c = wp.dot(offset, offset) - radius * radius
+        discriminant = half_b * half_b - c
+        if discriminant >= 0.0:
+            root = wp.sqrt(discriminant)
+            distance = -half_b - root
+            if distance <= 0.001:
+                distance = -half_b + root
+            if distance > 0.001 and distance < hit.distance:
+                center_distance_sq = wp.dot(offset, offset)
+                if center_distance_sq <= radius * radius * 1.0001:
+                    hit.pdf = 1.0 / (4.0 * wp.pi * wp.float32(count))
+                else:
+                    cos_theta_max = wp.sqrt(
+                        wp.max(1.0 - radius * radius / center_distance_sq, 0.0)
+                    )
+                    one_minus_cos = (radius * radius) / (
+                        center_distance_sq * wp.max(1.0 + cos_theta_max, 1.0e-6)
+                    )
+                    hit.pdf = 1.0 / (
+                        2.0 * wp.pi * wp.max(one_minus_cos, 1.0e-8) * wp.float32(count)
+                    )
+                hit.distance = distance
+                hit.radiance = light.radiance * params.analytic_light_intensity
+        index = index + wp.int32(1)
+    return hit
 
 
 @wp.func
@@ -2673,8 +2733,19 @@ def _sample_sphere_light_contribution(
     )
     if shadow.visible == wp.uint32(1):
         bsdf = evaluated.bsdf_diffuse + evaluated.bsdf_glossy
-        contribution = _mul_vec3(bsdf, sample.radiance) / sample.pdf
+        mis_weight = _power_heuristic(sample.pdf, evaluated.pdf)
+        contribution = _mul_vec3(bsdf, sample.radiance) * (mis_weight / sample.pdf)
     return contribution
+
+
+@wp.func
+def _filter_roughness_for_normal_map(
+    microfacet_roughness: wp.float32, tangent_normal: wp.vec3
+) -> wp.float32:
+    """Broaden the GGX lobe by unresolved tangent-normal variance."""
+    normal_length = wp.clamp(wp.length(tangent_normal), 0.0, 1.0)
+    variance = 1.0 - normal_length
+    return wp.clamp(microfacet_roughness + variance, 0.0, 1.0)
 
 
 @wp.func
@@ -2842,6 +2913,7 @@ def _evaluate_material_from_payload(
             n_tan[1] * mat.normal_scale[1],
             n_tan[2],
         )
+        roughness_sq = _filter_roughness_for_normal_map(roughness_sq, n_tan)
         n = wp.normalize(t * n_tan[0] + b * n_tan[1] + n * n_tan[2])
         needs_tangent_update = wp.bool(True)
 
@@ -3172,50 +3244,15 @@ def primary_raygen(params: PathtraceLaunchParams):
         pbr_mat.ior1 = pbr_mat.ior2
         pbr_mat.ior2 = exterior_ior
 
-    # DLSS-RR guides must describe the surface producing the dominant radiance.
-    # For mostly transmissive thin sheets, that is normally the first surface
-    # behind the sheet. Keep the full sheet BSDF for radiance, but trace one
-    # deterministic straight-through ray for stable reconstruction guides.
+    # Guides describe the first camera-visible surface. Background geometry
+    # behind moving glass has different motion and causes flowing history.
+    # Keep the glass surface's stable depth, normal, and object motion.
     guide_pbr = pbr_mat
     guide_hit_pos = hit_pos
     guide_instance_id = hit_instance_id
     guide_primitive_id = hit_primitive_id
     guide_barycentrics = hit_barycentrics
     guide_view_z = view_depth
-    if not is_psr and pbr_mat.is_thin_walled != 0 and pbr_mat.transmission >= 0.5:
-        guide_origin = _offset_ray_for_direction(hit_pos, pbr_mat.Ng, direction)
-        guide_payload = _init_primary_payload()
-        wp.optix_trace(
-            params.tlas,
-            guide_origin,
-            direction,
-            0.001,
-            1.0e32,
-            0.0,
-            wp.uint32(255),
-            ray_flags | wp.uint32(OPTIX_RAY_FLAG_DISABLE_ANYHIT),
-            wp.uint32(0),
-            wp.uint32(2),
-            wp.uint32(0),
-            guide_payload,
-        )
-        guide_t = _payload_get_hitT(guide_payload)
-        if guide_t < DLSS_INF_DISTANCE:
-            guide_pbr = _evaluate_material_from_payload(
-                params,
-                wp.int32(_payload_get_materialId(guide_payload)),
-                _payload_get_normal(guide_payload),
-                _payload_get_tangent(guide_payload),
-                _payload_get_bitangentSign(guide_payload),
-                _payload_get_uv(guide_payload),
-                _payload_get_uv1(guide_payload),
-                _payload_get_barycentrics(guide_payload)[0],
-            )
-            guide_hit_pos = guide_origin + direction * guide_t
-            guide_instance_id = _payload_get_instanceId(guide_payload)
-            guide_primitive_id = _payload_get_primitiveId(guide_payload)
-            guide_barycentrics = _payload_get_barycentrics(guide_payload)
-            guide_view_z = _compute_view_z(params.view, guide_hit_pos)
 
     aux_view_z = guide_view_z
 
@@ -3456,6 +3493,14 @@ def primary_raygen(params: PathtraceLaunchParams):
         )
 
         t_sec = _payload_get_hitT(sec_payload)
+        sphere_hit = _intersect_sphere_lights(params, sec_origin, sec_direction, t_sec)
+        if sphere_hit.pdf > 0.0:
+            sphere_mis = _power_heuristic(bsdf_pdf, sphere_hit.pdf)
+            radiance = (
+                radiance + _mul_vec3(sec_throughput, sphere_hit.radiance) * sphere_mis
+            )
+            break
+
         miss = wp.bool(t_sec >= DLSS_INF_DISTANCE * 0.99)
 
         if depth == 1 and is_glossy_reflection:
@@ -4218,6 +4263,7 @@ class AnyHitAlphaResult:
     tri_id: wp.int32
     alpha: wp.float32
     transmission: wp.float32
+    coverage_seed: wp.uint32
 
 
 @wp.struct
@@ -4255,6 +4301,7 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
     out.tri_id = wp.int32(-1)
     out.alpha = wp.float32(1.0)
     out.transmission = wp.float32(0.0)
+    out.coverage_seed = wp.uint32(0)
 
     inst_id = int(wp.optix_get_instance_id())
     if inst_id < 0 or inst_id >= int(params.instance_count):
@@ -4333,48 +4380,15 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
             + _fetch_vec2(vt1, tex1_base + i1) * b1
             + _fetch_vec2(vt1, tex1_base + i2) * b2
         )
-    opacity_normal = normal_world
-    if mat.normal_tex_index >= 0:
-        tangents = params.packed_tangents
-        tangent_base = int(rp.vertex_buffer.tangent_offset) // 4
-        tangent_interp = (
-            _fetch_vec4(tangents, tangent_base + i0) * b0
-            + _fetch_vec4(tangents, tangent_base + i1) * b1
-            + _fetch_vec4(tangents, tangent_base + i2) * b2
-        )
-        tangent_world = wp.optix_transform_vector_from_object_to_world_space(
-            wp.vec3(tangent_interp[0], tangent_interp[1], tangent_interp[2])
-        )
-        tangent_world = tangent_world - normal_world * wp.dot(
-            normal_world, tangent_world
-        )
-        if wp.dot(tangent_world, tangent_world) < 1.0e-12:
-            tangent_up = (
-                wp.vec3(0.0, 0.0, 1.0)
-                if wp.abs(normal_world[2]) < 0.999
-                else wp.vec3(0.0, 1.0, 0.0)
-            )
-            tangent_world = wp.cross(tangent_up, normal_world)
-        tangent_world = wp.normalize(tangent_world)
-        bitangent_world = wp.normalize(wp.cross(normal_world, tangent_world))
-        bitangent_world = bitangent_world * tangent_interp[3] * params.bitangent_flip
-        uv_normal = _apply_uv_transform(
-            _select_uv(mat.normal_tex_coord, uv0, uv1), mat.normal_uv_transform
-        )
-        normal_tex = _sample_texture_rgba(params, mat.normal_tex_index, uv_normal, 0.0)
-        normal_tangent = wp.vec3(
-            (normal_tex[0] * 2.0 - 1.0) * mat.normal_scale[0],
-            (normal_tex[1] * 2.0 - 1.0) * mat.normal_scale[1],
-            normal_tex[2] * 2.0 - 1.0,
-        )
-        opacity_normal = wp.normalize(
-            tangent_world * normal_tangent[0]
-            + bitangent_world * normal_tangent[1]
-            + normal_world * normal_tangent[2]
-        )
-
     uv_base = _apply_uv_transform(
         _select_uv(mat.base_color_tex_coord, uv0, uv1), mat.base_color_uv_transform
+    )
+    uv_seed_x = wp.uint32(int(wp.floor(uv_base[0] * 2048.0)))
+    uv_seed_y = wp.uint32(int(wp.floor(uv_base[1] * 2048.0)))
+    out.coverage_seed = _xxhash32(
+        wp.uint32(inst_id),
+        wp.uint32(tri_id),
+        _xxhash32(uv_seed_x, uv_seed_y, wp.uint32(0)),
     )
     base_tex = _sample_texture_rgba(params, mat.base_color_tex_index, uv_base, 0.0)
 
@@ -4383,7 +4397,7 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
         mat.opacity_fresnel_low,
         mat.opacity_fresnel_high,
         mat.opacity_fresnel_falloff,
-        opacity_normal,
+        normal_world,
         -wp.optix_get_world_ray_direction(),
     )
     if mat.alpha_mode == wp.int32(1):
@@ -4421,14 +4435,8 @@ def primary_closest_hit(params: PathtraceLaunchParams):
 
 
 @wp.func
-def _any_hit_rng(
-    inst_id: wp.int32, tri_id: wp.int32, frame_index: wp.uint32
-) -> wp.uint32:
-    launch_index = wp.optix_get_launch_index()
-    pixel_hash = _xxhash32(
-        wp.uint32(launch_index[0]), wp.uint32(launch_index[1]), frame_index
-    )
-    return _pcg_advance(_xxhash32(wp.uint32(inst_id), wp.uint32(tri_id), pixel_hash))
+def _any_hit_rng(coverage_seed: wp.uint32) -> wp.uint32:
+    return _pcg_advance(coverage_seed)
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.ANY_HIT)
@@ -4441,7 +4449,7 @@ def primary_any_hit(params: PathtraceLaunchParams):
         wp.optix_ignore_intersection()
         return
     if alpha_hit.alpha < 0.999:
-        ah_rng = _any_hit_rng(alpha_hit.inst_id, alpha_hit.tri_id, params.frame_index)
+        ah_rng = _any_hit_rng(alpha_hit.coverage_seed)
         r = _pcg_rand01(ah_rng)
         if r > alpha_hit.alpha:
             wp.optix_ignore_intersection()
@@ -4469,7 +4477,7 @@ def secondary_any_hit(params: PathtraceLaunchParams):
             wp.optix_ignore_intersection()
             return
         if blocking < 0.999:
-            rng = _any_hit_rng(alpha_hit.inst_id, alpha_hit.tri_id, params.frame_index)
+            rng = _any_hit_rng(alpha_hit.coverage_seed)
             if _pcg_rand01(rng) > blocking:
                 wp.optix_ignore_intersection()
                 return
@@ -4501,7 +4509,7 @@ def shadow_any_hit(params: PathtraceLaunchParams):
             wp.optix_ignore_intersection()
             return
         if blocking < 0.999:
-            rng = _any_hit_rng(alpha_hit.inst_id, alpha_hit.tri_id, params.frame_index)
+            rng = _any_hit_rng(alpha_hit.coverage_seed)
             if _pcg_rand01(rng) > blocking:
                 wp.optix_ignore_intersection()
                 return

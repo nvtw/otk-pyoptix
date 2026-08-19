@@ -498,6 +498,44 @@ def test_collected_omni_ue4_translucent_wrapper_preserves_glass(monkeypatch, tmp
     ]
 
 
+def test_collected_omni_ue4_translucent_wool_uses_surface_coverage(
+    monkeypatch, tmp_path
+):
+    """Interpret the authored wool shell as coverage instead of glass."""
+    for name in ("color.png", "normal.png", "mask.png"):
+        (tmp_path / name).touch()
+    mdl_path = tmp_path / "wool_glass.mdl"
+    mdl_path.write_text(
+        """
+        export material wool_glass(
+            uniform texture_2d Num1_BaseColor = texture_2d("color.png"),
+            uniform texture_2d Num2_Normal = texture_2d("normal.png"),
+            uniform texture_2d Num3_Mask = texture_2d("mask.png", ::tex::gamma_linear),
+            float Opacity_low = 0.0,
+            float Opacity_hi = 1.0,
+            float Opacity_Fallof = 2.0,
+            float Opacity_multiplayer = 1.0,
+            uniform float Refraction_hi = 1.1)
+        = ::OmniUe4Translucent(
+            base_color: color(1.0),
+            opacity: Opacity_low * Opacity_multiplayer,
+            refraction: Refraction_hi);
+        """
+    )
+    shader = _Shader({}, source_asset=str(mdl_path), sub_identifier="wool_glass")
+    monkeypatch.setattr(
+        usd_loader, "_surface_shader", lambda material, UsdShade: shader
+    )
+
+    result = usd_loader._material_to_pbr(None, object(), lambda path, srgb: 1)
+
+    assert result["opacity_fresnel"] == pytest.approx((0.0, 1.0, 2.0))
+    assert result["transmission"] == 0.0
+    assert result["transmission_color"] is None
+    assert result["ior"] == pytest.approx(1.1)
+    assert result["alpha_mode"] == "BLEND"
+
+
 def test_collected_translucent_wrapper_packs_authored_opacity(monkeypatch, tmp_path):
     """Pack an authored MDL opacity graph into base-color alpha."""
     for name in ("color.png", "normal.png", "mask.png", "opacity.png"):
