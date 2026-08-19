@@ -469,7 +469,7 @@ class Tonemapper:
         self.vignette = 0.0
         self.auto_exposure = False
         self.auto_exposure_target = 0.18
-        self.auto_exposure_min_ev = -6.0
+        self.auto_exposure_min_ev = 0.0
         self.auto_exposure_max_ev = 6.0
         self.auto_exposure_brighten_speed = 1.5
         self.auto_exposure_darken_speed = 3.0
