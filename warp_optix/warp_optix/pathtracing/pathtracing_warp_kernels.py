@@ -3055,6 +3055,7 @@ def primary_raygen(params: PathtraceLaunchParams):
     hit_instance_id = wp.int32(-1)
     hit_primitive_id = wp.uint32(0)
     hit_barycentrics = wp.vec3(0.0, 0.0, 0.0)
+    pbr = _make_invalid_shaded_hit()
 
     psr_depth = wp.int32(0)
     max_psr_depth = wp.int32(5)
@@ -3248,17 +3249,9 @@ def primary_raygen(params: PathtraceLaunchParams):
         params.spec_hit_dist_output[y, x] = wp.float32(0.0)
         return
 
-    # Opaque hit found -- evaluate material at primary hit.
-    pbr_mat = _evaluate_material_from_payload(
-        params,
-        wp.int32(_payload_get_materialId(payload)),
-        _payload_get_normal(payload),
-        _payload_get_tangent(payload),
-        _payload_get_bitangentSign(payload),
-        _payload_get_uv(payload),
-        _payload_get_uv1(payload),
-        _payload_get_barycentrics(payload)[0],
-    )
+    # The PSR traversal already evaluated the terminal surface. Reuse it here;
+    # evaluating again repeats every material texture fetch for every pixel.
+    pbr_mat = pbr
     if pbr_mat.is_thin_walled == 0 and _payload_get_front_face(payload) == wp.uint32(0):
         exterior_ior = pbr_mat.ior1
         pbr_mat.ior1 = pbr_mat.ior2

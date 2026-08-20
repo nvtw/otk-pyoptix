@@ -33,7 +33,7 @@ import numpy as np
 import warp as wp
 import warp_optix as woptix
 from warp_optix._runtime.hit_kernels import HitKernel
-from warp_optix._runtime.runtime import create_optix_context
+from warp_optix._runtime.runtime import _set_pipeline_stack_size, create_optix_context
 from warp_optix._runtime.sbt import SbtKernelManager
 
 from . import pathtracing_warp_kernels as pwk
@@ -941,7 +941,8 @@ class PathTracingViewer:
         )
 
         plo = optix.PipelineLinkOptions()
-        trace_depth = max(2, int(self.max_bounces) + 1)
+        # Bounces are iterative in raygen; hit and miss programs never trace recursively.
+        trace_depth = 1
         plo.maxTraceDepth = trace_depth
         groups = self._sbt_manager.get_all_program_groups()
         self._pipeline = self._ctx.pipelineCreate(
@@ -951,7 +952,13 @@ class PathTracingViewer:
             "",
         )
         # Single-level instancing => traversable graph depth must stay at 2 (TLAS -> GAS).
-        self._pipeline.setStackSize(2048, 2048, 2048, 2)
+        _set_pipeline_stack_size(
+            optix,
+            self._pipeline,
+            groups,
+            max_trace_depth=trace_depth,
+            max_traversable_depth=2,
+        )
 
     def _create_sbt(self):
         """Create the Shader Binding Table."""
