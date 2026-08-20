@@ -530,7 +530,7 @@ def test_collected_omni_ue4_translucent_wrapper_preserves_glass(monkeypatch, tmp
     )
 
     assert result["base_color"][3] == pytest.approx(1.0)
-    assert result["opacity_fresnel"] == pytest.approx((0.2, 0.35, 2.0))
+    assert result["opacity_fresnel"] is None
     assert result["transmission"] == 1.0
     assert result["transmission_color"] == pytest.approx((1.0, 1.0, 1.0))
     assert result["metallic"] == 0.0

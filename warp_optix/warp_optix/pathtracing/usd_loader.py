@@ -1011,6 +1011,11 @@ def _material_to_pbr(
             and ior <= 1.12
         )
         transmission = 0.0 if is_fresnel_coverage else 1.0
+        # UE's angular opacity is an artistic coverage model. Applying it to
+        # dielectric transmission leaves a diffuse remainder, producing milky
+        # glass; physical glass already gets angle-dependent reflection from IOR.
+        if not is_fresnel_coverage:
+            opacity_fresnel = None
         thin_walled = True
     return {
         "base_color": (*base, opacity),
@@ -1023,7 +1028,7 @@ def _material_to_pbr(
         "alpha_mode": "BLEND" if is_glass else "OPAQUE",
         "transmission_color": (
             (1.0, 1.0, 1.0)
-            if opacity_fresnel is not None and not is_fresnel_coverage
+            if is_omni_ue4_translucent and not is_fresnel_coverage
             else None
         ),
         "specular": float(

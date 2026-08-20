@@ -13,6 +13,7 @@ from warp_optix.pathtracing.pathtracing_warp_kernels import (
     _bsdf_sample,
     _filter_roughness_for_normal_map,
     _intersect_sphere_lights,
+    _material_f0,
     _sky_star_radiance,
     _sample_sphere_light,
 )
@@ -158,6 +159,28 @@ def _trace_authored_lamp_light(
 def _filter_wool_normal_roughness(output: wp.array(dtype=wp.float32)):
     output[0] = _filter_roughness_for_normal_map(0.04, wp.vec3(0.0, 0.0, 1.0))
     output[1] = _filter_roughness_for_normal_map(0.04, wp.vec3(0.1, 0.0, 0.7))
+
+
+@wp.kernel
+def _evaluate_material_f0(output: wp.array(dtype=wp.vec3)):
+    output[0] = _material_f0(wp.vec3(1.0), wp.vec3(1.0), 1.0, 0.0, 1.0, 1.5, 0.0)
+    output[1] = _material_f0(wp.vec3(1.0), wp.vec3(1.0), 0.5, 0.0, 1.0, 1.1, 0.0)
+    output[2] = _material_f0(
+        wp.vec3(0.2, 0.4, 0.8), wp.vec3(1.0), 1.0, 1.0, 1.0, 1.5, 0.0
+    )
+
+
+def test_material_f0_matches_dielectric_glass_and_metal_limits():
+    """Supply physical normal-incidence reflectance to reconstruction."""
+    output = wp.zeros(3, dtype=wp.vec3, device="cpu")
+
+    wp.launch(_evaluate_material_f0, dim=1, inputs=[output], device="cpu")
+
+    default_dielectric, low_ior_glass, metal = output.numpy()
+    np.testing.assert_allclose(default_dielectric, 0.04, rtol=1.0e-5)
+    expected_glass = 0.5 * ((1.1 - 1.0) / (1.1 + 1.0)) ** 2
+    np.testing.assert_allclose(low_ior_glass, expected_glass, rtol=1.0e-5)
+    np.testing.assert_allclose(metal, (0.2, 0.4, 0.8), rtol=1.0e-5)
 
 
 def test_sphere_light_matches_lambertian_solid_angle_integral():

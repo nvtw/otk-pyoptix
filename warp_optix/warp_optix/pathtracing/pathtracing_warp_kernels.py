@@ -1959,6 +1959,28 @@ def _ior_fresnel(eta: wp.float32, kh: wp.float32) -> wp.float32:
     return wp.clamp(fres, 0.0, 1.0)
 
 
+@wp.func
+def _material_f0(
+    base_color: wp.vec3,
+    specular_color: wp.vec3,
+    specular_scalar: wp.float32,
+    metallic: wp.float32,
+    ior1: wp.float32,
+    ior2: wp.float32,
+    clearcoat: wp.float32,
+) -> wp.vec3:
+    """Return physical normal-incidence reflectance for reconstruction guides."""
+    dielectric = specular_color * (
+        _ior_fresnel(ior2 / wp.max(ior1, 1.0e-6), 1.0) * specular_scalar
+    )
+    metalness = wp.clamp(metallic, 0.0, 1.0)
+    base_f0 = dielectric * (1.0 - metalness) + base_color * metalness
+    coat_f0 = wp.clamp(clearcoat, 0.0, 1.0) * _ior_fresnel(
+        1.5 / wp.max(ior1, 1.0e-6), 1.0
+    )
+    return wp.vec3(coat_f0) + base_f0 * (1.0 - coat_f0)
+
+
 # --- pbr_common.h line 522 ---
 @wp.func
 def _fresnel_cosine_approximation(
@@ -3071,7 +3093,6 @@ def primary_raygen(params: PathtraceLaunchParams):
             hit_barycentrics[0],
         )
 
-        pbr = _apply_fresnel_transmission(pbr, -direction)
         # C++ line 253: origin = offsetRay(hitPos, pbrMat.Ng) — use geometric normal
         origin = _offset_ray(hit_pos, pbr.Ng)
 
@@ -3238,7 +3259,6 @@ def primary_raygen(params: PathtraceLaunchParams):
         _payload_get_uv1(payload),
         _payload_get_barycentrics(payload)[0],
     )
-    pbr_mat = _apply_fresnel_transmission(pbr_mat, -direction)
     if pbr_mat.is_thin_walled == 0 and _payload_get_front_face(payload) == wp.uint32(0):
         exterior_ior = pbr_mat.ior1
         pbr_mat.ior1 = pbr_mat.ior2
@@ -3532,7 +3552,6 @@ def primary_raygen(params: PathtraceLaunchParams):
             sec_uv1,
             _payload_get_barycentrics(sec_payload)[0],
         )
-        sec_pbr = _apply_fresnel_transmission(sec_pbr, -sec_direction)
         if sec_pbr.is_thin_walled == 0 and _payload_get_front_face(
             sec_payload
         ) == wp.uint32(0):
@@ -3730,9 +3749,20 @@ def primary_raygen(params: PathtraceLaunchParams):
             depth = depth + wp.int32(1)
 
     # Specular albedo (pre-integrated environment term).
-    guide_specular_color = _mul_vec3(guide_pbr.specular, psr_throughput)
+    guide_f0 = _mul_vec3(
+        _material_f0(
+            guide_pbr.diffuse,
+            guide_pbr.specular,
+            guide_pbr.specular_scalar,
+            guide_pbr.metallic,
+            guide_pbr.ior1,
+            guide_pbr.ior2,
+            guide_pbr.clearcoat,
+        ),
+        psr_throughput,
+    )
     v_dot_n = wp.max(wp.dot(to_eye, guide_pbr.normal), 0.0)
-    f_env = _environment_term_rtg(guide_specular_color, v_dot_n, guide_pbr.roughness)
+    f_env = _environment_term_rtg(guide_f0, v_dot_n, guide_pbr.roughness)
     aux_specular_albedo = wp.vec4(f_env[0], f_env[1], f_env[2], 0.0)
     aux_spec_hit_dist = path_length
 
@@ -4235,25 +4265,6 @@ def _apply_opacity_fresnel(
         weight = wp.pow(wp.clamp(facing_ratio, 0.0, 1.0), falloff)
     angular_opacity = low + (high - low) * weight
     return wp.clamp(opacity * angular_opacity, 0.0, 1.0)
-
-
-@wp.func
-def _apply_fresnel_transmission(
-    material: ShadedHitData, to_eye: wp.vec3
-) -> ShadedHitData:
-    """Convert authored UE angular opacity to a stable transmission lobe."""
-    if material.opacity_fresnel_low >= 0.0 and material.transmission > 0.0:
-        surface_opacity = _apply_opacity_fresnel(
-            material.opacity,
-            material.opacity_fresnel_low,
-            material.opacity_fresnel_high,
-            material.opacity_fresnel_falloff,
-            material.normal,
-            to_eye,
-        )
-        material.transmission = material.transmission * (1.0 - surface_opacity)
-        material.opacity = 1.0
-    return material
 
 
 @wp.struct
