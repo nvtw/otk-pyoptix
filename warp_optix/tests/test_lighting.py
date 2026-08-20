@@ -48,7 +48,7 @@ def _evaluate_night_sky(
     direction = moon_direction
     if index == 1:
         direction = wp.normalize(moon_direction + wp.vec3(0.02, 0.0, 0.0))
-    output[index] = _eval_physical_sky(sky, direction)
+    output[index] = _eval_physical_sky(sky, direction, wp.bool(True), wp.bool(True))
 
 
 @wp.kernel

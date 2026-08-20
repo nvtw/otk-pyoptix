@@ -241,6 +241,9 @@ class PathtraceLaunchParams:
     override_metallic: wp.float32
     bitangent_flip: wp.float32
     use_procedural_sky: wp.uint32
+    sky_lut: wp.array2d(dtype=wp.vec4)
+    sky_lut_width: wp.uint32
+    sky_lut_height: wp.uint32
     env_map: wp.array(dtype=wp.float32)
     env_map_length: wp.uint32
     env_map_width: wp.uint32
@@ -770,7 +773,94 @@ def _sky_star_radiance(direction: wp.vec3) -> wp.vec3:
 
 
 @wp.func
-def _eval_physical_sky(ss: PhysicalSkyParams, in_direction: wp.vec3) -> wp.vec3:
+def _eval_physical_sky_celestial(
+    ss: PhysicalSkyParams, in_direction: wp.vec3
+) -> wp.vec3:
+    """Evaluate high-frequency sun, moon, halo, and star radiance."""
+    if ss.multiplier <= 0.0:
+        return wp.vec3(0.0)
+
+    celestial_dir = wp.normalize(_sky_tweak_vector(in_direction, ss.y_is_up, 0.0))
+    real_sun_dir = wp.normalize(_sky_tweak_vector(ss.sun_direction, ss.y_is_up, 0.0))
+    disk_direction = real_sun_dir
+    is_moon = real_sun_dir[2] < 0.0
+    if is_moon:
+        disk_direction = -real_sun_dir
+
+    result = wp.vec3(0.0)
+    if ss.sun_disk_intensity > 0.0 and ss.sun_disk_scale > 0.0:
+        sun_angle = wp.acos(wp.clamp(wp.dot(celestial_dir, disk_direction), -1.0, 1.0))
+        glow_scale = 25.0 if is_moon else 10.0
+        glow_radius = 0.00465 * ss.sun_disk_scale * glow_scale
+        if sun_angle < glow_radius:
+            center_proximity = 1.0 - sun_angle / glow_radius
+            if is_moon:
+                disk_radius = 0.00465 * ss.sun_disk_scale
+                disk_edge = wp.clamp(
+                    (disk_radius - sun_angle) / wp.max(disk_radius * 0.08, 1.0e-6),
+                    0.0,
+                    1.0,
+                )
+                disk_edge = disk_edge * disk_edge * (3.0 - 2.0 * disk_edge)
+                halo = wp.pow(center_proximity, 3.0) * 0.06 * ss.sun_glow_intensity
+                result = (
+                    wp.vec3(0.040, 0.044, 0.050)
+                    * ss.sun_disk_intensity
+                    * (disk_edge + halo)
+                )
+            else:
+                height_adjusted = (ss.horizon_height + ss.horizon_blur) / 10.0
+                sun_dir = wp.normalize(
+                    _sky_tweak_vector(ss.sun_direction, ss.y_is_up, height_adjusted)
+                )
+                if sun_dir[2] < 0.001:
+                    sun_dir = wp.normalize(wp.vec3(sun_dir[0], sun_dir[1], 0.001))
+                local_haze = wp.max(2.0, 2.0 + ss.haze)
+                data_sun_color = _sky_calc_sun_color(sun_dir[2], local_haze)
+                scales = _sky_calc_physical_scale(
+                    ss.sun_disk_scale, ss.sun_glow_intensity, ss.sun_disk_intensity
+                )
+                glow_factor = (
+                    wp.pow(center_proximity, 3.0)
+                    * 2.0
+                    * ss.sun_glow_intensity
+                    * scales[1]
+                )
+                smooth_edge = 0.95 + local_haze / 500.0
+                t_ss = wp.clamp(
+                    (center_proximity - 0.85) / (smooth_edge - 0.85), 0.0, 1.0
+                )
+                disk_factor = (
+                    (t_ss * t_ss * (3.0 - 2.0 * t_ss))
+                    * 100.0
+                    * ss.sun_disk_intensity
+                    * scales[0]
+                )
+                rgb_scale = ss.rgb_unit_conversion * ss.multiplier
+                disk_color = wp.vec3(
+                    data_sun_color[0] * (glow_factor + disk_factor) * rgb_scale[0],
+                    data_sun_color[1] * (glow_factor + disk_factor) * rgb_scale[1],
+                    data_sun_color[2] * (glow_factor + disk_factor) * rgb_scale[2],
+                )
+                local_saturation = _sky_tweak_saturation(ss.saturation, local_haze)
+                result = (
+                    _sky_tweak_color(disk_color, local_saturation, ss.redblueshift)
+                    * wp.pi
+                )
+
+    star_visibility = wp.clamp((-real_sun_dir[2] - 0.05) / 0.2, 0.0, 1.0)
+    if star_visibility > 0.0 and celestial_dir[2] > 0.0:
+        result = result + _sky_star_radiance(celestial_dir) * star_visibility
+    return result
+
+
+@wp.func
+def _eval_physical_sky(
+    ss: PhysicalSkyParams,
+    in_direction: wp.vec3,
+    include_celestial: wp.bool,
+    apply_grayscale: wp.bool,
+) -> wp.vec3:
     """1:1 translation of C++ evalPhysicalSky (sky_common.h line 323)."""
     if ss.multiplier <= 0.0:
         return wp.vec3(0.0, 0.0, 0.0)
@@ -780,7 +870,6 @@ def _eval_physical_sky(ss: PhysicalSkyParams, in_direction: wp.vec3) -> wp.vec3:
     rgb_scale = ss.rgb_unit_conversion * ss.multiplier
     height_adjusted = (ss.horizon_height + ss.horizon_blur) / 10.0
     d = _sky_tweak_vector(in_direction, ss.y_is_up, height_adjusted)
-    celestial_dir = wp.normalize(_sky_tweak_vector(in_direction, ss.y_is_up, 0.0))
     local_haze = wp.max(2.0, 2.0 + ss.haze)
     local_saturation = _sky_tweak_saturation(ss.saturation, local_haze)
 
@@ -803,64 +892,6 @@ def _eval_physical_sky(ss: PhysicalSkyParams, in_direction: wp.vec3) -> wp.vec3:
     data_sun_color = _sky_calc_sun_color(
         sun_dir[2], local_haze if downness > 0.0 else 2.0
     )
-
-    moon_radiance = wp.vec3(0.0, 0.0, 0.0)
-    # Horizon height/blur bends atmospheric lookup directions. Celestial
-    # disks remain on the unit sphere so evaluation and importance sampling
-    # use the same physically meaningful direction.
-    real_sun_dir = wp.normalize(_sky_tweak_vector(ss.sun_direction, ss.y_is_up, 0.0))
-    disk_direction = real_sun_dir
-    is_moon = real_sun_dir[2] < 0.0
-    if is_moon:
-        # A full moon is approximately antipodal to the sun. Reusing the
-        # authored solar trajectory keeps day/night motion continuous.
-        disk_direction = -real_sun_dir
-
-    if ss.sun_disk_intensity > 0.0 and ss.sun_disk_scale > 0.0:
-        sun_angle = wp.acos(wp.clamp(wp.dot(celestial_dir, disk_direction), -1.0, 1.0))
-        glow_scale = 10.0
-        if is_moon:
-            glow_scale = 25.0
-        glow_radius = 0.00465 * ss.sun_disk_scale * glow_scale
-        if sun_angle < glow_radius:
-            center_proximity = 1.0 - sun_angle / glow_radius
-            if is_moon:
-                disk_radius = 0.00465 * ss.sun_disk_scale
-                disk_edge = wp.clamp(
-                    (disk_radius - sun_angle) / wp.max(disk_radius * 0.08, 1.0e-6),
-                    0.0,
-                    1.0,
-                )
-                disk_edge = disk_edge * disk_edge * (3.0 - 2.0 * disk_edge)
-                halo = wp.pow(center_proximity, 3.0) * 0.06 * ss.sun_glow_intensity
-                # Full-moon luminance is about 4,000 nit. The renderer maps
-                # 80,000 nit to unit radiance, yielding a 0.05 disk value.
-                moon_radiance = (
-                    wp.vec3(0.040, 0.044, 0.050)
-                    * ss.sun_disk_intensity
-                    * (disk_edge + halo)
-                )
-            else:
-                scales = _sky_calc_physical_scale(
-                    ss.sun_disk_scale, ss.sun_glow_intensity, ss.sun_disk_intensity
-                )
-                glow_factor = (
-                    wp.pow(center_proximity, 3.0)
-                    * 2.0
-                    * ss.sun_glow_intensity
-                    * scales[1]
-                )
-                smooth_edge = 0.95 + local_haze / 500.0
-                t_ss = wp.clamp(
-                    (center_proximity - 0.85) / (smooth_edge - 0.85), 0.0, 1.0
-                )
-                disk_factor = (
-                    (t_ss * t_ss * (3.0 - 2.0 * t_ss))
-                    * 100.0
-                    * ss.sun_disk_intensity
-                    * scales[0]
-                )
-                tint = tint + data_sun_color * (glow_factor + disk_factor)
 
     out_color = wp.vec3(
         tint[0] * rgb_scale[0], tint[1] * rgb_scale[1], tint[2] * rgb_scale[2]
@@ -900,14 +931,11 @@ def _eval_physical_sky(ss: PhysicalSkyParams, in_direction: wp.vec3) -> wp.vec3:
             wp.max(result[1], night[1]),
             wp.max(result[2], night[2]),
         )
-    result = result + moon_radiance
-
-    star_visibility = wp.clamp((-real_sun_dir[2] - 0.05) / 0.2, 0.0, 1.0)
-    if star_visibility > 0.0 and celestial_dir[2] > 0.0:
-        result = result + _sky_star_radiance(celestial_dir) * star_visibility
+    if include_celestial:
+        result = result + _eval_physical_sky_celestial(ss, in_direction)
 
     grayscale = wp.clamp(ss.grayscale, 0.0, 1.0)
-    if grayscale > 0.0:
+    if apply_grayscale and grayscale > 0.0:
         gray = wp.max(result[0], wp.max(result[1], result[2]))
         result = result * (1.0 - grayscale) + wp.vec3(
             gray * grayscale,
@@ -972,7 +1000,6 @@ def _sky_sample_spherical_cap(
 class SkySamplingResult:
     direction: wp.vec3
     pdf: wp.float32
-    radiance: wp.vec3
 
 
 @wp.func
@@ -1013,7 +1040,6 @@ def _sample_physical_sky(
         d = wp.vec3(d[0], d[2], d[1])
 
     result.direction = wp.normalize(d)
-    result.radiance = _eval_physical_sky(ss, result.direction)
     result.pdf = _sky_sample_pdf(ss, result.direction)
     return result
 
@@ -1088,10 +1114,54 @@ def _eval_env_map(params: PathtraceLaunchParams, rd: wp.vec3) -> wp.vec3:
 
 
 @wp.func
+def _eval_sky_lut(params: PathtraceLaunchParams, rd: wp.vec3) -> wp.vec3:
+    phi = wp.atan2(rd[2], rd[0])
+    theta = wp.acos(wp.clamp(rd[1], -1.0, 1.0))
+    u = (phi + wp.pi) * (0.5 / wp.pi)
+    v = theta / wp.pi
+    w = int(params.sky_lut_width)
+    h = int(params.sky_lut_height)
+    if w <= 0 or h <= 0:
+        return _eval_physical_sky(params.sky, rd, wp.bool(True), wp.bool(True))
+    fx = (u - wp.floor(u)) * wp.float32(w) - 0.5
+    fy = wp.clamp(v, 0.0, 1.0) * wp.float32(h) - 0.5
+    x0 = int(wp.floor(fx))
+    y0 = int(wp.floor(fy))
+    tx = fx - wp.float32(x0)
+    ty = fy - wp.float32(y0)
+    x1 = x0 + 1
+    y1 = y0 + 1
+    ix0 = _wrap_repeat_index(x0, w)
+    ix1 = _wrap_repeat_index(x1, w)
+    iy0 = wp.clamp(y0, 0, h - 1)
+    iy1 = wp.clamp(y1, 0, h - 1)
+    lut = params.sky_lut
+    c00 = lut[iy0, ix0]
+    c10 = lut[iy0, ix1]
+    c01 = lut[iy1, ix0]
+    c11 = lut[iy1, ix1]
+    c0 = (
+        wp.vec3(c00[0], c00[1], c00[2]) * (1.0 - tx)
+        + wp.vec3(c10[0], c10[1], c10[2]) * tx
+    )
+    c1 = (
+        wp.vec3(c01[0], c01[1], c01[2]) * (1.0 - tx)
+        + wp.vec3(c11[0], c11[1], c11[2]) * tx
+    )
+    result = c0 * (1.0 - ty) + c1 * ty
+    result = result + _eval_physical_sky_celestial(params.sky, rd)
+    grayscale = wp.clamp(params.sky.grayscale, 0.0, 1.0)
+    if grayscale > 0.0:
+        gray = wp.max(result[0], wp.max(result[1], result[2]))
+        result = result * (1.0 - grayscale) + wp.vec3(gray * grayscale)
+    return result
+
+
+@wp.func
 def _sample_environment(params: PathtraceLaunchParams, rd: wp.vec3) -> wp.vec3:
     """Matches C++ eval_environment / evalPhysicalSky dispatch."""
     if params.use_procedural_sky == wp.uint32(1):
-        env = _eval_physical_sky(params.sky, rd)
+        env = _eval_sky_lut(params, rd)
         return wp.vec3(
             env[0] * params.env_intensity[0],
             env[1] * params.env_intensity[1],
@@ -1099,7 +1169,7 @@ def _sample_environment(params: PathtraceLaunchParams, rd: wp.vec3) -> wp.vec3:
         )
     if params.env_map_length > wp.uint32(0):
         return _eval_env_map(params, rd)
-    env = _eval_physical_sky(params.sky, rd)
+    env = _eval_physical_sky(params.sky, rd, wp.bool(True), wp.bool(True))
     return wp.vec3(
         env[0] * params.env_intensity[0],
         env[1] * params.env_intensity[1],
@@ -1326,11 +1396,7 @@ def _sample_environment_light(
     ):
         sky_sample = _sample_physical_sky(params.sky, xi0, xi1)
         s.direction = sky_sample.direction
-        s.radiance = wp.vec3(
-            sky_sample.radiance[0] * params.env_intensity[0],
-            sky_sample.radiance[1] * params.env_intensity[1],
-            sky_sample.radiance[2] * params.env_intensity[2],
-        )
+        s.radiance = _sample_environment(params, s.direction)
         s.pdf = sky_sample.pdf
         return s
 

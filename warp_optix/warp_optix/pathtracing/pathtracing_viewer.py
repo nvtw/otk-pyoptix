@@ -41,6 +41,7 @@ from .camera import Camera
 from .environment_map import EnvironmentMap
 from .lighting import RENDERER_RADIANCE_PER_NIT
 from .scene import Scene
+from .sky_lut import generate_physical_sky_lut
 from .tonemap import Tonemapper
 
 try:
@@ -246,6 +247,8 @@ class PathTracingViewer:
 
         # Output buffers
         self._color_buffer = None
+        self._sky_lut_buffer = None
+        self._sky_lut_state = None
         self._accum_buffer = None
         self._normal_roughness_buffer = None
         self._motion_buffer = None
@@ -799,6 +802,8 @@ class PathTracingViewer:
         self._color_buffer = wp.zeros(
             (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
         )
+        self._sky_lut_buffer = wp.empty((1024, 2048), dtype=wp.vec4, device="cuda")
+        self._sky_lut_state = None
         self._accum_buffer = wp.zeros(
             (self._render_height, self._render_width), dtype=wp.vec4, device="cuda"
         )
@@ -1212,6 +1217,32 @@ class PathTracingViewer:
         sky.y_is_up = int(self.sky_y_is_up)
         sky.grayscale = float(self.sky_grayscale)
         p.sky = sky
+        sky_state = (
+            tuple(self.sky_rgb_unit_conversion),
+            float(self.sky_multiplier),
+            float(self.sky_haze),
+            float(self.sky_redblueshift),
+            float(self.sky_saturation),
+            float(self.sky_horizon_height),
+            tuple(self.sky_ground_color),
+            float(self.sky_horizon_blur),
+            tuple(self.sky_night_color),
+            tuple(sd),
+            int(self.sky_y_is_up),
+        )
+        if self._env_map is None and sky_state != self._sky_lut_state:
+            wp.launch(
+                generate_physical_sky_lut,
+                dim=(self._sky_lut_buffer.shape[1], self._sky_lut_buffer.shape[0]),
+                inputs=[sky],
+                outputs=[self._sky_lut_buffer],
+                device="cuda",
+                stream=self._render_stream,
+            )
+            self._sky_lut_state = sky_state
+        p.sky_lut = self._sky_lut_buffer
+        p.sky_lut_width = wp.uint32(self._sky_lut_buffer.shape[1])
+        p.sky_lut_height = wp.uint32(self._sky_lut_buffer.shape[0])
 
         p.sphere_lights = (
             None
