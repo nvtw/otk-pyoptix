@@ -180,6 +180,7 @@ class PathTracingViewer:
         enable_set: bool = True,
         enable_cuda_graphs: bool = True,
         dlss_quality: str = "quality",
+        enable_texture_mipmaps: bool = False,
     ):
         """
         Initialize the path tracing viewer.
@@ -204,6 +205,7 @@ class PathTracingViewer:
         self.enable_dlss_rr = bool(enable_dlss_rr)
         self.enable_set = bool(enable_set)
         self.enable_cuda_graphs = bool(enable_cuda_graphs)
+        self.enable_texture_mipmaps = bool(enable_texture_mipmaps)
         self.dlss_quality = self._normalize_dlss_quality(dlss_quality)
         self._set_active = False
         self._render_stream = wp.get_stream("cuda")
@@ -466,7 +468,9 @@ class PathTracingViewer:
         self._set_active = False
 
         # Create scene
-        self._scene = Scene(self._ctx)
+        self._scene = Scene(
+            self._ctx, enable_texture_mipmaps=self.enable_texture_mipmaps
+        )
         if self._scene_setup is not None:
             self._scene_setup(self._scene)
         else:

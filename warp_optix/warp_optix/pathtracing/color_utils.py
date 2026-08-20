@@ -29,3 +29,15 @@ def srgb_to_linear_rgb(rgb: np.ndarray) -> np.ndarray:
     """Convert an array of RGB values from sRGB to linear space."""
     threshold = 0.04045
     return np.where(rgb <= threshold, rgb / 12.92, np.power((rgb + 0.055) / 1.055, 2.4))
+
+
+_SRGB_U8_TO_LINEAR_U8 = np.clip(
+    srgb_to_linear_rgb(np.arange(256, dtype=np.float32) * (1.0 / 255.0)) * 255.0 + 0.5,
+    0.0,
+    255.0,
+).astype(np.uint8)
+
+
+def srgb_to_linear_u8(rgb: np.ndarray) -> np.ndarray:
+    """Convert integer sRGB values to quantized linear values exactly."""
+    return _SRGB_U8_TO_LINEAR_U8[rgb]

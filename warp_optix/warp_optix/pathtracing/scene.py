@@ -21,15 +21,30 @@ Handles mesh loading, BLAS/TLAS construction, and instance management.
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 
 import numpy as np
 import warp as wp
 
-from .color_utils import srgb_to_linear_rgb
+from .color_utils import srgb_to_linear_u8
 from .materials import MaterialManager
 
 logger = logging.getLogger(__name__)
+_MAX_TEXTURE_BUILD_WORKERS = 8
+
+
+def _texture_worker_count(item_count: int) -> int:
+    """Return bounded concurrency for CPU texture preparation and mip generation."""
+    return max(
+        1,
+        min(
+            int(item_count),
+            _MAX_TEXTURE_BUILD_WORKERS,
+            max(1, int(os.cpu_count() or 1)),
+        ),
+    )
 
 
 @wp.kernel
@@ -553,7 +568,7 @@ class Scene:
     Handles meshes, instances, materials, and acceleration structures.
     """
 
-    def __init__(self, optix_ctx):
+    def __init__(self, optix_ctx, enable_texture_mipmaps: bool = False):
         """
         Create a scene.
 
@@ -562,6 +577,7 @@ class Scene:
         """
         self._optix = None  # Will be set when building
         self._ctx = optix_ctx
+        self.enable_texture_mipmaps = bool(enable_texture_mipmaps)
         self.materials = MaterialManager()
         self._meshes = []
         self._instances = []
@@ -801,8 +817,9 @@ class Scene:
                 sampling with ``R8G8B8A8_SRGB``.
         """
         srgb_indices = srgb_texture_indices or set()
-        converted = []
-        for tex_idx, tex in enumerate(textures):
+
+        def convert_texture(indexed_texture):
+            tex_idx, tex = indexed_texture
             if np.issubdtype(tex.dtype, np.integer):
                 tex_u8 = np.ascontiguousarray(tex, dtype=np.uint8)
             else:
@@ -811,13 +828,12 @@ class Scene:
                 )
             if tex_idx in srgb_indices:
                 tex_u8 = tex_u8.copy()
-                linear = srgb_to_linear_rgb(
-                    tex_u8[..., :3].astype(np.float32) * (1.0 / 255.0)
-                )
-                tex_u8[..., :3] = np.clip(linear * 255.0 + 0.5, 0.0, 255.0).astype(
-                    np.uint8
-                )
-            converted.append(tex_u8)
+                tex_u8[..., :3] = srgb_to_linear_u8(tex_u8[..., :3])
+            return tex_u8
+
+        workers = _texture_worker_count(len(textures))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            converted = list(executor.map(convert_texture, enumerate(textures)))
         if append:
             self._gltf_textures.extend(converted)
         else:
@@ -2103,17 +2119,22 @@ class Scene:
         # only texture handles, so aggregate texture memory is not constrained by
         # Warp's signed 32-bit limit for a single array dimension.
         if self._gltf_textures:
-            self._texture_objects = [
-                wp.Texture2D(
+
+            def create_texture(tex):
+                return wp.Texture2D(
                     tex,
-                    num_mip_levels=0,
+                    num_mip_levels=0 if self.enable_texture_mipmaps else 1,
                     filter_mode=wp.TextureFilterMode.LINEAR,
                     address_mode=wp.TextureAddressMode.WRAP,
                     normalized_coords=True,
                     device="cuda",
                 )
-                for tex in self._gltf_textures
-            ]
+
+            workers = _texture_worker_count(len(self._gltf_textures))
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                self._texture_objects = list(
+                    executor.map(create_texture, self._gltf_textures)
+                )
             self._texture_data = wp.array(
                 self._texture_objects,
                 dtype=wp.Texture2D,

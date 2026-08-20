@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 import time
-from collections import defaultdict
-from functools import lru_cache
+from collections import defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,19 @@ logger = logging.getLogger(__name__)
 _MIN_TEXTURE_MEMORY_BUDGET_BYTES = 1 << 30
 _TEXTURE_VRAM_RESERVE_BYTES = 4 << 30
 _MIP_CHAIN_MEMORY_FACTOR = 4.0 / 3.0
+_MAX_ASSET_WORKERS = 12
+
+
+def _asset_worker_count(item_count: int) -> int:
+    """Return bounded concurrency for CPU-heavy asset preparation."""
+    return max(
+        1,
+        min(
+            int(item_count),
+            _MAX_ASSET_WORKERS,
+            max(1, int(os.cpu_count() or 1)),
+        ),
+    )
 
 
 def _import_usd():
@@ -1213,10 +1227,11 @@ def _compact_corners(vertices, normals, texcoords, point_indices, used, corner_r
             .reshape(-1, 2)
         )
         key_parts.append(texcoord_bits)
-    keys = np.concatenate(key_parts, axis=1)
-    _, first, compact_remap = np.unique(
-        keys, axis=0, return_index=True, return_inverse=True
-    )
+    keys = np.ascontiguousarray(np.concatenate(key_parts, axis=1))
+    records = keys.view(
+        np.dtype((np.void, keys.dtype.itemsize * keys.shape[1]))
+    ).reshape(-1)
+    _, first, compact_remap = np.unique(records, return_index=True, return_inverse=True)
     selected = used[first]
     triangles = compact_remap[corner_remap].reshape(-1, 3).astype(np.uint32)
     return selected, triangles
@@ -1303,8 +1318,32 @@ def load_scene_from_usd(
     packed_orm_paths: dict[tuple, int] = {}
     packed_opacity_paths: dict[tuple, int] = {}
     missing_texture_paths: set[Path] = set()
-    texture_specs: list[Path | tuple] = []
+    texture_futures = []
+    asset_executor: ThreadPoolExecutor | None = None
     srgb_textures: set[int] = set()
+
+    def get_asset_executor() -> ThreadPoolExecutor:
+        nonlocal asset_executor
+        if asset_executor is None:
+            asset_executor = ThreadPoolExecutor(
+                max_workers=_asset_worker_count(_MAX_ASSET_WORKERS)
+            )
+        return asset_executor
+
+    def decode_texture_spec(spec):
+        if isinstance(spec, Path):
+            return _decode_texture(spec, max_size=max_texture_size)
+        if spec[0] == "udim":
+            return _decode_udim(spec[1], max_size=max_texture_size)
+        if spec[0] == "packed_base_opacity":
+            return _decode_packed_base_opacity(spec, max_size=max_texture_size)
+        return _decode_packed_orm(spec, max_size=max_texture_size)
+
+    def schedule_texture(spec: Path | tuple) -> int:
+        """Schedule texture processing while USD geometry traversal continues."""
+        index = len(texture_futures)
+        texture_futures.append(get_asset_executor().submit(decode_texture_spec, spec))
+        return index
 
     def resolve_texture(texture_path: Path | None):
         if texture_path is None:
@@ -1338,8 +1377,7 @@ def load_scene_from_usd(
         if resolved is None:
             return -1
         if resolved not in texture_paths:
-            texture_paths[resolved] = len(texture_specs)
-            texture_specs.append(resolved)
+            texture_paths[resolved] = schedule_texture(resolved)
         index = texture_paths[resolved]
         if srgb:
             srgb_textures.add(index)
@@ -1372,8 +1410,7 @@ def load_scene_from_usd(
             float(metallic_influence),
         )
         if key not in packed_orm_paths:
-            packed_orm_paths[key] = len(texture_specs)
-            texture_specs.append(key)
+            packed_orm_paths[key] = schedule_texture(key)
         return packed_orm_paths[key]
 
     def packed_opacity_index(
@@ -1405,9 +1442,8 @@ def load_scene_from_usd(
             float(opacity_multiplier),
         )
         if key not in packed_opacity_paths:
-            index = len(texture_specs)
+            index = schedule_texture(key)
             packed_opacity_paths[key] = index
-            texture_specs.append(key)
             # sRGB conversion changes RGB only; alpha remains linear opacity.
             srgb_textures.add(index)
         return packed_opacity_paths[key]
@@ -1512,6 +1548,52 @@ def load_scene_from_usd(
         return material_ids[key]
 
     stats = {"meshes": 0, "triangles": 0, "vertices": 0, "lights": 0}
+    geometry_jobs = deque()
+    from .scene import Mesh  # noqa: PLC0415
+
+    def build_mesh_group(
+        vertices,
+        normals,
+        texcoords,
+        point_indices,
+        group,
+        mat_id,
+        uv_grid,
+        flip_normals,
+    ):
+        tri = np.asarray(group, dtype=np.int64)
+        used, corner_remap = np.unique(tri.reshape(-1), return_inverse=True)
+        selected, tri = _compact_corners(
+            vertices, normals, texcoords, point_indices, used, corner_remap
+        )
+        material_texcoords = _normalize_mesh_uvs_for_udim_atlas(texcoords, *uv_grid)
+        selected_texcoords = (
+            material_texcoords[selected] if material_texcoords is not None else None
+        )
+        selected_normals = normals[selected] if normals is not None else None
+        if selected_normals is not None and flip_normals:
+            selected_normals = -selected_normals
+        mesh = Mesh(
+            vertices[selected],
+            tri,
+            normals=selected_normals,
+            texcoords=selected_texcoords,
+            material_id=mat_id,
+        )
+        return mesh, len(selected), len(tri)
+
+    def consume_geometry_job():
+        future, node_index, double_sided = geometry_jobs.popleft()
+        out_mesh, vertex_count, triangle_count = future.result()
+        instance_id = scene.add_instance(
+            scene.add_mesh(out_mesh), double_sided=double_sided
+        )
+        instance_ids.append(instance_id)
+        instance_node_ids.append(node_index)
+        stats["meshes"] += 1
+        stats["vertices"] += vertex_count
+        stats["triangles"] += triangle_count
+
     predicate = Usd.PrimIsActive & Usd.PrimIsDefined & ~Usd.PrimIsAbstract
     prim_range = Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies(predicate))
     for prim in prim_range:
@@ -1597,53 +1679,33 @@ def load_scene_from_usd(
         grouped: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
         for a, b, c, face in triangles:
             grouped[int(face_materials[face])].append((a, b, c))
+        double_sided = (
+            bool(mesh.GetDoubleSidedAttr().Get()) if strict_sidedness else True
+        )
+        # A reflected instance reverses winding while inverse-transpose normal
+        # transformation omits that orientation sign.
+        flip_normals = np.linalg.det(node_world_transforms[node_index][:3, :3]) < 0.0
         for mat_id, group in grouped.items():
-            tri = np.asarray(group, dtype=np.int64)
-            used, corner_remap = np.unique(tri.reshape(-1), return_inverse=True)
-            selected, tri = _compact_corners(
-                vertices, normals, texcoords, point_indices, used, corner_remap
+            future = get_asset_executor().submit(
+                build_mesh_group,
+                vertices,
+                normals,
+                texcoords,
+                point_indices,
+                group,
+                mat_id,
+                material_uv_grids.get(mat_id, (1, 1)),
+                flip_normals,
             )
-            from .scene import Mesh  # noqa: PLC0415
+            # Robust USD rendering is two-sided by default. The closest-hit
+            # shader face-forwards the shading frame, tolerating stale USD
+            # sidedness metadata without a mesh-wide consistency scan.
+            geometry_jobs.append((future, node_index, double_sided))
+            if len(geometry_jobs) >= 16:
+                consume_geometry_job()
 
-            columns, rows = material_uv_grids.get(mat_id, (1, 1))
-            material_texcoords = _normalize_mesh_uvs_for_udim_atlas(
-                texcoords, columns, rows
-            )
-            selected_texcoords = (
-                material_texcoords[selected] if material_texcoords is not None else None
-            )
-            selected_normals = normals[selected] if normals is not None else None
-            # A reflected instance reverses geometric winding in world space,
-            # while inverse-transpose normal transformation does not include
-            # that orientation sign. Apply it to the object-space shading
-            # frame so instanced USD meshes match an equivalent baked GLB.
-            if (
-                selected_normals is not None
-                and np.linalg.det(node_world_transforms[node_index][:3, :3]) < 0.0
-            ):
-                selected_normals = -selected_normals
-            out_mesh = Mesh(
-                vertices[selected],
-                tri,
-                normals=selected_normals,
-                texcoords=selected_texcoords,
-                material_id=mat_id,
-            )
-            instance_id = scene.add_instance(
-                scene.add_mesh(out_mesh),
-                # Robust USD rendering is two-sided by default. The closest-
-                # hit shader face-forwards the complete shading frame, which
-                # tolerates stale orientation/sidedness metadata without a
-                # costly mesh-wide consistency scan during import.
-                double_sided=(
-                    bool(mesh.GetDoubleSidedAttr().Get()) if strict_sidedness else True
-                ),
-            )
-            instance_ids.append(instance_id)
-            instance_node_ids.append(node_index)
-            stats["meshes"] += 1
-            stats["vertices"] += len(selected)
-            stats["triangles"] += len(tri)
+    while geometry_jobs:
+        consume_geometry_job()
 
     from .usd_scene import USDScene  # noqa: PLC0415
 
@@ -1656,23 +1718,13 @@ def load_scene_from_usd(
         np.asarray(instance_node_ids, dtype=np.int32),
     )
 
-    def decode_texture_spec(spec):
-        if isinstance(spec, Path):
-            return _decode_texture(spec, max_size=max_texture_size)
-        if spec[0] == "udim":
-            return _decode_udim(spec[1], max_size=max_texture_size)
-        if spec[0] == "packed_base_opacity":
-            return _decode_packed_base_opacity(spec, max_size=max_texture_size)
-        return _decode_packed_orm(spec, max_size=max_texture_size)
-
-    if texture_specs:
-        # Decoded 2K RGBA textures and UDIM atlases are large. Keep only two
-        # concurrent decodes so production scenes do not multiply peak RAM.
-        workers = max(1, min(2, len(texture_specs)))
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            textures = list(executor.map(decode_texture_spec, texture_specs))
-    else:
+    if asset_executor is None:
         textures = []
+    else:
+        try:
+            textures = [future.result() for future in texture_futures]
+        finally:
+            asset_executor.shutdown(wait=True)
     textures = _fit_textures_to_budget(
         textures,
         max_bytes=max_texture_memory_bytes,

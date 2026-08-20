@@ -10,6 +10,7 @@ from warp_optix.pathtracing import usd_loader
 from warp_optix.pathtracing.usd_loader import (
     _MIP_CHAIN_MEMORY_FACTOR,
     _ambient_light_from_custom_layer_data,
+    _compact_corners,
     _decode_packed_base_opacity,
     _decode_packed_orm,
     _decode_udim,
@@ -18,6 +19,39 @@ from warp_optix.pathtracing.usd_loader import (
     _normalize_mesh_uvs_for_udim_atlas,
     _rebase_missing_texture,
 )
+
+
+def test_corner_compaction_preserves_exact_attribute_seams():
+    vertices = np.zeros((5, 3), dtype=np.float32)
+    normals = np.asarray(
+        ((0, 0, 1), (0, 0, 1), (0, 1, 0), (0, 0, 1), (0, 0, 1)),
+        dtype=np.float32,
+    )
+    texcoords = np.asarray(((0, 0), (0, 0), (0, 0), (1, 0), (0, 0)), dtype=np.float32)
+    point_indices = np.asarray((7, 7, 7, 7, 9), dtype=np.int64)
+    used = np.asarray((0, 1, 2, 3, 4), dtype=np.int64)
+    corner_remap = np.asarray((0, 1, 2, 1, 3, 4), dtype=np.int64)
+
+    selected, triangles = _compact_corners(
+        vertices, normals, texcoords, point_indices, used, corner_remap
+    )
+
+    reconstructed = np.column_stack(
+        (
+            point_indices[selected][triangles.reshape(-1)],
+            normals[selected][triangles.reshape(-1)],
+            texcoords[selected][triangles.reshape(-1)],
+        )
+    )
+    source = np.column_stack(
+        (
+            point_indices[used][corner_remap],
+            normals[used][corner_remap],
+            texcoords[used][corner_remap],
+        )
+    )
+    np.testing.assert_array_equal(reconstructed, source)
+    assert len(selected) == 4
 
 
 def test_texture_budget_proportionally_downscales_large_atlas():

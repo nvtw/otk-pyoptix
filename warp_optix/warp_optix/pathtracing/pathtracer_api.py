@@ -49,6 +49,7 @@ class PathTracerAPI:
         max_bounces: int = 4,
         direct_light_samples: int = 1,
         russian_roulette_start_bounce: int = 3,
+        enable_texture_mipmaps: bool = False,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -65,6 +66,7 @@ class PathTracerAPI:
             max_bounces=max_bounces,
             direct_light_samples=direct_light_samples,
             russian_roulette_start_bounce=russian_roulette_start_bounce,
+            enable_texture_mipmaps=enable_texture_mipmaps,
         )
         self._built = False
         self._running = True
@@ -102,6 +104,11 @@ class PathTracerAPI:
     def dlss_enabled(self) -> bool:
         """Return whether DLSS Ray Reconstruction initialized successfully."""
         return bool(self._viewer._dlss_enabled)
+
+    @property
+    def texture_mipmaps_enabled(self) -> bool:
+        """Return whether texture mip-chain generation is enabled."""
+        return bool(self._viewer.enable_texture_mipmaps)
 
     @property
     def dlss_init_error(self) -> str | None:
