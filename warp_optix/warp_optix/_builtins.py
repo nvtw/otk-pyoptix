@@ -142,7 +142,11 @@ def register_addon_builtins() -> None:
         value_type=uint32,
     )
 
-    for _name in ("optix_get_instance_index", "optix_get_sbt_gas_index", "optix_get_primitive_type"):
+    for _name in (
+        "optix_get_instance_index",
+        "optix_get_sbt_gas_index",
+        "optix_get_primitive_type",
+    ):
         add_builtin(
             _name,
             input_types={},
@@ -279,6 +283,64 @@ def register_addon_builtins() -> None:
             "miss_sbt_index": uint32,
             "payload": Any,
         },
+        value_type=None,
+    )
+
+    add_builtin(
+        "optix_traverse",
+        input_types={
+            "traversable": uint64,
+            "ray_origin": vec3,
+            "ray_direction": vec3,
+            "tmin": float,
+            "tmax": float,
+            "ray_time": float,
+            "visibility_mask": uint32,
+            "ray_flags": uint32,
+            "sbt_offset": uint32,
+            "sbt_stride": uint32,
+            "miss_sbt_index": uint32,
+            "payload": Any,
+        },
+        value_type=None,
+    )
+
+    add_builtin(
+        "optix_reorder",
+        input_types={
+            "coherence_hint": uint32,
+            "num_coherence_hint_bits_from_lsb": uint32,
+        },
+        value_type=None,
+    )
+
+    add_builtin(
+        "optix_reorder",
+        input_types={},
+        value_type=None,
+    )
+
+    add_builtin(
+        "optix_hit_object_is_hit",
+        input_types={},
+        value_type=bool,
+    )
+
+    add_builtin(
+        "optix_hit_object_get_primitive_index",
+        input_types={},
+        value_type=uint32,
+    )
+
+    add_builtin(
+        "optix_hit_object_get_instance_id",
+        input_types={},
+        value_type=uint32,
+    )
+
+    add_builtin(
+        "optix_invoke",
+        input_types={"payload": Any},
         value_type=None,
     )
 

@@ -48,6 +48,32 @@ def query_raygen(params: QueryParams):
     )
 
 
+@woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
+def reorder_raygen(params: QueryParams):
+    payload = QueryPayload()
+    payload.value = wp.uint32(0)
+    wp.optix_traverse(
+        params.traversable,
+        wp.vec3(2.0, 0.0, 3.0),
+        wp.vec3(0.0, 0.0, -1.0),
+        0.001,
+        100.0,
+        0.25,
+        wp.uint32(0x5A),
+        wp.uint32(1),
+        wp.uint32(0),
+        wp.uint32(1),
+        wp.uint32(0),
+        payload,
+    )
+    params.output[12] = wp.uint32(1) if wp.optix_hit_object_is_hit() else wp.uint32(0)
+    params.output[13] = wp.optix_hit_object_get_instance_id()
+    params.output[14] = wp.optix_hit_object_get_primitive_index()
+    wp.optix_reorder()
+    wp.optix_reorder(wp.uint32(1), wp.uint32(1))
+    wp.optix_invoke(payload)
+
+
 @woptix.optix_kernel(woptix.OptixKernelType.MISS)
 def query_miss(params: QueryParams):
     params.output[0] = wp.uint32(0xFFFFFFFF)
@@ -72,27 +98,67 @@ def query_closest_hit(params: QueryParams):
     error = wp.uint32(0)
     object_origin = wp.vec3(0.0, 0.0, 0.0)
     world_origin = wp.vec3(2.0, 0.0, 0.0)
-    if wp.length(wp.optix_transform_point_from_object_to_world_space(object_origin) - world_origin) > 1.0e-5:
+    if (
+        wp.length(
+            wp.optix_transform_point_from_object_to_world_space(object_origin)
+            - world_origin
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(1)
-    if wp.length(wp.optix_transform_point_from_world_to_object_space(world_origin) - object_origin) > 1.0e-5:
+    if (
+        wp.length(
+            wp.optix_transform_point_from_world_to_object_space(world_origin)
+            - object_origin
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(2)
 
     vector = wp.vec3(1.0, 2.0, 3.0)
     world_vector = wp.optix_transform_vector_from_object_to_world_space(vector)
-    if wp.length(wp.optix_transform_vector_from_world_to_object_space(world_vector) - vector) > 1.0e-5:
+    if (
+        wp.length(
+            wp.optix_transform_vector_from_world_to_object_space(world_vector) - vector
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(4)
 
     normal = wp.normalize(wp.vec3(1.0, 2.0, 3.0))
     world_normal = wp.optix_transform_normal_from_object_to_world_space(normal)
-    if wp.length(wp.optix_transform_normal_from_world_to_object_space(world_normal) - normal) > 1.0e-5:
+    if (
+        wp.length(
+            wp.optix_transform_normal_from_world_to_object_space(world_normal) - normal
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(8)
 
     vertices = wp.optix_get_triangle_vertex_data()
-    if wp.length(wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2]) - wp.vec3(-1.0, -1.0, 0.0)) > 1.0e-5:
+    if (
+        wp.length(
+            wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2])
+            - wp.vec3(-1.0, -1.0, 0.0)
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(16)
-    if wp.length(wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2]) - wp.vec3(1.0, -1.0, 0.0)) > 1.0e-5:
+    if (
+        wp.length(
+            wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2])
+            - wp.vec3(1.0, -1.0, 0.0)
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(32)
-    if wp.length(wp.vec3(vertices[2, 0], vertices[2, 1], vertices[2, 2]) - wp.vec3(0.0, 1.0, 0.0)) > 1.0e-5:
+    if (
+        wp.length(
+            wp.vec3(vertices[2, 0], vertices[2, 1], vertices[2, 2])
+            - wp.vec3(0.0, 1.0, 0.0)
+        )
+        > 1.0e-5
+    ):
         error |= wp.uint32(64)
     params.output[11] = error
 
@@ -147,7 +213,10 @@ def curve_closest_hit(params: QueryParams):
     params.output[0] = wp.uint32(1)
     params.output[1] = wp.optix_get_primitive_type()
     params.output[2] = wp.float_to_uint32(wp.optix_get_curve_parameter())
-    world_hit = wp.optix_get_world_ray_origin() + wp.optix_get_ray_tmax() * wp.optix_get_world_ray_direction()
+    world_hit = (
+        wp.optix_get_world_ray_origin()
+        + wp.optix_get_ray_tmax() * wp.optix_get_world_ray_direction()
+    )
     params.output[3] = wp.float_to_uint32(world_hit[2])
     object_origin = wp.optix_transform_point_from_object_to_world_space(wp.vec3(0.0))
     params.output[4] = wp.float_to_uint32(object_origin[2])
@@ -208,13 +277,23 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
     monkeypatch.setattr(wp.config, "kernel_cache_dir", str(tmp_path / "warp_cache"))
     with wp.ScopedDevice(device_name):
         device = wp.get_device(device_name)
-        cuda_context = device.context.value if hasattr(device.context, "value") else int(device.context)
+        cuda_context = (
+            device.context.value
+            if hasattr(device.context, "value")
+            else int(device.context)
+        )
         context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
         ptx = woptix.compile_warp_module_to_ptx(
-            wp.get_module(__name__), "", "test_device_queries", __file__, device=device_name
+            wp.get_module(__name__),
+            "",
+            "test_device_queries",
+            __file__,
+            device=device_name,
         )
 
-        vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
+        vertices = np.array(
+            [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32
+        )
         indices = np.array([[0, 1, 2]], dtype=np.uint32)
         gas, gas_buffers = woptix.create_triangle_gas(
             optix, context, vertices, indices, device_name, compact=True
@@ -236,12 +315,14 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         hit_handle = pipeline_buffers["hit_group_handles"][0]
         hit_offset = pipeline_buffers["sbt_manager"].get_sbt_offset(hit_handle)
         transform = [1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
-        instance = optix.Instance(transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, gas)
+        instance = optix.Instance(
+            transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, gas
+        )
         ias, ias_buffers = woptix.create_instance_acceleration_structure(
             optix, context, [instance], device_name
         )
 
-        output = wp.zeros(12, dtype=wp.uint32, device=device_name)
+        output = wp.zeros(15, dtype=wp.uint32, device=device_name)
         params = QueryParams()
         params.output = output
         params.traversable = wp.uint64(ias)
@@ -264,20 +345,65 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         assert int(result[9]) | (int(result[10]) << 32) == gas
         assert result[11] == 0
 
-        dynamic_flags = int(optix.BUILD_FLAG_ALLOW_UPDATE | optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS)
+        reorder_pipeline, reorder_sbt, reorder_resources = (
+            woptix.create_pipeline_and_sbt(
+                optix,
+                context,
+                ptx,
+                reorder_raygen,
+                query_miss,
+                query_closest_hit,
+                num_payload_values=1,
+                num_attribute_values=2,
+                device=device_name,
+                traversable_graph_flags=optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING,
+            )
+        )
+        reorder_hit_handle = reorder_resources["hit_group_handles"][0]
+        reorder_hit_offset = reorder_resources["sbt_manager"].get_sbt_offset(
+            reorder_hit_handle
+        )
+        reorder_instance = optix.Instance(
+            transform, 77, reorder_hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, gas
+        )
+        reorder_ias, reorder_ias_buffers = (
+            woptix.create_instance_acceleration_structure(
+                optix, context, [reorder_instance], device_name
+            )
+        )
+        output.zero_()
+        params.traversable = wp.uint64(reorder_ias)
+        woptix.write_launch_params(params_buffer, params)
+        woptix.launch(optix, reorder_pipeline, reorder_sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        reorder_result = output.numpy()
+        assert tuple(reorder_result[:5]) == tuple(result[:5])
+        assert tuple(reorder_result[7:12]) == tuple(result[7:12])
+        assert tuple(reorder_result[12:15]) == (1, 77, 0)
+
+        dynamic_flags = int(
+            optix.BUILD_FLAG_ALLOW_UPDATE | optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS
+        )
         dynamic_gas, dynamic_buffers = woptix.create_triangle_gas(
             optix, context, vertices, indices, device_name, build_flags=dynamic_flags
         )
-        dynamic_instance = optix.Instance(transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, dynamic_gas)
-        dynamic_ias, dynamic_ias_buffers = woptix.create_instance_acceleration_structure(
-            optix, context, [dynamic_instance], device_name
+        dynamic_instance = optix.Instance(
+            transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, dynamic_gas
+        )
+        dynamic_ias, dynamic_ias_buffers = (
+            woptix.create_instance_acceleration_structure(
+                optix, context, [dynamic_instance], device_name
+            )
         )
         params.traversable = wp.uint64(dynamic_ias)
         woptix.write_launch_params(params_buffer, params)
 
         moved_vertices = vertices + np.array([10.0, 0.0, 0.0], dtype=np.float32)
         dynamic_buffers["d_vertices"].assign(moved_vertices)
-        assert woptix.refit_acceleration_structure(optix, context, dynamic_buffers) == dynamic_gas
+        assert (
+            woptix.refit_acceleration_structure(optix, context, dynamic_buffers)
+            == dynamic_gas
+        )
         output.zero_()
         woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
@@ -289,6 +415,8 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
             ias_buffers,
             dynamic_buffers,
             dynamic_ias_buffers,
+            reorder_resources,
+            reorder_ias_buffers,
             params_buffer,
         )
 
@@ -306,24 +434,34 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
     monkeypatch.setattr(wp.config, "kernel_cache_dir", str(tmp_path / "warp_cache"))
     with wp.ScopedDevice(device_name):
         device = wp.get_device(device_name)
-        cuda_context = device.context.value if hasattr(device.context, "value") else int(device.context)
+        cuda_context = (
+            device.context.value
+            if hasattr(device.context, "value")
+            else int(device.context)
+        )
         context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
         ptx = woptix.compile_warp_module_to_ptx(
-            wp.get_module(__name__), "", "test_callables_exceptions", __file__, device=device_name
+            wp.get_module(__name__),
+            "",
+            "test_callables_exceptions",
+            __file__,
+            device=device_name,
         )
 
-        callable_pipeline, callable_sbt, callable_resources = woptix.create_pipeline_and_sbt(
-            optix,
-            context,
-            ptx,
-            callable_raygen,
-            query_miss,
-            None,
-            num_payload_values=1,
-            num_attribute_values=0,
-            device=device_name,
-            direct_callable_entries=[direct_callable],
-            continuation_callable_entries=[continuation_callable],
+        callable_pipeline, callable_sbt, callable_resources = (
+            woptix.create_pipeline_and_sbt(
+                optix,
+                context,
+                ptx,
+                callable_raygen,
+                query_miss,
+                None,
+                num_payload_values=1,
+                num_attribute_values=0,
+                device=device_name,
+                direct_callable_entries=[direct_callable],
+                continuation_callable_entries=[continuation_callable],
+            )
         )
         manager = callable_resources["sbt_manager"]
         direct_handle = callable_resources["direct_callable_handles"][0]
@@ -332,25 +470,31 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
         output = wp.zeros(12, dtype=wp.uint32, device=device_name)
         params = QueryParams()
         params.output = output
-        params.direct_callable_index = wp.uint32(manager.get_callable_index(direct_handle))
-        params.continuation_callable_index = wp.uint32(manager.get_callable_index(continuation_handle))
+        params.direct_callable_index = wp.uint32(
+            manager.get_callable_index(direct_handle)
+        )
+        params.continuation_callable_index = wp.uint32(
+            manager.get_callable_index(continuation_handle)
+        )
         params_buffer = woptix.create_launch_params_buffer(QueryParams, device_name)
         woptix.write_launch_params(params_buffer, params)
         woptix.launch(optix, callable_pipeline, callable_sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         assert tuple(output.numpy()[:2]) == (42, 84)
 
-        exception_pipeline, exception_sbt, exception_resources = woptix.create_pipeline_and_sbt(
-            optix,
-            context,
-            ptx,
-            exception_raygen,
-            query_miss,
-            None,
-            num_payload_values=1,
-            num_attribute_values=0,
-            device=device_name,
-            exception_entry=exception_program,
+        exception_pipeline, exception_sbt, exception_resources = (
+            woptix.create_pipeline_and_sbt(
+                optix,
+                context,
+                ptx,
+                exception_raygen,
+                query_miss,
+                None,
+                num_payload_values=1,
+                num_attribute_values=0,
+                device=device_name,
+                exception_entry=exception_program,
+            )
         )
         output.zero_()
         woptix.launch(optix, exception_pipeline, exception_sbt, 1, 1, params_buffer)
@@ -373,29 +517,48 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
     monkeypatch.setattr(wp.config, "kernel_cache_dir", str(tmp_path / "warp_cache"))
     with wp.ScopedDevice(device_name):
         device = wp.get_device(device_name)
-        cuda_context = device.context.value if hasattr(device.context, "value") else int(device.context)
+        cuda_context = (
+            device.context.value
+            if hasattr(device.context, "value")
+            else int(device.context)
+        )
         context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
         ptx = woptix.compile_warp_module_to_ptx(
-            wp.get_module(__name__), "", "test_motion_curves", __file__, device=device_name
+            wp.get_module(__name__),
+            "",
+            "test_motion_curves",
+            __file__,
+            device=device_name,
         )
 
-        vertices = np.array([[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
-        vertex_keys = np.stack((vertices, vertices + np.array([0.0, 0.0, -0.5], dtype=np.float32)))
+        vertices = np.array(
+            [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32
+        )
+        vertex_keys = np.stack(
+            (vertices, vertices + np.array([0.0, 0.0, -0.5], dtype=np.float32))
+        )
         indices = np.array([[0, 1, 2]], dtype=np.uint32)
         motion_gas, motion_buffers = woptix.create_triangle_gas(
-            optix, context, vertex_keys, indices, device_name, motion_time_range=(0.0, 1.0)
-        )
-        motion_pipeline, motion_sbt, motion_pipeline_buffers = woptix.create_pipeline_and_sbt(
             optix,
             context,
-            ptx,
-            motion_raygen,
-            query_miss,
-            motion_closest_hit,
-            num_payload_values=1,
-            num_attribute_values=2,
-            device=device_name,
-            uses_motion_blur=True,
+            vertex_keys,
+            indices,
+            device_name,
+            motion_time_range=(0.0, 1.0),
+        )
+        motion_pipeline, motion_sbt, motion_pipeline_buffers = (
+            woptix.create_pipeline_and_sbt(
+                optix,
+                context,
+                ptx,
+                motion_raygen,
+                query_miss,
+                motion_closest_hit,
+                num_payload_values=1,
+                num_attribute_values=2,
+                device=device_name,
+                uses_motion_blur=True,
+            )
         )
 
         output = wp.zeros(12, dtype=wp.uint32, device=device_name)
@@ -418,22 +581,24 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             np.array([0], dtype=np.uint32),
             device_name,
         )
-        curve_pipeline, curve_sbt, curve_pipeline_buffers = woptix.create_pipeline_and_sbt(
-            optix,
-            context,
-            ptx,
-            curve_raygen,
-            query_miss,
-            None,
-            num_payload_values=1,
-            num_attribute_values=1,
-            device=device_name,
-            hit_groups=[
-                woptix.HitKernel(
-                    closest_hit=curve_closest_hit,
-                    builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
-                )
-            ],
+        curve_pipeline, curve_sbt, curve_pipeline_buffers = (
+            woptix.create_pipeline_and_sbt(
+                optix,
+                context,
+                ptx,
+                curve_raygen,
+                query_miss,
+                None,
+                num_payload_values=1,
+                num_attribute_values=1,
+                device=device_name,
+                hit_groups=[
+                    woptix.HitKernel(
+                        closest_hit=curve_closest_hit,
+                        builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+                    )
+                ],
+            )
         )
         output.zero_()
         params.traversable = wp.uint64(curve_gas)

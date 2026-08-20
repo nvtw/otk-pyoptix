@@ -43,6 +43,21 @@ inline CUDA_CALLABLE float uint32_to_float(uint32 u)
     return f;
 }
 
+template <typename Payload> union optix_payload_words {
+    static_assert(__is_trivially_copyable(Payload), "OptiX payload must be trivially copyable");
+    static_assert(
+        (alignof(Payload) % alignof(uint32)) == 0, "OptiX payload alignment must be a multiple of 4 bytes"
+    );
+    static_assert((sizeof(Payload) % sizeof(uint32)) == 0, "OptiX payload size must be a multiple of 4 bytes");
+
+    static constexpr size_t count = sizeof(Payload) / sizeof(uint32);
+    static_assert(count > 0, "OptiX payload must contain at least one 32-bit word");
+    static_assert(count <= 32, "OptiX payload exceeds OptiX payload register capacity");
+
+    Payload payload;
+    uint32 words[count];
+};
+
 
 #if defined(WP_ENABLE_OPTIX)
 template <size_t... I> struct wp_index_sequence { };
@@ -79,6 +94,37 @@ inline CUDA_CALLABLE_DEVICE void optix_trace_words(
         static_cast<OptixVisibilityMask>(visibility_mask), ray_flags, sbt_offset, sbt_stride, miss_sbt_index,
         words[I]...
     );
+}
+
+template <size_t N, size_t... I>
+inline CUDA_CALLABLE_DEVICE void optix_traverse_words(
+    OptixTraversableHandle handle,
+    const vec3& ray_origin,
+    const vec3& ray_direction,
+    float tmin,
+    float tmax,
+    float ray_time,
+    uint32 visibility_mask,
+    uint32 ray_flags,
+    uint32 sbt_offset,
+    uint32 sbt_stride,
+    uint32 miss_sbt_index,
+    uint32 (&words)[N],
+    wp_index_sequence<I...>
+)
+{
+    optixTraverse(
+        handle, make_float3(ray_origin[0], ray_origin[1], ray_origin[2]),
+        make_float3(ray_direction[0], ray_direction[1], ray_direction[2]), tmin, tmax, ray_time,
+        static_cast<OptixVisibilityMask>(visibility_mask), ray_flags, sbt_offset, sbt_stride, miss_sbt_index,
+        words[I]...
+    );
+}
+
+template <size_t N, size_t... I>
+inline CUDA_CALLABLE_DEVICE void optix_invoke_words(uint32 (&words)[N], wp_index_sequence<I...>)
+{
+    optixInvoke(words[I]...);
 }
 #endif
 
@@ -498,21 +544,8 @@ inline CUDA_CALLABLE_DEVICE void optix_trace(
 )
 {
 #if defined(WP_ENABLE_OPTIX)
-    static_assert(__is_trivially_copyable(Payload), "optix_trace payload must be trivially copyable");
-    static_assert(
-        (alignof(Payload) % alignof(uint32)) == 0, "optix_trace payload alignment must be a multiple of 4 bytes"
-    );
-    static_assert((sizeof(Payload) % sizeof(uint32)) == 0, "optix_trace payload size must be a multiple of 4 bytes");
-
-    constexpr size_t kPayloadWords = sizeof(Payload) / sizeof(uint32);
-    static_assert(kPayloadWords > 0, "optix_trace payload must contain at least one 32-bit word");
-    static_assert(kPayloadWords <= 32, "optix_trace payload exceeds OptiX payload register capacity");
-
-    union PayloadWords {
-        Payload payload;
-        uint32 words[kPayloadWords];
-    };
-
+    using PayloadWords = optix_payload_words<Payload>;
+    constexpr size_t kPayloadWords = PayloadWords::count;
     PayloadWords packed = {};
     packed.payload = payload;
 
@@ -539,28 +572,115 @@ inline CUDA_CALLABLE_DEVICE void optix_trace(
 #endif
 }
 
+template <typename Payload>
+inline CUDA_CALLABLE_DEVICE void optix_traverse(
+    uint64 traversable,
+    const vec3& ray_origin,
+    const vec3& ray_direction,
+    float tmin,
+    float tmax,
+    float ray_time,
+    uint32 visibility_mask,
+    uint32 ray_flags,
+    uint32 sbt_offset,
+    uint32 sbt_stride,
+    uint32 miss_sbt_index,
+    Payload& payload
+)
+{
+#if defined(WP_ENABLE_OPTIX)
+    using PayloadWords = optix_payload_words<Payload>;
+    constexpr size_t kPayloadWords = PayloadWords::count;
+    PayloadWords packed = {};
+    packed.payload = payload;
+    optix_traverse_words(
+        static_cast<OptixTraversableHandle>(traversable), ray_origin, ray_direction, tmin, tmax, ray_time,
+        visibility_mask, ray_flags, sbt_offset, sbt_stride, miss_sbt_index, packed.words,
+        wp_make_index_sequence<kPayloadWords> {}
+    );
+    payload = packed.payload;
+#else
+    (void)traversable;
+    (void)ray_origin;
+    (void)ray_direction;
+    (void)tmin;
+    (void)tmax;
+    (void)ray_time;
+    (void)visibility_mask;
+    (void)ray_flags;
+    (void)sbt_offset;
+    (void)sbt_stride;
+    (void)miss_sbt_index;
+    (void)payload;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE void optix_reorder(uint32 coherence_hint, uint32 num_coherence_hint_bits_from_lsb)
+{
+#if defined(WP_ENABLE_OPTIX)
+    optixReorder(coherence_hint, num_coherence_hint_bits_from_lsb);
+#else
+    (void)coherence_hint;
+    (void)num_coherence_hint_bits_from_lsb;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE void optix_reorder()
+{
+#if defined(WP_ENABLE_OPTIX)
+    optixReorder();
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE bool optix_hit_object_is_hit()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixHitObjectIsHit();
+#else
+    return false;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_hit_object_get_primitive_index()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixHitObjectGetPrimitiveIndex();
+#else
+    return 0u;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_hit_object_get_instance_id()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixHitObjectGetInstanceId();
+#else
+    return 0u;
+#endif
+}
+
+template <typename Payload>
+inline CUDA_CALLABLE_DEVICE void optix_invoke(Payload& payload)
+{
+#if defined(WP_ENABLE_OPTIX)
+    using PayloadWords = optix_payload_words<Payload>;
+    constexpr size_t kPayloadWords = PayloadWords::count;
+    PayloadWords packed = {};
+    packed.payload = payload;
+    optix_invoke_words(packed.words, wp_make_index_sequence<kPayloadWords> {});
+    payload = packed.payload;
+#else
+    (void)payload;
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE uint32 optix_get_payload_index(uint32 index);
 inline CUDA_CALLABLE_DEVICE void optix_set_payload_index(uint32 index, uint32 value);
 
 template <typename Payload> inline CUDA_CALLABLE_DEVICE Payload optix_load_payload()
 {
-    static_assert(__is_trivially_copyable(Payload), "optix_load_payload type must be trivially copyable");
-    static_assert(
-        (alignof(Payload) % alignof(uint32)) == 0, "optix_load_payload type alignment must be a multiple of 4 bytes"
-    );
-    static_assert(
-        (sizeof(Payload) % sizeof(uint32)) == 0, "optix_load_payload type size must be a multiple of 4 bytes"
-    );
-
-    constexpr size_t kPayloadWords = sizeof(Payload) / sizeof(uint32);
-    static_assert(kPayloadWords > 0, "optix_load_payload type must contain at least one 32-bit word");
-    static_assert(kPayloadWords <= 32, "optix_load_payload type exceeds OptiX payload register capacity");
-
-    union PayloadWords {
-        Payload payload;
-        uint32 words[kPayloadWords];
-    };
-
+    using PayloadWords = optix_payload_words<Payload>;
+    constexpr size_t kPayloadWords = PayloadWords::count;
     PayloadWords packed = {};
 #if defined(WP_ENABLE_OPTIX)
 #pragma unroll
@@ -578,23 +698,8 @@ template <typename Payload> inline CUDA_CALLABLE_DEVICE void optix_load_payload(
 
 template <typename Payload> inline CUDA_CALLABLE_DEVICE void optix_store_payload(const Payload& payload)
 {
-    static_assert(__is_trivially_copyable(Payload), "optix_store_payload type must be trivially copyable");
-    static_assert(
-        (alignof(Payload) % alignof(uint32)) == 0, "optix_store_payload type alignment must be a multiple of 4 bytes"
-    );
-    static_assert(
-        (sizeof(Payload) % sizeof(uint32)) == 0, "optix_store_payload type size must be a multiple of 4 bytes"
-    );
-
-    constexpr size_t kPayloadWords = sizeof(Payload) / sizeof(uint32);
-    static_assert(kPayloadWords > 0, "optix_store_payload type must contain at least one 32-bit word");
-    static_assert(kPayloadWords <= 32, "optix_store_payload type exceeds OptiX payload register capacity");
-
-    union PayloadWords {
-        Payload payload;
-        uint32 words[kPayloadWords];
-    };
-
+    using PayloadWords = optix_payload_words<Payload>;
+    constexpr size_t kPayloadWords = PayloadWords::count;
     PayloadWords packed = {};
     packed.payload = payload;
 #if defined(WP_ENABLE_OPTIX)
