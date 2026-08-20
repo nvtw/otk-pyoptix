@@ -12,7 +12,7 @@ import math
 import os
 import re
 import time
-from collections import defaultdict, deque
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -1237,6 +1237,23 @@ def _compact_corners(vertices, normals, texcoords, point_indices, used, corner_r
     return selected, triangles
 
 
+def _triangles_by_material(triangles, face_materials):
+    """Group triangle corners by material without per-triangle Python work."""
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 4)
+    triangle_materials = face_materials[triangles[:, 3]]
+    material_ids, first = np.unique(triangle_materials, return_index=True)
+    material_ids = material_ids[np.argsort(first)]
+    return [
+        (
+            int(material_id),
+            np.ascontiguousarray(
+                triangles[triangle_materials == material_id, :3], dtype=np.int64
+            ),
+        )
+        for material_id in material_ids
+    ]
+
+
 def _normalize_mesh_uvs_for_udim_atlas(
     texcoords: np.ndarray | None, columns: int, rows: int
 ) -> np.ndarray | None:
@@ -1676,16 +1693,13 @@ def load_scene_from_usd(
                 subset_faces = np.asarray(subset.GetIndicesAttr().Get(), dtype=np.int64)
                 face_materials[subset_faces] = material_id(subset_material)
 
-        grouped: dict[int, list[tuple[int, int, int]]] = defaultdict(list)
-        for a, b, c, face in triangles:
-            grouped[int(face_materials[face])].append((a, b, c))
         double_sided = (
             bool(mesh.GetDoubleSidedAttr().Get()) if strict_sidedness else True
         )
         # A reflected instance reverses winding while inverse-transpose normal
         # transformation omits that orientation sign.
         flip_normals = np.linalg.det(node_world_transforms[node_index][:3, :3]) < 0.0
-        for mat_id, group in grouped.items():
+        for mat_id, group in _triangles_by_material(triangles, face_materials):
             future = get_asset_executor().submit(
                 build_mesh_group,
                 vertices,

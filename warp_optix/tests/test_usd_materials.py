@@ -18,6 +18,7 @@ from warp_optix.pathtracing.usd_loader import (
     _fit_textures_to_budget,
     _normalize_mesh_uvs_for_udim_atlas,
     _rebase_missing_texture,
+    _triangles_by_material,
 )
 
 
@@ -52,6 +53,20 @@ def test_corner_compaction_preserves_exact_attribute_seams():
     )
     np.testing.assert_array_equal(reconstructed, source)
     assert len(selected) == 4
+
+
+def test_triangle_material_groups_preserve_authored_order():
+    triangles = np.asarray(
+        ((0, 1, 2, 0), (3, 4, 5, 1), (6, 7, 8, 2), (9, 10, 11, 3)),
+        dtype=np.int64,
+    )
+    face_materials = np.asarray((4, 2, 4, 2), dtype=np.int64)
+
+    groups = _triangles_by_material(triangles, face_materials)
+
+    assert [material_id for material_id, _ in groups] == [4, 2]
+    np.testing.assert_array_equal(groups[0][1], ((0, 1, 2), (6, 7, 8)))
+    np.testing.assert_array_equal(groups[1][1], ((3, 4, 5), (9, 10, 11)))
 
 
 def test_texture_budget_proportionally_downscales_large_atlas():
