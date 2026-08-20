@@ -665,7 +665,7 @@ class PathTracerAPI:
         sun_disk_scale: float = 1.0,
         sun_glow_intensity: float = 1.0,
         y_is_up: int = 1,
-        grayscale: float | bool = 0.0,
+        grayscale: float | bool = 0.5,
     ):
         self.initialize()
         direction = np.asarray(tuple(float(v) for v in sun_direction), dtype=np.float32)

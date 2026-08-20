@@ -324,7 +324,7 @@ class PathTracingViewer:
         self.sky_sun_disk_scale = 1.0
         self.sky_sun_glow_intensity = 1.0
         self.sky_y_is_up = 1
-        self.sky_grayscale = 0.0
+        self.sky_grayscale = 0.5
         self.env_intensity = (1.0, 1.0, 1.0)
         self.analytic_light_intensity = 1.0
         self.emissive_material_intensity = 1.0

@@ -240,6 +240,8 @@ def test_sky_parameters_normalize_sun_direction():
     api._viewer = SimpleNamespace()
     api.initialize = lambda: True
 
+    api.set_sky_parameters((0.0, 2.0, 1.0))
+    assert api._viewer.sky_grayscale == pytest.approx(0.5)
     api.set_sky_parameters((0.0, 2.0, 1.0), grayscale=True)
 
     assert api._viewer.sky_grayscale == 1.0
