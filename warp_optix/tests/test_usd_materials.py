@@ -492,7 +492,7 @@ def test_omniglass_source_asset_selects_transmission_without_authored_inputs(
 
 
 def test_collected_omni_ue4_translucent_wrapper_preserves_glass(monkeypatch, tmp_path):
-    """Preserve authored Fresnel opacity for UE translucent glass."""
+    """Convert UE translucent glass to a stable dielectric interface."""
     for name in ("color.png", "normal.png", "mask.png"):
         (tmp_path / name).touch()
     mdl_path = tmp_path / "custom_material.mdl"
@@ -536,7 +536,7 @@ def test_collected_omni_ue4_translucent_wrapper_preserves_glass(monkeypatch, tmp
     assert result["metallic"] == 0.0
     assert result["ior"] == pytest.approx(1.1)
     assert result["thickness"] == 0.0
-    assert result["alpha_mode"] == "BLEND"
+    assert result["alpha_mode"] == "OPAQUE"
     assert result["base_color_texture"]["index"] == 0
     assert result["metallic_roughness_texture"]["index"] == 1
     assert result["normal_texture"]["index"] == 2

@@ -1025,7 +1025,9 @@ def _material_to_pbr(
         "roughness": roughness,
         "ior": ior,
         "transmission": transmission,
-        "alpha_mode": "BLEND" if is_glass else "OPAQUE",
+        # Physical transmission retains the dielectric interface; alpha blend
+        # is reserved for the MDL assets identified as coverage shells.
+        "alpha_mode": "BLEND" if is_fresnel_coverage else "OPAQUE",
         "transmission_color": (
             (1.0, 1.0, 1.0)
             if is_omni_ue4_translucent and not is_fresnel_coverage

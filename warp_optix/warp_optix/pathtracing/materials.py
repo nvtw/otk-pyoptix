@@ -220,6 +220,9 @@ class MaterialManager:
     def add_default(self) -> int:
         """Add a default PBR material and return its index."""
         mat = self._create_default_material()
+        # Pure-white diffuse reflectance is unrealistic and needlessly noisy.
+        # Match Newton's neutral 0.7 display-sRGB ground color in linear space.
+        mat["pbrBaseColorFactor"] = (0.4479884, 0.4479884, 0.4479884, 1.0)
         self._materials.append(mat)
         self._dirty = True
         return len(self._materials) - 1

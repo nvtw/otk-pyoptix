@@ -7,6 +7,18 @@ import pytest
 from warp_optix.pathtracing.materials import MaterialManager
 
 
+def test_default_material_uses_neutral_ground_reflectance():
+    """Use a realistic neutral reflectance for unassigned surfaces."""
+    manager = MaterialManager()
+
+    material_id = manager.add_default()
+    material = manager.get_material_entries()[material_id]
+
+    assert material["pbrBaseColorFactor"] == pytest.approx(
+        (0.4479884, 0.4479884, 0.4479884, 1.0)
+    )
+
+
 def test_gltf_material_configures_checker_overlay():
     manager = MaterialManager()
 
