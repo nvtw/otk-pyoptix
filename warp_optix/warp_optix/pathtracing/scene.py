@@ -414,6 +414,7 @@ class Mesh:
             normals = self._compute_normals(self.vertices, self.indices)
         self.normals = np.ascontiguousarray(normals, dtype=np.float32)
 
+        has_texcoords = texcoords is not None
         if texcoords is None:
             texcoords = np.zeros((len(vertices), 2), dtype=np.float32)
         self.texcoords = np.ascontiguousarray(texcoords, dtype=np.float32)
@@ -426,9 +427,13 @@ class Mesh:
             material_ids, len(self.indices), self.material_id
         )
 
-        # Tangents for normal mapping (computed from UVs; used when normalTexIndex >= 0)
-        self.tangents = self._compute_tangents(
-            self.vertices, self.indices, self.normals, self.texcoords
+        # Tangents only need triangle accumulation when authored UVs exist.
+        self.tangents = (
+            self._compute_tangents(
+                self.vertices, self.indices, self.normals, self.texcoords
+            )
+            if has_texcoords
+            else self._fallback_tangents(self.normals)
         )
 
         # GPU buffers (created on build)
@@ -439,6 +444,17 @@ class Mesh:
         self.d_texcoords = None
         self.d_texcoords1 = None
         self.d_material_ids = None
+
+    @staticmethod
+    def _fallback_tangents(normals: np.ndarray) -> np.ndarray:
+        """Return deterministic tangents without traversing triangles."""
+        tangents = np.zeros((len(normals), 4), dtype=np.float32)
+        tangents[:, 0] = 1.0
+        use_y = np.abs(normals[:, 0]) > 0.9
+        tangents[use_y, 0] = 0.0
+        tangents[use_y, 1] = 1.0
+        tangents[:, 3] = 1.0
+        return tangents
 
     def _compute_tangents(
         self,
@@ -511,24 +527,24 @@ class Mesh:
         return np.ascontiguousarray(tangents, dtype=np.float32)
 
     def _compute_normals(self, vertices: np.ndarray, indices: np.ndarray) -> np.ndarray:
-        """Compute vertex normals from face normals."""
+        """Compute area-weighted vertex normals in bounded vectorized chunks."""
         normals = np.zeros_like(vertices)
+        chunk_size = 1_000_000
+        for begin in range(0, len(indices), chunk_size):
+            triangles = indices[begin : begin + chunk_size]
+            i0 = triangles[:, 0]
+            i1 = triangles[:, 1]
+            i2 = triangles[:, 2]
+            face_normals = np.cross(
+                vertices[i1] - vertices[i0],
+                vertices[i2] - vertices[i0],
+            )
+            np.add.at(normals, i0, face_normals)
+            np.add.at(normals, i1, face_normals)
+            np.add.at(normals, i2, face_normals)
 
-        for tri in indices:
-            v0, v1, v2 = vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]
-            e1 = v1 - v0
-            e2 = v2 - v0
-            face_normal = np.cross(e1, e2)
-
-            normals[tri[0]] += face_normal
-            normals[tri[1]] += face_normal
-            normals[tri[2]] += face_normal
-
-        # Normalize
         lengths = np.linalg.norm(normals, axis=1, keepdims=True)
-        lengths[lengths == 0] = 1.0
-        normals = normals / lengths
-
+        normals /= np.where(lengths > 0.0, lengths, 1.0)
         return normals
 
     def upload_to_gpu(self):
