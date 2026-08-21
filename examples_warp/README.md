@@ -17,8 +17,44 @@ python example_warp_optix_motion_blur.py
 python example_warp_optix_mixed_geometry.py
 python example_warp_optix_tiny_raytracer.py
 python example_warp_optix_basic_pathtracing.py
+python example_warp_optix_pathtraced_hairball.py
 python example_warp_optix_usd_pathtracing.py path/to/scene.usd
 ```
+
+The hair-ball example procedurally packs thousands of randomized, tapered
+helical strands into one native round-linear curve geometry. Use
+`--hair-count`, `--segments`, `--hair-length`, `--curl-radius`, and
+`--curl-turns` to change its shape; `--seed` makes variations reproducible.
+
+The full PBR path tracer also accepts native OptiX round-linear curves through
+the same reusable geometry/instance API as triangle meshes:
+
+```python
+import numpy as np
+
+from warp_optix.pathtracing import PathTracerAPI
+
+api = PathTracerAPI()
+api.initialize()
+material = api.create_pbr_material((0.8, 0.2, 0.05), roughness=0.35, metallic=0.0)
+
+points = np.array(
+    ((-1.0, 0.0, 0.0), (0.0, 0.5, 0.0), (1.0, 0.0, 0.0)),
+    dtype=np.float32,
+)
+radii = np.array((0.03, 0.08, 0.03), dtype=np.float32)
+curve_id = api.create_curve(points, radii, material_id=material)
+instance_id = api.create_instance(curve_id)
+api.build_scene()
+```
+
+Radii are specified per control point and interpolated linearly along every
+segment. By default every consecutive point pair is a segment. Pass explicit
+`segment_indices` containing each segment's starting control-point index to
+store multiple disjoint strands in one geometry. Curve instances support the
+same transforms, visibility updates, material overrides, and TLAS rebuilds as
+mesh instances. Curves use the existing PBR material, lighting, alpha,
+transmission, guide-buffer, and shadow paths; USD curve import is not required.
 
 The basic path-tracing example automatically downloads its default A Beautiful
 Game scene into the platform cache on first use. On Linux this defaults to

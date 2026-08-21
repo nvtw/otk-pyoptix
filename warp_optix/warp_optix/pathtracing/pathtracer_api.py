@@ -29,7 +29,7 @@ from warp_optix._runtime.transform_utils import build_transform_matrix
 
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .ptx_compiler import get_optix_include_dir
-from .scene import Mesh
+from .scene import Curve, Mesh
 
 logger = logging.getLogger(__name__)
 
@@ -426,7 +426,38 @@ class PathTracerAPI:
         )
         return int(scene.add_mesh(mesh))
 
+    def create_curve(
+        self,
+        positions: np.ndarray,
+        radii: np.ndarray | float,
+        segment_indices: np.ndarray | None = None,
+        material_id: int = 0,
+    ) -> int:
+        """Create reusable native round-linear curve geometry.
+
+        Args:
+            positions: ``(N, 3)`` control points.
+            radii: Positive scalar radius or one radius per control point.
+            segment_indices: Optional start control-point index per segment.
+                When omitted, all consecutive point pairs form a polyline.
+                Exclude boundary indices to store multiple disjoint strands in
+                one geometry object.
+            material_id: Existing PBR material applied to every segment.
+
+        The returned geometry ID works with the same instance, transform,
+        visibility, and material-override methods as a mesh ID.
+        """
+        scene = self._require_scene()
+        if scene.materials.count == 0:
+            scene.materials.add_diffuse((0.8, 0.8, 0.8))
+        mat_id = int(material_id)
+        if mat_id < 0 or mat_id >= scene.materials.count:
+            mat_id = 0
+        curve = Curve(positions, radii, segment_indices, material_id=mat_id)
+        return int(scene.add_curve(curve))
+
     def create_instance(self, mesh_id: int) -> int:
+        """Create an instance of a mesh or curve geometry ID."""
         return int(self._require_scene().add_instance(int(mesh_id)))
 
     def set_instance_material(self, instance_id: int, material_id: int | None):

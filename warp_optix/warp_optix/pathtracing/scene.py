@@ -296,7 +296,7 @@ def _create_vertex_buffers_dtype():
         [
             ("positionOffset", np.uint32),
             ("normalOffset", np.uint32),
-            ("colorOffset", np.uint32),
+            ("radiusOffset", np.uint32),
             ("tangentOffset", np.uint32),
             ("texCoord0Offset", np.uint32),
             ("texCoord1Offset", np.uint32),
@@ -366,6 +366,9 @@ def _build_optix_instance_dtype() -> np.dtype:
 
 class Mesh:
     """Represents a mesh with vertices, indices, and GPU buffers."""
+
+    primitive_type = "triangles"
+    sbt_offset = 0
 
     def __init__(
         self,
@@ -534,6 +537,71 @@ class Mesh:
         self.d_material_ids = wp.array(material_ids, dtype=wp.uint32, device="cuda")
 
 
+class Curve:
+    """Native OptiX round-linear curve geometry.
+
+    Each primitive starts at ``segment_indices[i]`` and uses that control point
+    and the following one. ``radii`` contains one swept-surface radius per
+    control point; OptiX interpolates it linearly along each segment.
+    """
+
+    primitive_type = "round_linear"
+    sbt_offset = 2
+
+    def __init__(
+        self,
+        vertices: np.ndarray,
+        radii: np.ndarray | float,
+        segment_indices: np.ndarray | None = None,
+        material_id: int = 0,
+    ):
+        vertices = np.asarray(vertices, dtype=np.float32)
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            raise ValueError("curve vertices must have shape (N, 3)")
+        if len(vertices) < 2:
+            raise ValueError("a curve requires at least two control points")
+        if not np.all(np.isfinite(vertices)):
+            raise ValueError("curve vertices must be finite")
+
+        radii = np.asarray(radii, dtype=np.float32)
+        if radii.ndim == 0:
+            radii = np.full(len(vertices), float(radii), dtype=np.float32)
+        if radii.shape != (len(vertices),):
+            raise ValueError("curve radii must be scalar or have shape (N,)")
+        if not np.all(np.isfinite(radii)) or np.any(radii <= 0.0):
+            raise ValueError("curve radii must be finite and positive")
+
+        if segment_indices is None:
+            segment_indices = np.arange(len(vertices) - 1, dtype=np.uint32)
+        segment_indices = np.asarray(segment_indices)
+        if segment_indices.ndim != 1 or len(segment_indices) == 0:
+            raise ValueError(
+                "segment_indices must be a non-empty one-dimensional array"
+            )
+        if not np.issubdtype(segment_indices.dtype, np.integer):
+            raise ValueError("segment_indices must contain integers")
+        if np.any(segment_indices < 0) or np.any(segment_indices >= len(vertices) - 1):
+            raise ValueError(
+                "each curve segment must reference two consecutive control points"
+            )
+
+        self.vertices = np.ascontiguousarray(vertices, dtype=np.float32)
+        self.radii = np.ascontiguousarray(radii, dtype=np.float32)
+        self.indices = np.ascontiguousarray(segment_indices, dtype=np.uint32)
+        self.material_id = int(material_id)
+        self.d_vertices = None
+        self.d_widths = None
+        self.d_indices = None
+
+    def upload_to_gpu(self):
+        """Upload control points, radii, and segment starts to CUDA."""
+        self.d_vertices = wp.array(
+            self.vertices.reshape(-1), dtype=wp.float32, device="cuda"
+        )
+        self.d_widths = wp.array(self.radii, dtype=wp.float32, device="cuda")
+        self.d_indices = wp.array(self.indices, dtype=wp.uint32, device="cuda")
+
+
 class Instance:
     """Represents an instance of a mesh with a transform."""
 
@@ -592,9 +660,12 @@ class Scene:
         self._compact_materials = None
         self._compact_material_floats = None
         self._instance_render_prim_ids = None
+        self._instance_geometry_types = None
         self._texture_data = None
         self._texture_objects = []
         self._packed_indices = None
+        self._packed_positions = None
+        self._packed_radii = None
         self._packed_normals = None
         self._packed_tangents = None
         self._packed_texcoords0 = None
@@ -648,7 +719,19 @@ class Scene:
 
     @property
     def mesh_count(self) -> int:
+        """Return the number of triangle-mesh geometry objects."""
+        return sum(geometry.primitive_type == "triangles" for geometry in self._meshes)
+
+    @property
+    def geometry_count(self) -> int:
+        """Return the total number of reusable mesh and curve geometries."""
         return len(self._meshes)
+
+    @property
+    def curve_count(self) -> int:
+        return sum(
+            geometry.primitive_type == "round_linear" for geometry in self._meshes
+        )
 
     @property
     def instance_count(self) -> int:
@@ -739,7 +822,7 @@ class Scene:
     @property
     def has_meshes(self) -> bool:
         """Return True when at least one mesh is present."""
-        return bool(self._meshes)
+        return self.mesh_count > 0
 
     def get_instance_material_ids_host(self) -> np.ndarray | None:
         """Return per-instance material IDs as a host NumPy array copy."""
@@ -842,6 +925,11 @@ class Scene:
     def add_mesh(self, mesh: Mesh) -> int:
         """Add a mesh to the scene and return its index."""
         self._meshes.append(mesh)
+        return len(self._meshes) - 1
+
+    def add_curve(self, curve: Curve) -> int:
+        """Add native curve geometry and return its reusable geometry index."""
+        self._meshes.append(curve)
         return len(self._meshes) - 1
 
     def _ensure_instance_cache_capacity(self, count: int):
@@ -1514,9 +1602,12 @@ class Scene:
         self._compact_materials = None
         self._compact_material_floats = None
         self._instance_render_prim_ids = None
+        self._instance_geometry_types = None
         self._texture_data = None
         self._texture_objects = []
         self._packed_indices = None
+        self._packed_positions = None
+        self._packed_radii = None
         self._packed_normals = None
         self._packed_tangents = None
         self._packed_texcoords0 = None
@@ -1564,7 +1655,7 @@ class Scene:
         self._instance_records_dirty = True
 
         logger.info(
-            "Building scene with %d meshes and %d instances.",
+            "Building scene with %d geometries and %d instances.",
             len(self._meshes),
             len(self._instances),
         )
@@ -1583,9 +1674,17 @@ class Scene:
         self._build_scene_buffers()
 
         total_verts = sum(len(m.vertices) for m in self._meshes)
-        total_tris = sum(len(m.indices) for m in self._meshes)
+        total_tris = sum(
+            len(m.indices) for m in self._meshes if m.primitive_type == "triangles"
+        )
+        total_curves = sum(
+            len(m.indices) for m in self._meshes if m.primitive_type == "round_linear"
+        )
         logger.info(
-            "Scene build complete: %d vertices, %d triangles.", total_verts, total_tris
+            "Scene build complete: %d vertices, %d triangles, %d curve segments.",
+            total_verts,
+            total_tris,
+            total_curves,
         )
 
     def rebuild_tlas(self):
@@ -1601,7 +1700,7 @@ class Scene:
         self._build_tlas()
 
     def _build_blas(self):
-        """Build bottom-level acceleration structures for all meshes."""
+        """Build bottom-level acceleration structures for all geometry."""
         optix = self._optix
 
         accel_options = optix.AccelBuildOptions(
@@ -1612,21 +1711,38 @@ class Scene:
         stream = int(wp.get_stream("cuda").cuda_stream)
         build_inputs = []
         max_temp_size = 0
-        for mesh in self._meshes:
-            tri = optix.BuildInputTriangleArray()
-            tri.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
-            tri.numVertices = len(mesh.vertices)
-            tri.vertexStrideInBytes = 12
-            tri.vertexBuffers = [mesh.d_vertices.ptr]
-            tri.indexFormat = optix.INDICES_FORMAT_UNSIGNED_INT3
-            tri.numIndexTriplets = len(mesh.indices)
-            tri.indexStrideInBytes = 12
-            tri.indexBuffer = mesh.d_indices.ptr
-            tri.flags = [optix.GEOMETRY_FLAG_NONE]
-            tri.numSbtRecords = 1
+        for geometry in self._meshes:
+            if geometry.primitive_type == "triangles":
+                build_input = optix.BuildInputTriangleArray()
+                build_input.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
+                build_input.numVertices = len(geometry.vertices)
+                build_input.vertexStrideInBytes = 12
+                build_input.vertexBuffers = [geometry.d_vertices.ptr]
+                build_input.indexFormat = optix.INDICES_FORMAT_UNSIGNED_INT3
+                build_input.numIndexTriplets = len(geometry.indices)
+                build_input.indexStrideInBytes = 12
+                build_input.indexBuffer = geometry.d_indices.ptr
+                build_input.flags = [optix.GEOMETRY_FLAG_NONE]
+                build_input.numSbtRecords = 1
+            else:
+                build_input = optix.BuildInputCurveArray(
+                    curveType=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+                    numPrimitives=len(geometry.indices),
+                    vertexBuffers=[geometry.d_vertices.ptr],
+                    numVertices=len(geometry.vertices),
+                    vertexStrideInBytes=12,
+                    widthBuffers=[geometry.d_widths.ptr],
+                    widthStrideInBytes=4,
+                    normalBuffers=[0],
+                    normalStrideInBytes=0,
+                    indexBuffer=geometry.d_indices.ptr,
+                    indexStrideInBytes=4,
+                    flag=optix.GEOMETRY_FLAG_NONE,
+                    primitiveIndexOffset=0,
+                )
 
-            sizes = self._ctx.accelComputeMemoryUsage([accel_options], [tri])
-            build_inputs.append((tri, sizes))
+            sizes = self._ctx.accelComputeMemoryUsage([accel_options], [build_input])
+            build_inputs.append((build_input, sizes))
             max_temp_size = max(max_temp_size, int(sizes.tempSizeInBytes))
 
         # Every build is submitted to the same CUDA stream, so its scratch
@@ -1634,13 +1750,13 @@ class Scene:
         # Large composed USD stages otherwise retain hundreds of independent
         # temporary allocations until the full build is synchronized.
         d_temp = wp.empty(max_temp_size, dtype=wp.uint8, device="cuda")
-        for tri, sizes in build_inputs:
+        for build_input, sizes in build_inputs:
             d_gas = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device="cuda")
 
             handle = self._ctx.accelBuild(
                 stream,
                 [accel_options],
-                [tri],
+                [build_input],
                 d_temp.ptr,
                 sizes.tempSizeInBytes,
                 d_gas.ptr,
@@ -1688,7 +1804,11 @@ class Scene:
                 :count, :3, :
             ].reshape(count, 12)
             inst_np["instanceId"] = np.arange(count, dtype=np.uint32)
-            inst_np["sbtOffset"] = np.uint32(0)
+            inst_np["sbtOffset"] = np.fromiter(
+                (self._meshes[inst.mesh_index].sbt_offset for inst in self._instances),
+                dtype=np.uint32,
+                count=count,
+            )
             inst_np["visibilityMask"] = np.where(
                 self._instance_visibility_cache[:count], 0xFF, 0
             ).astype(np.uint32)
@@ -1780,6 +1900,8 @@ class Scene:
         rp_dtype = _create_render_primitive_dtype()
         render_primitives = np.zeros(len(self._meshes), dtype=rp_dtype)
         packed_indices = []
+        packed_positions = []
+        packed_radii = []
         packed_normals = []
         packed_tangents = []
         packed_texcoords0 = []
@@ -1787,68 +1909,102 @@ class Scene:
         packed_material_ids = []
 
         index_offset = 0
+        position_offset = 0
+        radius_offset = 0
         normal_offset = 0
         tangent_offset = 0
         tex0_offset = 0
         tex1_offset = 0
         material_offset = 0
 
-        for i, mesh in enumerate(self._meshes):
+        for i, geometry in enumerate(self._meshes):
             rp = render_primitives[i]
-            flat_indices = mesh.indices.reshape(-1)
-            flat_normals = mesh.normals.reshape(-1)
-            flat_tangents = mesh.tangents.reshape(-1)
-            flat_tex0 = mesh.texcoords.reshape(-1)
-            flat_tex1 = mesh.texcoords1.reshape(-1)
-            tri_material_ids = np.full(
-                len(mesh.indices), mesh.material_id, dtype=np.uint32
+            flat_indices = geometry.indices.reshape(-1)
+            is_triangle_mesh = geometry.primitive_type == "triangles"
+            flat_positions = (
+                np.empty(0, dtype=np.float32)
+                if is_triangle_mesh
+                else geometry.vertices.reshape(-1)
+            )
+            flat_radii = (
+                np.empty(0, dtype=np.float32) if is_triangle_mesh else geometry.radii
+            )
+            flat_normals = (
+                geometry.normals.reshape(-1)
+                if is_triangle_mesh
+                else np.empty(0, dtype=np.float32)
+            )
+            flat_tangents = (
+                geometry.tangents.reshape(-1)
+                if is_triangle_mesh
+                else np.empty(0, dtype=np.float32)
+            )
+            flat_tex0 = (
+                geometry.texcoords.reshape(-1)
+                if is_triangle_mesh
+                else np.empty(0, dtype=np.float32)
+            )
+            flat_tex1 = (
+                geometry.texcoords1.reshape(-1)
+                if is_triangle_mesh
+                else np.empty(0, dtype=np.float32)
+            )
+            primitive_material_ids = np.full(
+                len(geometry.indices), geometry.material_id, dtype=np.uint32
             )
 
             rp["indexOffset"] = np.uint32(index_offset)
             rp["materialIdOffset"] = np.uint32(material_offset)
-            rp["vertexBuffer"]["positionOffset"] = np.uint32(0)
+            rp["vertexBuffer"]["positionOffset"] = np.uint32(position_offset)
             rp["vertexBuffer"]["normalOffset"] = np.uint32(normal_offset)
-            rp["vertexBuffer"]["colorOffset"] = np.uint32(0)
+            rp["vertexBuffer"]["radiusOffset"] = np.uint32(radius_offset)
             rp["vertexBuffer"]["tangentOffset"] = np.uint32(tangent_offset)
             rp["vertexBuffer"]["texCoord0Offset"] = np.uint32(tex0_offset)
             rp["vertexBuffer"]["texCoord1Offset"] = np.uint32(tex1_offset)
             rp["vertexBuffer"]["prevPositionOffset"] = np.uint32(0)
-            rp["vertexBuffer"]["hasTexCoord1"] = np.uint32(1)
+            rp["vertexBuffer"]["hasTexCoord1"] = np.uint32(is_triangle_mesh)
             rp["vertexBuffer"]["hasPrevPosition"] = np.uint32(0)
-            rp["numIndices"] = np.uint32(mesh.indices.size)
-            rp["numVertices"] = np.uint32(mesh.vertices.shape[0])
+            rp["numIndices"] = np.uint32(geometry.indices.size)
+            rp["numVertices"] = np.uint32(geometry.vertices.shape[0])
 
             packed_indices.append(flat_indices.astype(np.uint32, copy=False))
+            packed_positions.append(flat_positions.astype(np.float32, copy=False))
             packed_normals.append(flat_normals.astype(np.float32, copy=False))
             packed_tangents.append(flat_tangents.astype(np.float32, copy=False))
+            packed_radii.append(flat_radii.astype(np.float32, copy=False))
             packed_texcoords0.append(flat_tex0.astype(np.float32, copy=False))
             packed_texcoords1.append(flat_tex1.astype(np.float32, copy=False))
-            packed_material_ids.append(tri_material_ids)
+            packed_material_ids.append(primitive_material_ids)
 
             index_offset += flat_indices.shape[0]
+            position_offset += flat_positions.shape[0]
             normal_offset += flat_normals.shape[0]
             tangent_offset += flat_tangents.shape[0]
             tex0_offset += flat_tex0.shape[0]
             tex1_offset += flat_tex1.shape[0]
-            material_offset += tri_material_ids.shape[0]
+            material_offset += primitive_material_ids.shape[0]
+            radius_offset += flat_radii.shape[0]
 
         rp_bytes = render_primitives.view(np.uint8).reshape(-1)
         self._render_primitives = wp.array(rp_bytes, dtype=wp.uint8, device="cuda")
         self._packed_indices = wp.array(
             np.concatenate(packed_indices), dtype=wp.uint32, device="cuda"
         )
-        self._packed_normals = wp.array(
-            np.concatenate(packed_normals), dtype=wp.float32, device="cuda"
-        )
-        self._packed_tangents = wp.array(
-            np.concatenate(packed_tangents), dtype=wp.float32, device="cuda"
-        )
-        self._packed_texcoords0 = wp.array(
-            np.concatenate(packed_texcoords0), dtype=wp.float32, device="cuda"
-        )
-        self._packed_texcoords1 = wp.array(
-            np.concatenate(packed_texcoords1), dtype=wp.float32, device="cuda"
-        )
+
+        def packed_float_buffer(parts):
+            values = np.concatenate(parts)
+            return (
+                wp.array(values, dtype=wp.float32, device="cuda")
+                if values.size
+                else None
+            )
+
+        self._packed_positions = packed_float_buffer(packed_positions)
+        self._packed_radii = packed_float_buffer(packed_radii)
+        self._packed_normals = packed_float_buffer(packed_normals)
+        self._packed_tangents = packed_float_buffer(packed_tangents)
+        self._packed_texcoords0 = packed_float_buffer(packed_texcoords0)
+        self._packed_texcoords1 = packed_float_buffer(packed_texcoords1)
         self._packed_prev_positions = None
         self._packed_material_ids = wp.array(
             np.concatenate(packed_material_ids), dtype=wp.uint32, device="cuda"
@@ -1929,6 +2085,7 @@ class Scene:
         # Build per-instance material ID lookup buffer.
         instance_material_ids = np.zeros(len(self._instances), dtype=np.uint32)
         instance_render_prim_ids = np.zeros(len(self._instances), dtype=np.uint32)
+        instance_geometry_types = np.zeros(len(self._instances), dtype=np.uint32)
         for i, inst in enumerate(self._instances):
             material_id = (
                 self._meshes[inst.mesh_index].material_id
@@ -1937,11 +2094,17 @@ class Scene:
             )
             instance_material_ids[i] = np.uint32(material_id)
             instance_render_prim_ids[i] = np.uint32(inst.mesh_index)
+            instance_geometry_types[i] = np.uint32(
+                self._meshes[inst.mesh_index].primitive_type == "round_linear"
+            )
         self._instance_material_ids = wp.array(
             instance_material_ids, dtype=wp.uint32, device="cuda"
         )
         self._instance_render_prim_ids = wp.array(
             instance_render_prim_ids, dtype=wp.uint32, device="cuda"
+        )
+        self._instance_geometry_types = wp.array(
+            instance_geometry_types, dtype=wp.uint32, device="cuda"
         )
 
         # Build compact material table for robust device-side lookup.

@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples_warp"))
+
+from example_warp_optix_pathtraced_hairball import generate_hair_ball  # noqa: E402
+
+
+def test_hair_ball_geometry_is_disjoint_tapered_and_deterministic():
+    kwargs = dict(
+        hair_count=7,
+        segments=5,
+        ball_radius=0.8,
+        hair_length=0.45,
+        curl_radius=0.06,
+        curl_turns=1.5,
+        root_radius=0.012,
+        seed=123,
+    )
+    points, radii, starts = generate_hair_ball(**kwargs)
+    repeated = generate_hair_ball(**kwargs)
+
+    assert points.shape == (42, 3)
+    assert radii.shape == (42,)
+    assert starts.shape == (35,)
+    np.testing.assert_array_equal(points, repeated[0])
+    np.testing.assert_array_equal(radii, repeated[1])
+    np.testing.assert_array_equal(starts, repeated[2])
+    np.testing.assert_allclose(np.linalg.norm(points[::6], axis=1), 0.8, atol=1.0e-6)
+    assert np.all(radii > 0.0)
+    assert np.all(radii[::6] > radii[5::6])
+    assert not np.any(np.isin(np.arange(5, 42, 6, dtype=np.uint32), starts))
+
+
+@pytest.mark.parametrize("hair_count,segments", [(0, 5), (1, 1)])
+def test_hair_ball_rejects_invalid_topology(hair_count, segments):
+    with pytest.raises(ValueError):
+        generate_hair_ball(hair_count, segments, 0.8, 0.45, 0.06, 1.5, 0.012, 1)

@@ -80,7 +80,7 @@ class ShadowPayload:
 class VertexBuffers:
     position_offset: wp.uint32
     normal_offset: wp.uint32
-    color_offset: wp.uint32
+    radius_offset: wp.uint32
     tangent_offset: wp.uint32
     texcoord0_offset: wp.uint32
     texcoord1_offset: wp.uint32
@@ -259,12 +259,15 @@ class PathtraceLaunchParams:
     render_primitives: wp.array(dtype=RenderPrimitive)
     render_prim_count: wp.uint32
     instance_render_prim_ids: wp.array(dtype=wp.uint32)
+    instance_geometry_types: wp.array(dtype=wp.uint32)
     instance_material_ids: wp.array(dtype=wp.uint32)
     instance_count: wp.uint32
     instance_transforms: wp.array(dtype=TransformMatrix3x4)
     prev_instance_transforms: wp.array(dtype=TransformMatrix3x4)
     compact_materials: wp.array(dtype=CompactMaterial)
     packed_indices: wp.array(dtype=wp.uint32)
+    packed_positions: wp.array(dtype=wp.float32)
+    packed_radii: wp.array(dtype=wp.float32)
     packed_normals: wp.array(dtype=wp.float32)
     packed_tangents: wp.array(dtype=wp.float32)
     packed_texcoords0: wp.array(dtype=wp.float32)
@@ -3907,6 +3910,109 @@ class HitGeometry:
 
 
 @wp.func
+def _resolve_material_id(
+    params: PathtraceLaunchParams,
+    inst_id: wp.int32,
+    render_prim_id: wp.int32,
+    primitive_id: wp.int32,
+    primitive_count: wp.int32,
+) -> wp.int32:
+    """Resolve geometry material and the existing per-instance override."""
+    material_id = wp.int32(0)
+    if (
+        render_prim_id >= 0
+        and render_prim_id < int(params.render_prim_count)
+        and primitive_id >= 0
+        and primitive_id < primitive_count
+    ):
+        render_primitives = params.render_primitives
+        rp = render_primitives[render_prim_id]
+        material_ids = params.packed_material_ids
+        material_id = wp.int32(material_ids[int(rp.material_id_offset) + primitive_id])
+    if inst_id >= 0 and inst_id < int(params.instance_count):
+        instance_material_ids = params.instance_material_ids
+        if instance_material_ids.shape[0] > 0:
+            material_id = wp.int32(instance_material_ids[inst_id])
+    return wp.clamp(material_id, 0, int(params.material_count) - 1)
+
+
+@wp.func
+def _compute_curve_hit_geometry(
+    params: PathtraceLaunchParams, inst_id: wp.int32, segment_id: wp.int32
+) -> HitGeometry:
+    """Extract a native round-linear curve hit for the shared PBR payload."""
+    geo = HitGeometry()
+    geo.texture_lod = 0.0
+    geo.normal = wp.vec3(0.0, 0.0, 1.0)
+    geo.tangent = wp.vec3(1.0, 0.0, 0.0)
+    geo.uv = wp.vec2(0.0, 0.0)
+    geo.uv1 = wp.vec2(0.0, 0.0)
+    geo.bitangent_sign = 1.0
+    geo.material_id = wp.int32(0)
+
+    if inst_id < 0 or inst_id >= int(params.instance_count):
+        return geo
+    instance_render_prim_ids = params.instance_render_prim_ids
+    if instance_render_prim_ids.shape[0] == 0:
+        return geo
+    render_prim_id = int(instance_render_prim_ids[inst_id])
+    if render_prim_id < 0 or render_prim_id >= int(params.render_prim_count):
+        return geo
+    render_primitives = params.render_primitives
+    rp = render_primitives[render_prim_id]
+    segment_count = int(rp.num_indices)
+    if segment_id < 0 or segment_id >= segment_count:
+        return geo
+
+    indices = params.packed_indices
+    control_id = int(indices[int(rp.index_offset) + segment_id])
+    position_base = int(rp.vertex_buffer.position_offset) // 3
+    positions = params.packed_positions
+    p0 = _fetch_vec3(positions, position_base + control_id)
+    p1 = _fetch_vec3(positions, position_base + control_id + 1)
+    radius_base = int(rp.vertex_buffer.radius_offset)
+    radii = params.packed_radii
+    r0 = radii[radius_base + control_id]
+    r1 = radii[radius_base + control_id + 1]
+    u = wp.optix_get_curve_parameter()
+    center_object = p0 * (1.0 - u) + p1 * u
+    hit_world = (
+        wp.optix_get_world_ray_origin()
+        + wp.optix_get_world_ray_direction() * wp.optix_get_ray_tmax()
+    )
+    hit_object = wp.optix_transform_point_from_world_to_object_space(hit_world)
+    radial_object = wp.normalize(hit_object - center_object)
+    axis_object = p1 - p0
+    axis_length = wp.length(axis_object)
+    normal_object = radial_object
+    # On the swept body, a changing radius tilts the normal like a cone.
+    # End caps and spherical elbows retain their radial normal.
+    if u > 1.0e-5 and u < 1.0 - 1.0e-5 and axis_length > 1.0e-8:
+        normal_object = wp.normalize(
+            radial_object - axis_object * ((r1 - r0) / (axis_length * axis_length))
+        )
+    geo.normal = wp.normalize(
+        wp.optix_transform_normal_from_object_to_world_space(normal_object)
+    )
+    tangent_world = wp.normalize(
+        wp.optix_transform_vector_from_object_to_world_space(p1 - p0)
+    )
+    geo.tangent = wp.normalize(
+        tangent_world - geo.normal * wp.dot(geo.normal, tangent_world)
+    )
+    to_eye = -wp.normalize(wp.optix_get_world_ray_direction())
+    if wp.dot(geo.normal, to_eye) < 0.0:
+        geo.normal = -geo.normal
+        geo.bitangent_sign = -geo.bitangent_sign
+    geo.uv = wp.vec2(u, 0.0)
+    geo.uv1 = geo.uv
+    geo.material_id = _resolve_material_id(
+        params, inst_id, render_prim_id, segment_id, segment_count
+    )
+    return geo
+
+
+@wp.func
 def _compute_hit_geometry(
     params: PathtraceLaunchParams, inst_id: wp.int32, tri_id: wp.int32
 ) -> HitGeometry:
@@ -4002,15 +4108,9 @@ def _compute_hit_geometry(
         uv1_2 = _fetch_vec2(vt1, tex1_base + i2)
         geo.uv1 = uv1_0 * b0 + uv1_1 * b1 + uv1_2 * b2
 
-    # Material ID
-    tri_mats = params.packed_material_ids
-
-    mat_base = int(rp.material_id_offset)
-    geo.material_id = int(tri_mats[mat_base + tri_id]) if tri_count > 0 else 0
-    if params.instance_material_ids.shape[0] > 0:
-        inst_mats = params.instance_material_ids
-        geo.material_id = int(inst_mats[inst_id])
-    geo.material_id = wp.clamp(geo.material_id, 0, int(params.material_count) - 1)
+    geo.material_id = _resolve_material_id(
+        params, inst_id, render_prim_id, tri_id, tri_count
+    )
     # Estimate an isotropic ray footprint from projected pixel width and the
     # triangle's texel density. This gives stable trilinear filtering without
     # tracing ray differentials.
@@ -4365,6 +4465,7 @@ class PrimaryShadedPayload:
 
 @wp.func
 def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
+    """Evaluate coverage for triangles and curves through one material path."""
     out = AnyHitAlphaResult()
     out.valid = wp.uint32(0)
     out.inst_id = wp.int32(-1)
@@ -4377,7 +4478,7 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
     if inst_id < 0 or inst_id >= int(params.instance_count):
         return out
 
-    tri_id = int(wp.optix_get_primitive_index())
+    primitive_id = int(wp.optix_get_primitive_index())
     if (
         params.instance_render_prim_ids.shape[0] == 0
         or params.render_primitives.shape[0] == 0
@@ -4390,21 +4491,19 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
 
     render_primitives = params.render_primitives
     rp = render_primitives[render_prim_id]
-    tri_count = int(rp.num_indices) // 3
-    if tri_id < 0 or tri_id >= tri_count:
+    geometry_types = params.instance_geometry_types
+    is_curve = geometry_types.shape[0] > 0 and geometry_types[inst_id] != wp.uint32(0)
+    primitive_count = int(rp.num_indices) if is_curve else int(rp.num_indices) // 3
+    if primitive_id < 0 or primitive_id >= primitive_count:
         return out
-    tri_mats = params.packed_material_ids
-    mat_base = int(rp.material_id_offset)
-    material_id = int(tri_mats[mat_base + tri_id]) if tri_count > 0 else 0
-    if params.instance_material_ids.shape[0] > 0:
-        inst_mats = params.instance_material_ids
-        material_id = int(inst_mats[inst_id])
-    material_id = wp.clamp(material_id, 0, int(params.material_count) - 1)
+    material_id = _resolve_material_id(
+        params, inst_id, render_prim_id, primitive_id, primitive_count
+    )
     materials = params.compact_materials
     mat = materials[material_id]
     out.valid = wp.uint32(1)
     out.inst_id = wp.int32(inst_id)
-    out.tri_id = wp.int32(tri_id)
+    out.tri_id = wp.int32(primitive_id)
     out.transmission = wp.clamp(mat.transmission, 0.0, 1.0)
     if mat.opacity_fresnel_low >= 0.0 and out.transmission > 0.0:
         out.alpha = 1.0
@@ -4414,50 +4513,19 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
         out.alpha = 1.0
         return out
 
-    indices = params.packed_indices
-    index_base = int(rp.index_offset)
-    i0 = int(indices[index_base + tri_id * 3 + 0])
-    i1 = int(indices[index_base + tri_id * 3 + 1])
-    i2 = int(indices[index_base + tri_id * 3 + 2])
-    vt0 = params.packed_texcoords0
-    has_uv1 = rp.vertex_buffer.has_texcoord1 != wp.uint32(0)
-    vt1 = params.packed_texcoords1
-    tex0_base = int(rp.vertex_buffer.texcoord0_offset) // 2
-    tex1_base = int(rp.vertex_buffer.texcoord1_offset) // 2
-    bary = wp.optix_get_triangle_barycentrics()
-    b1 = bary[0]
-    b2 = bary[1]
-    b0 = 1.0 - b1 - b2
-    normals = params.packed_normals
-    normal_base = int(rp.vertex_buffer.normal_offset) // 3
-    normal_object = wp.normalize(
-        _fetch_vec3(normals, normal_base + i0) * b0
-        + _fetch_vec3(normals, normal_base + i1) * b1
-        + _fetch_vec3(normals, normal_base + i2) * b2
-    )
-    normal_world = wp.normalize(
-        wp.optix_transform_normal_from_object_to_world_space(normal_object)
-    )
-    uv0 = (
-        _fetch_vec2(vt0, tex0_base + i0) * b0
-        + _fetch_vec2(vt0, tex0_base + i1) * b1
-        + _fetch_vec2(vt0, tex0_base + i2) * b2
-    )
-    uv1 = uv0
-    if has_uv1:
-        uv1 = (
-            _fetch_vec2(vt1, tex1_base + i0) * b0
-            + _fetch_vec2(vt1, tex1_base + i1) * b1
-            + _fetch_vec2(vt1, tex1_base + i2) * b2
-        )
+    if is_curve:
+        geo = _compute_curve_hit_geometry(params, inst_id, primitive_id)
+    else:
+        geo = _compute_hit_geometry(params, inst_id, primitive_id)
     uv_base = _apply_uv_transform(
-        _select_uv(mat.base_color_tex_coord, uv0, uv1), mat.base_color_uv_transform
+        _select_uv(mat.base_color_tex_coord, geo.uv, geo.uv1),
+        mat.base_color_uv_transform,
     )
     uv_seed_x = wp.uint32(int(wp.floor(uv_base[0] * 2048.0)))
     uv_seed_y = wp.uint32(int(wp.floor(uv_base[1] * 2048.0)))
     out.coverage_seed = _xxhash32(
         wp.uint32(inst_id),
-        wp.uint32(tri_id),
+        wp.uint32(primitive_id),
         _xxhash32(uv_seed_x, uv_seed_y, wp.uint32(0)),
     )
     base_tex = _sample_texture_rgba(params, mat.base_color_tex_index, uv_base, 0.0)
@@ -4467,7 +4535,7 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
         mat.opacity_fresnel_low,
         mat.opacity_fresnel_high,
         mat.opacity_fresnel_falloff,
-        normal_world,
+        geo.normal,
         -wp.optix_get_world_ray_direction(),
     )
     if mat.alpha_mode == wp.int32(1):
@@ -4476,32 +4544,58 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
     return out
 
 
-@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
-def primary_closest_hit(params: PathtraceLaunchParams):
-    """Closest-hit: pass geometry data only (matching C++ primary_rchit.h)."""
-    inst_id = int(wp.optix_get_instance_id())
-    tri_id = int(wp.optix_get_primitive_index())
-    t_hit = wp.optix_get_ray_tmax()
-
-    # Compute geometry at hit point.
-    geo = _compute_hit_geometry(params, inst_id, tri_id)
-
-    bary = wp.optix_get_triangle_barycentrics()
-    bary3 = wp.vec3(geo.texture_lod, bary[0], bary[1])
-
+@wp.func
+def _store_primary_hit_payload(
+    geo: HitGeometry,
+    inst_id: wp.int32,
+    primitive_id: wp.int32,
+    front_face: wp.uint32,
+    parameter_0: wp.float32,
+    parameter_1: wp.float32,
+):
+    """Store the geometry-neutral payload consumed by the shared PBR raygen."""
     payload = PrimaryPayload()
-    payload.hit_t = t_hit
+    payload.hit_t = wp.optix_get_ray_tmax()
     payload.normal = geo.normal
     payload.tangent = geo.tangent
     payload.uv = geo.uv
     payload.material_id = wp.uint32(geo.material_id)
     payload.bitangent_sign = geo.bitangent_sign
-    payload.instance_id = wp.int32(inst_id)
-    payload.front_face = wp.uint32(1) if wp.optix_is_front_face_hit() else wp.uint32(0)
-    payload.primitive_id = wp.uint32(tri_id)
-    payload.barycentrics = bary3
+    payload.instance_id = inst_id
+    payload.front_face = front_face
+    payload.primitive_id = wp.uint32(primitive_id)
+    payload.barycentrics = wp.vec3(geo.texture_lod, parameter_0, parameter_1)
     payload.uv1 = geo.uv1
     wp.optix_store_payload(payload)
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def primary_closest_hit(params: PathtraceLaunchParams):
+    """Closest-hit: pass geometry data only (matching C++ primary_rchit.h)."""
+    inst_id = int(wp.optix_get_instance_id())
+    tri_id = int(wp.optix_get_primitive_index())
+    geo = _compute_hit_geometry(params, inst_id, tri_id)
+    bary = wp.optix_get_triangle_barycentrics()
+    front_face = wp.uint32(1) if wp.optix_is_front_face_hit() else wp.uint32(0)
+    _store_primary_hit_payload(
+        geo, wp.int32(inst_id), wp.int32(tri_id), front_face, bary[0], bary[1]
+    )
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def curve_primary_closest_hit(params: PathtraceLaunchParams):
+    """Adapt a native curve hit to the same PBR payload as a triangle hit."""
+    inst_id = int(wp.optix_get_instance_id())
+    segment_id = int(wp.optix_get_primitive_index())
+    geo = _compute_curve_hit_geometry(params, inst_id, segment_id)
+    _store_primary_hit_payload(
+        geo,
+        wp.int32(inst_id),
+        wp.int32(segment_id),
+        wp.uint32(1),
+        wp.optix_get_curve_parameter(),
+        0.0,
+    )
 
 
 @wp.func

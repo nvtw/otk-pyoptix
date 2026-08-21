@@ -894,9 +894,10 @@ class PathTracingViewer:
             "exceptionFlags": int(optix.EXCEPTION_FLAG_NONE),
             "pipelineLaunchParamsVariableName": "params",
         }
-        if optix.version()[1] >= 2:
+        if tuple(optix.version()) >= (7, 2):
             pipeline_kwargs["usesPrimitiveTypeFlags"] = int(
                 optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
+                | optix.PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR
             )
         pco = optix.PipelineCompileOptions(**pipeline_kwargs)
 
@@ -926,7 +927,7 @@ class PathTracingViewer:
                 woptix.get_entry_name(pwk.secondary_miss, woptix.OptixKernelType.MISS),
             ]
         )
-        self._sbt_manager.register_hit_shader_type(
+        triangle_hit_group = self._sbt_manager.register_hit_shader_type(
             HitKernel(
                 woptix.get_entry_name(
                     pwk.primary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT
@@ -944,6 +945,41 @@ class PathTracingViewer:
                 ),
             ),
         )
+
+        builtin_options = optix.BuiltinISOptions(
+            builtinISModuleType=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+            usesMotionBlur=False,
+        )
+        self._curve_intersection_module = self._ctx.builtinISModuleGet(
+            mco, pco, builtin_options
+        )
+        curve_hit_group = self._sbt_manager.register_hit_shader_type(
+            HitKernel(
+                woptix.get_entry_name(
+                    pwk.curve_primary_closest_hit,
+                    woptix.OptixKernelType.CLOSEST_HIT,
+                ),
+                any_hit=woptix.get_entry_name(
+                    pwk.primary_any_hit, woptix.OptixKernelType.ANY_HIT
+                ),
+                builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+                intersection_module=self._curve_intersection_module,
+            ),
+            HitKernel(
+                woptix.get_entry_name(
+                    pwk.secondary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT
+                ),
+                any_hit=woptix.get_entry_name(
+                    pwk.secondary_any_hit, woptix.OptixKernelType.ANY_HIT
+                ),
+                builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+                intersection_module=self._curve_intersection_module,
+            ),
+        )
+        if self._sbt_manager.get_sbt_offset(triangle_hit_group) != 0:
+            raise RuntimeError("triangle hit group must occupy SBT offset 0")
+        if self._sbt_manager.get_sbt_offset(curve_hit_group) != 2:
+            raise RuntimeError("curve hit group must occupy SBT offset 2")
 
         plo = optix.PipelineLinkOptions()
         # Bounces are iterative in raygen; hit and miss programs never trace recursively.
@@ -1256,15 +1292,16 @@ class PathTracingViewer:
         p.sphere_light_count = wp.uint32(self._scene.light_count)
         p.render_primitives = (
             None
-            if self._scene._render_primitives is None or self._scene.mesh_count == 0
+            if self._scene._render_primitives is None or self._scene.geometry_count == 0
             else wp.array(
                 ptr=self._scene._render_primitives.ptr,
-                shape=(self._scene.mesh_count,),
+                shape=(self._scene.geometry_count,),
                 dtype=pwk.RenderPrimitive,
             )
         )
-        p.render_prim_count = wp.uint32(self._scene.mesh_count)
+        p.render_prim_count = wp.uint32(self._scene.geometry_count)
         p.instance_render_prim_ids = self._scene._instance_render_prim_ids
+        p.instance_geometry_types = self._scene._instance_geometry_types
         p.instance_material_ids = self._scene._instance_material_ids
         p.instance_count = wp.uint32(self._scene.instance_count)
         p.instance_transforms = (
@@ -1296,6 +1333,8 @@ class PathTracingViewer:
             )
         )
         p.packed_indices = self._scene._packed_indices
+        p.packed_positions = self._scene._packed_positions
+        p.packed_radii = self._scene._packed_radii
         p.packed_normals = self._scene._packed_normals
         p.packed_tangents = self._scene._packed_tangents
         p.packed_texcoords0 = self._scene._packed_texcoords0
