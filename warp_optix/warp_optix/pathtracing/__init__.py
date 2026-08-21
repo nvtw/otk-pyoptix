@@ -30,6 +30,11 @@ Components:
 
 from .arrows import ArrowBatch
 from .camera import Camera
+from .defaults import (
+    DEFAULT_VIEWER_HEIGHT,
+    DEFAULT_VIEWER_SIZE,
+    DEFAULT_VIEWER_WIDTH,
+)
 from .materials import MaterialManager
 from .pathtracer_api import PathTracerAPI
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
@@ -42,6 +47,9 @@ __all__ = [
     "Camera",
     "ArrowBatch",
     "Curve",
+    "DEFAULT_VIEWER_HEIGHT",
+    "DEFAULT_VIEWER_SIZE",
+    "DEFAULT_VIEWER_WIDTH",
     "MaterialManager",
     "Mesh",
     "PathTracerAPI",

@@ -20,7 +20,11 @@ from example_warp_optix_pathtraced_scene import (
     create_rainbow_materials,
     rainbow_height_slots,
 )
-from warp_optix.pathtracing import PathTracerAPI
+from warp_optix.pathtracing import (
+    DEFAULT_VIEWER_HEIGHT,
+    DEFAULT_VIEWER_WIDTH,
+    PathTracerAPI,
+)
 
 
 def _parse_args():
@@ -37,8 +41,8 @@ def _parse_args():
     parser.add_argument("--small-radius", type=float, default=0.011)
     parser.add_argument("--large-radius", type=float, default=0.034)
     parser.add_argument("--tip-length-ratio", type=float, default=0.28)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=DEFAULT_VIEWER_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_VIEWER_HEIGHT)
     parser.add_argument(
         "--fps", type=int, default=0, help="Presentation rate cap; 0 is unlimited."
     )

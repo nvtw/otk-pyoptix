@@ -12,7 +12,11 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 import warp_optix as woptix
-from warp_optix.pathtracing import PathTracerAPI
+from warp_optix.pathtracing import (
+    DEFAULT_VIEWER_HEIGHT,
+    DEFAULT_VIEWER_WIDTH,
+    PathTracerAPI,
+)
 
 from example_warp_optix_basic_pathtracing import FreeCameraController, _pack_display_rgba8
 
@@ -20,8 +24,8 @@ from example_warp_optix_basic_pathtracing import FreeCameraController, _pack_dis
 def _parse_args():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("scene_usd", type=Path, help="USD/USDA/USDC/USDZ stage to load.")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=DEFAULT_VIEWER_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_VIEWER_HEIGHT)
     parser.add_argument("--fps", type=int, default=0, help="Presentation rate cap (0 = unlimited).")
     parser.add_argument("--max-frames", type=int, default=0, help="Auto-exit after N frames (0 = run forever).")
     parser.add_argument(

@@ -20,7 +20,11 @@ from example_warp_optix_pathtraced_scene import (
     create_rainbow_materials,
     rainbow_height_slots,
 )
-from warp_optix.pathtracing import PathTracerAPI
+from warp_optix.pathtracing import (
+    DEFAULT_VIEWER_HEIGHT,
+    DEFAULT_VIEWER_WIDTH,
+    PathTracerAPI,
+)
 
 
 def rainbow_segment_slots(points: np.ndarray, segments: int) -> np.ndarray:
@@ -44,8 +48,8 @@ def _parse_args():
     parser.add_argument("--curl-radius", type=float, default=0.065)
     parser.add_argument("--curl-turns", type=float, default=1.65)
     parser.add_argument("--root-radius", type=float, default=0.012)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=DEFAULT_VIEWER_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_VIEWER_HEIGHT)
     parser.add_argument(
         "--fps", type=int, default=0, help="Presentation rate cap; 0 is unlimited."
     )

@@ -38,6 +38,7 @@ from warp_optix._runtime.sbt import SbtKernelManager
 
 from . import pathtracing_warp_kernels as pwk
 from .camera import Camera
+from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
 from .environment_map import EnvironmentMap
 from .lighting import RENDERER_RADIANCE_PER_NIT
 from .scene import Scene
@@ -167,8 +168,8 @@ class PathTracingViewer:
 
     def __init__(
         self,
-        width: int = 1280,
-        height: int = 720,
+        width: int = DEFAULT_VIEWER_WIDTH,
+        height: int = DEFAULT_VIEWER_HEIGHT,
         scene_setup: Optional[Callable[[Scene], None]] = None,
         camera: Optional[Camera] = None,
         accumulate_samples: bool = False,

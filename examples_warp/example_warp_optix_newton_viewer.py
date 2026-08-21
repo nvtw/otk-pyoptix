@@ -10,7 +10,11 @@ import argparse
 import newton
 import warp as wp
 from newton.viewer import ViewerBase
-from warp_optix.pathtracing import PathTracingViewerBackend
+from warp_optix.pathtracing import (
+    DEFAULT_VIEWER_HEIGHT,
+    DEFAULT_VIEWER_WIDTH,
+    PathTracingViewerBackend,
+)
 
 
 class ViewerOptix(PathTracingViewerBackend, ViewerBase):
@@ -21,8 +25,8 @@ def _parse_args():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=DEFAULT_VIEWER_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_VIEWER_HEIGHT)
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--no-dlss-rr", action="store_true")
     parser.add_argument("--no-imgui", action="store_true")

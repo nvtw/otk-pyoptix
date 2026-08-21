@@ -20,7 +20,11 @@ from example_warp_optix_pathtraced_scene import (
     add_checker_ground,
     configure_demo_sky,
 )
-from warp_optix.pathtracing import PathTracerAPI
+from warp_optix.pathtracing import (
+    DEFAULT_VIEWER_HEIGHT,
+    DEFAULT_VIEWER_WIDTH,
+    PathTracerAPI,
+)
 
 
 @wp.kernel
@@ -56,8 +60,8 @@ def _parse_args():
     parser.add_argument("--line-length", type=float, default=0.32)
     parser.add_argument("--line-width", type=float, default=1.5)
     parser.add_argument("--line-antialias-width", type=float, default=1.0)
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
+    parser.add_argument("--width", type=int, default=DEFAULT_VIEWER_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_VIEWER_HEIGHT)
     parser.add_argument("--fps", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0)
     parser.add_argument("--no-depth-test", action="store_true")

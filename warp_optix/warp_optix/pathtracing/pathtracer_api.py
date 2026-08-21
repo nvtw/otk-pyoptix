@@ -28,6 +28,7 @@ import warp as wp
 
 from warp_optix._runtime.transform_utils import build_transform_matrix
 
+from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .arrows import (
     ArrowBatch,
@@ -62,8 +63,8 @@ class PathTracerAPI:
 
     def __init__(
         self,
-        width: int = 1280,
-        height: int = 720,
+        width: int = DEFAULT_VIEWER_WIDTH,
+        height: int = DEFAULT_VIEWER_HEIGHT,
         enable_dlss_rr: bool = True,
         enable_set: bool = True,
         enable_cuda_graphs: bool = True,

@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 
+from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer
 
 from .pathtracer_api import PathTracerAPI
@@ -269,8 +270,8 @@ class PathTracingViewerBackend:
 
     def __init__(
         self,
-        width: int = 1280,
-        height: int = 720,
+        width: int = DEFAULT_VIEWER_WIDTH,
+        height: int = DEFAULT_VIEWER_HEIGHT,
         title: str = "Warp OptiX Path Tracing",
         fps: int = 0,
         device: str = "cuda",
