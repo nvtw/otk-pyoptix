@@ -24,10 +24,20 @@ import sys
 from collections.abc import Iterable
 
 import numpy as np
+import warp as wp
 
 from warp_optix._runtime.transform_utils import build_transform_matrix
 
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
+from .arrows import (
+    ArrowBatch,
+    arrow_segment_indices,
+    expand_arrow_material_ids_device_count,
+    expand_arrow_material_ids_host_count,
+    fill_arrow_curve_buffers,
+    update_arrow_curves_device_count,
+    update_arrow_curves_host_count,
+)
 from .ptx_compiler import get_optix_include_dir
 from .scene import Curve, Mesh
 
@@ -479,6 +489,275 @@ class PathTracerAPI:
             material_ids=_validate_material_ids(scene, material_ids),
         )
         return int(scene.add_curve(curve))
+
+    def create_arrow_batch(
+        self,
+        capacity: int,
+        small_radius: float,
+        large_radius: float,
+        tip_length_ratio: float = 0.2,
+        material_id: int = 0,
+        material_ids: np.ndarray | None = None,
+    ) -> ArrowBatch:
+        """Create one fixed-capacity, dynamically refittable arrow batch.
+
+        The implementation stores every arrow as two native round-linear curve
+        primitives in one GAS: a constant-radius shaft and a linearly tapered
+        tip. ``tip_length_ratio`` is the fraction of total arrow length occupied
+        by the tip. ``material_ids``, when supplied, contains one material per
+        arrow; the shaft and tip share it.
+
+        Choose ``capacity`` as the simulation's maximum contact count. Runtime
+        updates may freely change the active count up to that capacity without
+        reallocating geometry or rebuilding the scene.
+        """
+        scene = self._require_scene()
+        capacity = int(capacity)
+        small_radius = float(small_radius)
+        large_radius = float(large_radius)
+        tip_length_ratio = float(tip_length_ratio)
+        if capacity < 1:
+            raise ValueError("capacity must be positive")
+        if small_radius <= 0.0 or large_radius <= 0.0:
+            raise ValueError("small_radius and large_radius must be positive")
+        if large_radius < small_radius:
+            raise ValueError("large_radius must be at least small_radius")
+        if not 0.0 < tip_length_ratio < 1.0:
+            raise ValueError("tip_length_ratio must be between zero and one")
+
+        if scene.materials.count == 0:
+            scene.materials.add_diffuse((0.8, 0.8, 0.8))
+        material_id = int(material_id)
+        if material_id < 0 or material_id >= scene.materials.count:
+            material_id = 0
+        if material_ids is None:
+            segment_material_ids = np.full(2 * capacity, material_id, dtype=np.uint32)
+        else:
+            arrow_material_ids = _validate_material_ids(scene, material_ids)
+            if arrow_material_ids.shape != (capacity,):
+                raise ValueError(f"material_ids must have shape ({capacity},)")
+            segment_material_ids = np.repeat(
+                np.asarray(arrow_material_ids, dtype=np.uint32), 2
+            )
+
+        curve = Curve(
+            np.zeros((4 * capacity, 3), dtype=np.float32),
+            np.zeros(4 * capacity, dtype=np.float32),
+            arrow_segment_indices(capacity),
+            material_id=material_id,
+            material_ids=segment_material_ids,
+            dynamic=True,
+        )
+        geometry_id = int(scene.add_curve(curve))
+        instance_id = int(scene.add_instance(geometry_id))
+        return ArrowBatch(
+            geometry_id=geometry_id,
+            instance_id=instance_id,
+            capacity=capacity,
+            small_radius=small_radius,
+            large_radius=large_radius,
+            tip_length_ratio=tip_length_ratio,
+        )
+
+    def _arrow_curve(self, batch: ArrowBatch) -> Curve:
+        if not isinstance(batch, ArrowBatch):
+            raise TypeError("batch must be an ArrowBatch")
+        scene = self._require_scene()
+        if batch.geometry_id < 0 or batch.geometry_id >= scene.geometry_count:
+            raise ValueError("arrow batch does not belong to this scene")
+        curve = scene._meshes[batch.geometry_id]
+        if curve.primitive_type != "round_linear" or not curve.dynamic:
+            raise ValueError("arrow batch geometry is no longer available")
+        return curve
+
+    def update_arrow_batch(
+        self,
+        batch: ArrowBatch,
+        starts: np.ndarray,
+        ends: np.ndarray,
+        *,
+        material_ids: np.ndarray | None = None,
+        rebuild_tlas: bool = True,
+        rebuild_gas: bool = True,
+    ) -> None:
+        """Update arrows from host arrays and update the dynamic curve GAS.
+
+        A fast GAS rebuild is the default because contact ordering may shuffle.
+        Set ``rebuild_gas=False`` only when arrow identities remain spatially stable.
+        """
+        scene = self._require_scene()
+        curve = self._arrow_curve(batch)
+        starts = np.asarray(starts, dtype=np.float32).reshape(-1, 3)
+        ends = np.asarray(ends, dtype=np.float32).reshape(-1, 3)
+        count = len(starts)
+        fill_arrow_curve_buffers(
+            starts,
+            ends,
+            curve.vertices,
+            curve.radii,
+            batch.small_radius,
+            batch.large_radius,
+            batch.tip_length_ratio,
+        )
+        batch.active_count = count
+
+        if material_ids is not None:
+            arrow_material_ids = _validate_material_ids(scene, material_ids)
+            if arrow_material_ids.shape != (count,):
+                raise ValueError(f"material_ids must have shape ({count},)")
+            curve.material_ids[: 2 * count] = np.repeat(
+                np.asarray(arrow_material_ids, dtype=np.uint32), 2
+            )
+
+        if curve.d_vertices is None:
+            return
+        curve.d_vertices.assign(curve.vertices.reshape(-1))
+        curve.d_widths.assign(curve.radii)
+        if material_ids is not None:
+            device_material_ids = wp.array(
+                curve.material_ids, dtype=wp.uint32, device="cuda"
+            )
+            wp.copy(
+                scene._packed_material_ids,
+                device_material_ids,
+                dest_offset=curve._packed_material_offset,
+                count=len(curve.material_ids),
+            )
+        scene.update_curve_accel(
+            batch.geometry_id,
+            rebuild_gas=bool(rebuild_gas),
+            rebuild_tlas=bool(rebuild_tlas),
+        )
+
+    def update_arrow_batch_device(
+        self,
+        batch: ArrowBatch,
+        starts: wp.array,
+        ends: wp.array,
+        active_count: int | wp.array,
+        *,
+        material_ids: wp.array | None = None,
+        stream=None,
+        rebuild_gas: bool = True,
+        rebuild_tlas: bool = True,
+    ) -> None:
+        """Update arrows without CPU readback from CUDA-resident Warp arrays.
+
+        ``starts`` and ``ends`` must be one-dimensional ``wp.vec3`` arrays.
+        ``active_count`` may be a host integer or a one-element CUDA ``int32``
+        array. The device-count form launches over the full capacity, allowing
+        a simulation to change the contact count without synchronizing it to
+        the CPU; its value is clamped to the batch capacity on-device. Device
+        material IDs are optional and contain one ``int32`` ID per arrow.
+
+        A fast GAS rebuild is the default because contact ordering may shuffle.
+        Set ``rebuild_gas=False`` only for spatially stable arrow identities.
+        """
+        scene = self._require_scene()
+        curve = self._arrow_curve(batch)
+        if curve.d_vertices is None:
+            raise RuntimeError("build the scene before device arrow updates")
+        for name, values in (("starts", starts), ("ends", ends)):
+            if not hasattr(values, "device") or not values.device.is_cuda:
+                raise ValueError(f"{name} must be a CUDA-resident Warp array")
+            if values.ndim != 1 or values.dtype != wp.vec3:
+                raise ValueError(f"{name} must be a one-dimensional wp.vec3 array")
+        if starts.device != ends.device:
+            raise ValueError("starts and ends must be on the same CUDA device")
+        if material_ids is not None:
+            if not material_ids.device.is_cuda or material_ids.dtype != wp.int32:
+                raise ValueError("material_ids must be a CUDA int32 Warp array")
+            if material_ids.ndim != 1:
+                raise ValueError("material_ids must be one-dimensional")
+
+        previous_count = batch.active_count
+        device_count = hasattr(active_count, "device")
+        if device_count:
+            if not active_count.device.is_cuda or active_count.dtype != wp.int32:
+                raise ValueError("active_count must be a CUDA int32 Warp array")
+            if active_count.ndim != 1 or len(active_count) < 1:
+                raise ValueError("active_count must contain at least one value")
+            if len(starts) < batch.capacity or len(ends) < batch.capacity:
+                raise ValueError(
+                    "device-count endpoint arrays must contain batch.capacity values"
+                )
+            if material_ids is not None and len(material_ids) < batch.capacity:
+                raise ValueError(
+                    "device-count material_ids must contain batch.capacity values"
+                )
+            launch_dim = batch.capacity
+            geometry_kernel = update_arrow_curves_device_count
+            geometry_inputs = [
+                starts,
+                ends,
+                active_count,
+                batch.capacity,
+                batch.small_radius,
+                batch.large_radius,
+                batch.tip_length_ratio,
+                curve.d_vertices,
+                curve.d_widths,
+            ]
+            batch.active_count = -1
+        else:
+            count = int(active_count)
+            if count < 0 or count > batch.capacity:
+                raise ValueError("active_count must be within batch capacity")
+            if len(starts) < count or len(ends) < count:
+                raise ValueError(
+                    "endpoint arrays contain fewer than active_count values"
+                )
+            if material_ids is not None and len(material_ids) < count:
+                raise ValueError("material_ids contains fewer than active_count values")
+            launch_dim = (
+                batch.capacity if previous_count < 0 else max(count, previous_count)
+            )
+            geometry_kernel = update_arrow_curves_host_count
+            geometry_inputs = [
+                starts,
+                ends,
+                count,
+                batch.small_radius,
+                batch.large_radius,
+                batch.tip_length_ratio,
+                curve.d_vertices,
+                curve.d_widths,
+            ]
+            batch.active_count = count
+
+        if launch_dim:
+            wp.launch(
+                geometry_kernel,
+                dim=launch_dim,
+                inputs=geometry_inputs,
+                device=starts.device,
+                stream=stream,
+            )
+            if material_ids is not None:
+                material_kernel = (
+                    expand_arrow_material_ids_device_count
+                    if device_count
+                    else expand_arrow_material_ids_host_count
+                )
+                material_inputs = [material_ids, active_count]
+                if device_count:
+                    material_inputs.append(batch.capacity)
+                material_inputs.extend(
+                    [scene._packed_material_ids, curve._packed_material_offset]
+                )
+                wp.launch(
+                    material_kernel,
+                    dim=launch_dim,
+                    inputs=material_inputs,
+                    device=starts.device,
+                    stream=stream,
+                )
+        scene.update_curve_accel(
+            batch.geometry_id,
+            rebuild_gas=bool(rebuild_gas),
+            stream=stream,
+            rebuild_tlas=bool(rebuild_tlas),
+        )
 
     def create_instance(self, mesh_id: int) -> int:
         """Create an instance of a mesh or curve geometry ID."""

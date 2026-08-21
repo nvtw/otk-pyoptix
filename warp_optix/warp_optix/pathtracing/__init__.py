@@ -28,6 +28,7 @@ Components:
     - viewer: Standalone and framework-compatible viewer API
 """
 
+from .arrows import ArrowBatch
 from .camera import Camera
 from .materials import MaterialManager
 from .pathtracer_api import PathTracerAPI
@@ -39,6 +40,7 @@ from .viewer import PathTracingViewer, PathTracingViewerBackend
 
 __all__ = [
     "Camera",
+    "ArrowBatch",
     "Curve",
     "MaterialManager",
     "Mesh",

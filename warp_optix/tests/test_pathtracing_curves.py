@@ -107,3 +107,106 @@ def test_pathtracer_api_creates_reusable_curve_geometry():
     assert scene._meshes[curve_id].material_id == 0
     np.testing.assert_array_equal(scene._meshes[curve_id].material_ids, (0, 1))
     assert scene.materials.count == 2
+
+
+def test_dynamic_curve_accepts_zero_radius_but_static_curve_does_not():
+    with pytest.raises(ValueError, match="positive"):
+        Curve(_points(), radii=(0.1, 0.0, 0.1))
+
+    curve = Curve(_points(), radii=(0.1, 0.0, 0.1), dynamic=True)
+
+    assert curve.dynamic
+    np.testing.assert_allclose(curve.radii, (0.1, 0.0, 0.1))
+
+
+def test_pathtracer_api_creates_one_dynamic_curve_instance_for_arrow_batch():
+    scene = Scene(None)
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+    scene.materials.add_diffuse((0.2, 0.3, 0.4))
+    scene.materials.add_diffuse((0.8, 0.7, 0.6))
+
+    batch = api.create_arrow_batch(
+        capacity=4,
+        small_radius=0.02,
+        large_radius=0.06,
+        tip_length_ratio=0.25,
+        material_ids=(0, 1, 0, 1),
+    )
+    curve = scene._meshes[batch.geometry_id]
+
+    assert batch.capacity == 4
+    assert scene.geometry_count == 1
+    assert scene.instance_count == 1
+    assert scene._instances[batch.instance_id].mesh_index == batch.geometry_id
+    assert curve.dynamic
+    np.testing.assert_array_equal(curve.indices, (0, 2, 4, 6, 8, 10, 12, 14))
+    np.testing.assert_array_equal(curve.material_ids, (0, 0, 1, 1, 0, 0, 1, 1))
+    np.testing.assert_allclose(curve.radii, 0.0)
+
+
+def test_host_arrow_batch_update_builds_shaft_tip_and_clears_inactive_slots():
+    scene = Scene(None)
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+    scene.materials.add_diffuse((0.2, 0.3, 0.4))
+    scene.materials.add_diffuse((0.8, 0.7, 0.6))
+    batch = api.create_arrow_batch(3, 0.02, 0.06, 0.25)
+
+    api.update_arrow_batch(
+        batch,
+        starts=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0)),
+        ends=((0.0, 0.0, 2.0), (2.0, 0.0, 0.0)),
+        material_ids=(1, 0),
+    )
+    curve = scene._meshes[batch.geometry_id]
+    points = curve.vertices.reshape(3, 4, 3)
+    widths = curve.radii.reshape(3, 4)
+
+    np.testing.assert_allclose(
+        points[0],
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 1.5), (0.0, 0.0, 1.5), (0.0, 0.0, 2.0)),
+    )
+    np.testing.assert_allclose(
+        points[1],
+        ((1.0, 0.0, 0.0), (1.75, 0.0, 0.0), (1.75, 0.0, 0.0), (2.0, 0.0, 0.0)),
+    )
+    np.testing.assert_allclose(widths[:2], ((0.02, 0.02, 0.06, 0.0),) * 2)
+    np.testing.assert_allclose(points[2], 0.0)
+    np.testing.assert_allclose(widths[2], 0.0)
+    np.testing.assert_array_equal(curve.material_ids[:4], (1, 1, 0, 0))
+    assert batch.active_count == 2
+
+    api.update_arrow_batch(
+        batch,
+        starts=((3.0, 0.0, 0.0),),
+        ends=((3.0, 1.0, 0.0),),
+    )
+    np.testing.assert_allclose(curve.vertices[4:], 0.0)
+    np.testing.assert_allclose(curve.radii[4:], 0.0)
+    assert batch.active_count == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"capacity": 0, "small_radius": 0.1, "large_radius": 0.2}, "capacity"),
+        ({"capacity": 1, "small_radius": 0.0, "large_radius": 0.2}, "positive"),
+        ({"capacity": 1, "small_radius": 0.2, "large_radius": 0.1}, "at least"),
+        (
+            {
+                "capacity": 1,
+                "small_radius": 0.1,
+                "large_radius": 0.2,
+                "tip_length_ratio": 1.0,
+            },
+            "between",
+        ),
+    ],
+)
+def test_arrow_batch_rejects_invalid_shape_parameters(kwargs, message):
+    scene = Scene(None)
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+    with pytest.raises(ValueError, match=message):
+        api.create_arrow_batch(**kwargs)

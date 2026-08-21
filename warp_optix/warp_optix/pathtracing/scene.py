@@ -575,6 +575,7 @@ class Curve:
         segment_indices: np.ndarray | None = None,
         material_id: int = 0,
         material_ids: np.ndarray | None = None,
+        dynamic: bool = False,
     ):
         vertices = np.asarray(vertices, dtype=np.float32)
         if vertices.ndim != 2 or vertices.shape[1] != 3:
@@ -589,8 +590,11 @@ class Curve:
             radii = np.full(len(vertices), float(radii), dtype=np.float32)
         if radii.shape != (len(vertices),):
             raise ValueError("curve radii must be scalar or have shape (N,)")
-        if not np.all(np.isfinite(radii)) or np.any(radii <= 0.0):
-            raise ValueError("curve radii must be finite and positive")
+        if not np.all(np.isfinite(radii)):
+            raise ValueError("curve radii must be finite")
+        if np.any(radii < 0.0) or (not dynamic and np.any(radii <= 0.0)):
+            qualifier = "non-negative" if dynamic else "positive"
+            raise ValueError(f"curve radii must be finite and {qualifier}")
 
         if segment_indices is None:
             segment_indices = np.arange(len(vertices) - 1, dtype=np.uint32)
@@ -613,9 +617,13 @@ class Curve:
         self.material_ids = _normalize_primitive_material_ids(
             material_ids, len(self.indices), self.material_id
         )
+        self.dynamic = bool(dynamic)
         self.d_vertices = None
         self.d_widths = None
         self.d_indices = None
+        self._packed_position_offset = 0
+        self._packed_radius_offset = 0
+        self._packed_material_offset = 0
 
     def upload_to_gpu(self):
         """Upload control points, radii, and segment starts to CUDA."""
@@ -719,6 +727,11 @@ class Scene:
         # Acceleration structures
         self._gas_handles = []
         self._gas_buffers = []
+        self._gas_build_inputs = []
+        self._gas_build_flags = []
+        self._gas_update_temp_buffers = []
+        self._gas_build_temp_sizes = []
+        self._gas_update_temp_sizes = []
         self._ias_handle = None
         self._ias_buffer = None
         self._instance_buffer = None
@@ -1603,6 +1616,11 @@ class Scene:
         self._gas_handles.clear()
         self._gas_buffers.clear()
         self._ias_handle = None
+        self._gas_build_inputs.clear()
+        self._gas_build_flags.clear()
+        self._gas_update_temp_buffers.clear()
+        self._gas_build_temp_sizes.clear()
+        self._gas_update_temp_sizes.clear()
         self._ias_buffer = None
         self._instance_buffer = None
         self._instance_record_floats = None
@@ -1674,6 +1692,11 @@ class Scene:
         self._gas_handles.clear()
         self._gas_buffers.clear()
         self._ias_handle = None
+        self._gas_build_inputs.clear()
+        self._gas_build_flags.clear()
+        self._gas_update_temp_buffers.clear()
+        self._gas_build_temp_sizes.clear()
+        self._gas_update_temp_sizes.clear()
         self._tlas_instance_count = 0
         self._keepalive.clear()
         self._instance_records_dirty = True
@@ -1711,7 +1734,7 @@ class Scene:
             total_curves,
         )
 
-    def rebuild_tlas(self):
+    def rebuild_tlas(self, stream=None):
         """Rebuild only TLAS after instance transform updates."""
         if len(self._meshes) == 0 or len(self._instances) == 0:
             return
@@ -1721,21 +1744,24 @@ class Scene:
             # Fallback if a full build has not been completed yet.
             self.build(self._optix)
             return
-        self._build_tlas()
+        self._build_tlas(stream=stream)
 
     def _build_blas(self):
         """Build bottom-level acceleration structures for all geometry."""
         optix = self._optix
-
-        accel_options = optix.AccelBuildOptions(
-            buildFlags=int(optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS),
-            operation=optix.BUILD_OPERATION_BUILD,
-        )
-
         stream = int(wp.get_stream("cuda").cuda_stream)
-        build_inputs = []
+        build_jobs = []
         max_temp_size = 0
         for geometry in self._meshes:
+            build_flags = int(optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS)
+            if getattr(geometry, "dynamic", False):
+                build_flags |= int(
+                    optix.BUILD_FLAG_ALLOW_UPDATE | optix.BUILD_FLAG_PREFER_FAST_BUILD
+                )
+            accel_options = optix.AccelBuildOptions(
+                buildFlags=build_flags,
+                operation=optix.BUILD_OPERATION_BUILD,
+            )
             if geometry.primitive_type == "triangles":
                 build_input = optix.BuildInputTriangleArray()
                 build_input.vertexFormat = optix.VERTEX_FORMAT_FLOAT3
@@ -1766,7 +1792,7 @@ class Scene:
                 )
 
             sizes = self._ctx.accelComputeMemoryUsage([accel_options], [build_input])
-            build_inputs.append((build_input, sizes))
+            build_jobs.append((build_input, sizes, accel_options, build_flags))
             max_temp_size = max(max_temp_size, int(sizes.tempSizeInBytes))
 
         # Every build is submitted to the same CUDA stream, so its scratch
@@ -1774,7 +1800,7 @@ class Scene:
         # Large composed USD stages otherwise retain hundreds of independent
         # temporary allocations until the full build is synchronized.
         d_temp = wp.empty(max_temp_size, dtype=wp.uint8, device="cuda")
-        for build_input, sizes in build_inputs:
+        for build_input, sizes, accel_options, build_flags in build_jobs:
             d_gas = wp.empty(sizes.outputSizeInBytes, dtype=wp.uint8, device="cuda")
 
             handle = self._ctx.accelBuild(
@@ -1790,9 +1816,95 @@ class Scene:
 
             self._gas_handles.append(int(handle))
             self._gas_buffers.append(d_gas)
+            self._gas_build_inputs.append(build_input)
+            self._gas_build_flags.append(build_flags)
+            self._gas_update_temp_buffers.append(None)
+            self._gas_build_temp_sizes.append(int(sizes.tempSizeInBytes))
+            self._gas_update_temp_sizes.append(int(sizes.tempUpdateSizeInBytes))
         self._keepalive["gas_temp"] = d_temp
 
-    def _build_tlas(self):
+    def update_curve_accel(
+        self,
+        geometry_index: int,
+        stream=None,
+        rebuild_gas: bool = False,
+        rebuild_tlas: bool = True,
+    ):
+        """Refit or rebuild one dynamic curve GAS after updating its buffers."""
+        geometry_index = int(geometry_index)
+        if geometry_index < 0 or geometry_index >= len(self._meshes):
+            raise IndexError("curve geometry index is out of range")
+        geometry = self._meshes[geometry_index]
+        if geometry.primitive_type != "round_linear" or not geometry.dynamic:
+            raise ValueError("geometry must be a dynamic curve")
+        if self._optix is None:
+            return False
+        if len(self._gas_handles) != len(self._meshes):
+            raise RuntimeError("build the scene before refitting dynamic curves")
+
+        wp.copy(
+            self._packed_positions,
+            geometry.d_vertices,
+            dest_offset=geometry._packed_position_offset,
+            count=geometry.vertices.size,
+            stream=stream,
+        )
+        wp.copy(
+            self._packed_radii,
+            geometry.d_widths,
+            dest_offset=geometry._packed_radius_offset,
+            count=geometry.radii.size,
+            stream=stream,
+        )
+
+        required_temp = (
+            self._gas_build_temp_sizes[geometry_index]
+            if rebuild_gas
+            else self._gas_update_temp_sizes[geometry_index]
+        )
+        d_temp = self._gas_update_temp_buffers[geometry_index]
+        if d_temp is None or d_temp.size < required_temp:
+            d_temp = wp.empty(required_temp, dtype=wp.uint8, device="cuda")
+            self._gas_update_temp_buffers[geometry_index] = d_temp
+
+        optix = self._optix
+        accel_options = optix.AccelBuildOptions(
+            buildFlags=self._gas_build_flags[geometry_index],
+            operation=optix.BUILD_OPERATION_BUILD
+            if rebuild_gas
+            else optix.BUILD_OPERATION_UPDATE,
+        )
+        stream_handle = int(
+            wp.get_stream("cuda").cuda_stream
+            if stream is None
+            else getattr(stream, "cuda_stream", stream)
+        )
+        self._gas_handles[geometry_index] = int(
+            self._ctx.accelBuild(
+                stream_handle,
+                [accel_options],
+                [self._gas_build_inputs[geometry_index]],
+                d_temp.ptr,
+                required_temp,
+                self._gas_buffers[geometry_index].ptr,
+                self._gas_buffers[geometry_index].size,
+                [],
+            )
+        )
+        if rebuild_tlas:
+            self.rebuild_tlas(stream=stream)
+        return True
+
+    def refit_curve(self, geometry_index: int, stream=None, rebuild_tlas: bool = True):
+        """Refit one dynamic curve GAS after its retained buffers were updated."""
+        return self.update_curve_accel(
+            geometry_index,
+            stream=stream,
+            rebuild_gas=False,
+            rebuild_tlas=rebuild_tlas,
+        )
+
+    def _build_tlas(self, stream=None):
         """Build top-level acceleration structure."""
         optix = self._optix
 
@@ -1904,7 +2016,11 @@ class Scene:
         )
 
         self._ias_handle = self._ctx.accelBuild(
-            int(wp.get_stream("cuda").cuda_stream),
+            int(
+                wp.get_stream("cuda").cuda_stream
+                if stream is None
+                else getattr(stream, "cuda_stream", stream)
+            ),
             [accel_options],
             [ias_input],
             self._tlas_temp_buffer.ptr,
@@ -1987,6 +2103,9 @@ class Scene:
             rp["vertexBuffer"]["hasTexCoord1"] = np.uint32(is_triangle_mesh)
             rp["vertexBuffer"]["hasPrevPosition"] = np.uint32(0)
             rp["numIndices"] = np.uint32(geometry.indices.size)
+            geometry._packed_position_offset = position_offset
+            geometry._packed_radius_offset = radius_offset
+            geometry._packed_material_offset = material_offset
             rp["numVertices"] = np.uint32(geometry.vertices.shape[0])
 
             packed_indices.append(flat_indices.astype(np.uint32, copy=False))

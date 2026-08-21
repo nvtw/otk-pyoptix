@@ -119,6 +119,47 @@ Pass `enable_cuda_graphs=False` to diagnose a driver or
 capture compatibility issue; `api.cuda_graph_active` reports successful
 capture after the first rendered sample.
 
+Large dynamic arrow sets use one fixed-capacity native-curve geometry rather
+than one OptiX instance per arrow. Each arrow is a constant-radius shaft plus
+a linearly tapered tip. Inactive slots have zero width, so a changing contact
+count does not reallocate buffers or rebuild the whole scene. By default only
+the arrow GAS is rebuilt, followed by a TLAS update:
+
+```python
+material = api.create_pbr_material((0.9, 0.25, 0.03), 0.65, 0.0)
+arrows = api.create_arrow_batch(
+    capacity=max_contact_count,
+    small_radius=0.002,
+    large_radius=0.006,
+    tip_length_ratio=0.2,
+    material_id=material,
+)
+api.build_scene()
+
+# CUDA wp.vec3 buffers with at least max_contact_count entries. The one-element
+# CUDA int32 count avoids a device-to-host synchronization when contacts vary;
+# it is clamped to max_contact_count on-device.
+api.update_arrow_batch_device(
+    arrows,
+    contact_starts_cuda,
+    contact_ends_cuda,
+    contact_count_cuda,
+    material_ids=contact_material_ids_cuda,  # Optional int32 ID per arrow.
+    stream=simulation_stream,
+)
+```
+
+The host equivalent is `update_arrow_batch(arrows, starts, ends)`. Per-arrow
+materials use the existing per-curve-primitive material table; the API assigns
+the same ID to an arrow's shaft and tip. When updating several dynamic batches,
+pass `rebuild_tlas=False` to each update and call `api.rebuild_tlas()` once at
+the end.
+
+A fast GAS rebuild is deliberately the default because contact ordering may
+shuffle completely between frames. Use `rebuild_gas=False` only when arrow IDs
+remain spatially coherent; refitting is correct in either case, but arbitrary
+reordering can substantially degrade the refitted BVH's traversal quality.
+
 USD loads also retain a path-addressable transform hierarchy instead of
 baking composed transforms into vertices:
 
