@@ -2753,6 +2753,30 @@ def _make_invalid_shaded_hit() -> ShadedHitData:
 
 
 @wp.func
+def _orient_shaded_hit_for_incident_side(
+    hit: ShadedHitData, front_face: wp.uint32
+) -> ShadedHitData:
+    """Orient a material frame toward the incident ray's side of the surface.
+
+    Material evaluation constructs the frame from the authored front face. A
+    two-sided hit needs the complete frame reversed, not just its IORs, or the
+    BSDF and geometric ray offset continue to behave as if the back face were
+    culled. Keeping T and reversing B together with the normals preserves the
+    tangent-frame handedness used by normal maps.
+    """
+    if hit.valid != wp.uint32(0) and front_face == wp.uint32(0):
+        hit.normal = -hit.normal
+        hit.Ng = -hit.Ng
+        hit.B = -hit.B
+        hit.Nc = -hit.Nc
+        if hit.is_thin_walled == 0:
+            exterior_ior = hit.ior1
+            hit.ior1 = hit.ior2
+            hit.ior2 = exterior_ior
+    return hit
+
+
+@wp.func
 def _sample_sphere_light_contribution(
     params: PathtraceLaunchParams,
     position: wp.vec3,
@@ -3172,6 +3196,9 @@ def primary_raygen(params: PathtraceLaunchParams):
             hit_uv1,
             hit_barycentrics[0],
         )
+        pbr = _orient_shaded_hit_for_incident_side(
+            pbr, _payload_get_front_face(payload)
+        )
 
         # C++ line 253: origin = offsetRay(hitPos, pbrMat.Ng) — use geometric normal
         origin = _offset_ray(hit_pos, pbr.Ng)
@@ -3331,10 +3358,6 @@ def primary_raygen(params: PathtraceLaunchParams):
     # The PSR traversal already evaluated the terminal surface. Reuse it here;
     # evaluating again repeats every material texture fetch for every pixel.
     pbr_mat = pbr
-    if pbr_mat.is_thin_walled == 0 and _payload_get_front_face(payload) == wp.uint32(0):
-        exterior_ior = pbr_mat.ior1
-        pbr_mat.ior1 = pbr_mat.ior2
-        pbr_mat.ior2 = exterior_ior
 
     # Guides describe the first camera-visible surface. Background geometry
     # behind moving glass has different motion and causes flowing history.
@@ -3626,12 +3649,9 @@ def primary_raygen(params: PathtraceLaunchParams):
             sec_uv1,
             _payload_get_barycentrics(sec_payload)[0],
         )
-        if sec_pbr.is_thin_walled == 0 and _payload_get_front_face(
-            sec_payload
-        ) == wp.uint32(0):
-            exterior_ior = sec_pbr.ior1
-            sec_pbr.ior1 = sec_pbr.ior2
-            sec_pbr.ior2 = exterior_ior
+        sec_pbr = _orient_shaded_hit_for_incident_side(
+            sec_pbr, _payload_get_front_face(sec_payload)
+        )
 
         # C++ secondary_rchit.h lines 278-283: path regularization
         if use_path_reg:
@@ -4571,10 +4591,14 @@ def _compute_any_hit_alpha(params: PathtraceLaunchParams) -> AnyHitAlphaResult:
     )
     uv_seed_x = wp.uint32(int(wp.floor(uv_base[0] * 2048.0)))
     uv_seed_y = wp.uint32(int(wp.floor(uv_base[1] * 2048.0)))
+    launch_index = wp.optix_get_launch_index()
+    pixel_frame_seed = _xxhash32(
+        wp.uint32(launch_index[0]), wp.uint32(launch_index[1]), params.frame_index
+    )
     out.coverage_seed = _xxhash32(
         wp.uint32(inst_id),
         wp.uint32(primitive_id),
-        _xxhash32(uv_seed_x, uv_seed_y, wp.uint32(0)),
+        _xxhash32(uv_seed_x, uv_seed_y, pixel_frame_seed),
     )
     base_tex = _sample_texture_rgba(params, mat.base_color_tex_index, uv_base, 0.0)
 

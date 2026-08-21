@@ -8,6 +8,8 @@ from warp_optix.pathtracing.pathtracing_warp_kernels import (
     PathtraceLaunchParams,
     PhysicalSkyParams,
     SphereLight,
+    ShadedHitData,
+    _orient_shaded_hit_for_incident_side,
     _bsdf_evaluate,
     _eval_physical_sky,
     _bsdf_sample,
@@ -362,3 +364,44 @@ def test_filtered_wool_normal_broadens_unresolved_specular_lobe():
     resolved, filtered = output.numpy()
     np.testing.assert_allclose(resolved, 0.04, atol=1.0e-7)
     assert filtered > resolved
+
+
+@wp.kernel
+def _orient_backface_material_frame(output: wp.array(dtype=wp.vec4)):
+    hit = ShadedHitData()
+    hit.valid = wp.uint32(1)
+    hit.normal = wp.vec3(0.1, 0.2, 0.3)
+    hit.Ng = wp.vec3(0.0, 0.0, 1.0)
+    hit.T = wp.vec3(1.0, 0.0, 0.0)
+    hit.B = wp.vec3(0.0, 1.0, 0.0)
+    hit.Nc = wp.vec3(0.0, 0.0, 1.0)
+    hit.ior1 = 1.0
+    hit.ior2 = 1.5
+    hit.is_thin_walled = 0
+
+    back = _orient_shaded_hit_for_incident_side(hit, wp.uint32(0))
+    output[0] = wp.vec4(back.normal[0], back.normal[1], back.normal[2], back.ior1)
+    output[1] = wp.vec4(back.Ng[0], back.Ng[1], back.Ng[2], back.ior2)
+    output[2] = wp.vec4(back.T[0], back.T[1], back.T[2], 0.0)
+    output[3] = wp.vec4(back.B[0], back.B[1], back.B[2], 0.0)
+    output[4] = wp.vec4(back.Nc[0], back.Nc[1], back.Nc[2], 0.0)
+
+    hit.is_thin_walled = 1
+    thin = _orient_shaded_hit_for_incident_side(hit, wp.uint32(0))
+    output[5] = wp.vec4(thin.ior1, thin.ior2, 0.0, 0.0)
+
+
+def test_backface_orients_complete_material_frame_and_volume_iors():
+    """Make two-sided shading consistent for sheets and closed volumes."""
+    output = wp.zeros(6, dtype=wp.vec4, device="cpu")
+
+    wp.launch(_orient_backface_material_frame, dim=1, inputs=[output], device="cpu")
+
+    normal, geometric, tangent, bitangent, clearcoat, thin_iors = output.numpy()
+    np.testing.assert_allclose(normal[:3], (-0.1, -0.2, -0.3), atol=1.0e-7)
+    np.testing.assert_allclose(geometric[:3], (0.0, 0.0, -1.0), atol=1.0e-7)
+    np.testing.assert_allclose(tangent[:3], (1.0, 0.0, 0.0), atol=1.0e-7)
+    np.testing.assert_allclose(bitangent[:3], (0.0, -1.0, 0.0), atol=1.0e-7)
+    np.testing.assert_allclose(clearcoat[:3], (0.0, 0.0, -1.0), atol=1.0e-7)
+    np.testing.assert_allclose((normal[3], geometric[3]), (1.5, 1.0), atol=1.0e-7)
+    np.testing.assert_allclose(thin_iors[:2], (1.0, 1.5), atol=1.0e-7)
