@@ -18,18 +18,28 @@ python example_warp_optix_mixed_geometry.py
 python example_warp_optix_tiny_raytracer.py
 python example_warp_optix_basic_pathtracing.py
 python example_warp_optix_pathtraced_hairball.py
+python example_warp_optix_pathtraced_arrowball.py
+python example_warp_optix_pathtraced_contact_lines.py
 python example_warp_optix_usd_pathtracing.py path/to/scene.usd
 ```
 
 The hair-ball example procedurally packs thousands of randomized, tapered
-helical strands into one native round-linear curve geometry. Twelve saturated
+helical strands into one native round-cubic-Bezier curve geometry. Twelve saturated
 materials form gently rippled rainbow bands from the bottom to the top without
 entering the pink part of the hue wheel. Use
 `--hair-count`, `--segments`, `--hair-length`, `--curl-radius`, and
 `--curl-turns` to change its shape; `--seed` makes variations reproducible.
 
-The full PBR path tracer also accepts native OptiX round-linear curves through
-the same reusable geometry/instance API as triangle meshes:
+The arrow-ball example renders true path-traced arrows with the reusable native
+OptiX `ArrowBatch` API. Each arrow uses a constant-radius shaft and tapered tip;
+both are round-linear curve primitives sharing one per-arrow material. The
+contact-lines example instead draws 100k changing direction indicators through
+the depth-aware CUDA/OpenGL overlay API. It is intended for the fastest dynamic
+contact visualization and does not add those lines to the path-traced scene.
+
+The full PBR path tracer also accepts native OptiX round-linear and
+round-cubic-Bezier curves through the same reusable geometry/instance API as
+triangle meshes:
 
 ```python
 import numpy as np
@@ -55,8 +65,10 @@ instance_id = api.create_instance(curve_id)
 api.build_scene()
 ```
 
-Radii are specified per control point and interpolated linearly along every
-segment. By default every consecutive point pair is a segment. Pass explicit
+Radii are specified per control point and interpolated using the selected curve
+basis. The default `basis="linear"` makes every consecutive point pair a
+segment; `basis="cubic_bezier"` consumes four control points per segment. Pass
+explicit
 `segment_indices` containing each segment's starting control-point index to
 store multiple disjoint strands in one geometry. Curve instances support the
 same transforms, visibility updates, material overrides, and TLAS rebuilds as
