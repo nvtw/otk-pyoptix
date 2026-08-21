@@ -1471,6 +1471,16 @@ def _mul_mat4_cm(m: Mat16f, v: wp.vec4) -> wp.vec4:
 
 DLSS_INF_DISTANCE = float(65504.0)
 FLAGS_USE_PATH_REGULARIZATION = wp.uint32(4)
+FLAGS_CULL_BACK_FACES = wp.uint32(8)
+
+
+@wp.func
+def _backface_culling_ray_flag(params: PathtraceLaunchParams) -> wp.uint32:
+    """Return triangle culling flags shared by camera, bounce, and shadow rays."""
+    result = wp.uint32(0)
+    if (params.flags & FLAGS_CULL_BACK_FACES) != wp.uint32(0):
+        result = wp.uint32(OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES)
+    return result
 
 
 @wp.func
@@ -3093,7 +3103,7 @@ def primary_raygen(params: PathtraceLaunchParams):
     origin = ray_origin
     direction = org_dir
 
-    ray_flags = wp.uint32(OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES)
+    ray_flags = _backface_culling_ray_flag(params)
     payload = _init_primary_payload()
     wp.optix_trace(
         params.tlas,
@@ -3442,9 +3452,11 @@ def primary_raygen(params: PathtraceLaunchParams):
                 0.0,
                 wp.uint32(255),
                 wp.uint32(
-                    OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
-                    | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
-                    | OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES
+                    wp.uint32(
+                        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
+                        | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
+                    )
+                    | _backface_culling_ray_flag(params)
                 ),
                 wp.uint32(1),
                 wp.uint32(2),
@@ -3691,9 +3703,11 @@ def primary_raygen(params: PathtraceLaunchParams):
                     0.0,
                     wp.uint32(255),
                     wp.uint32(
-                        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
-                        | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
-                        | OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES
+                        wp.uint32(
+                            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT
+                            | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT
+                        )
+                        | _backface_culling_ray_flag(params)
                     ),
                     wp.uint32(1),
                     wp.uint32(2),

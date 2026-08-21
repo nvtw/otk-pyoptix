@@ -730,3 +730,36 @@ def test_quality_modes_and_runtime_ray_budgets():
         renderer.set_ray_budget(direct_light_samples=0)
     with pytest.raises(ValueError, match="at least 1"):
         renderer.set_ray_budget(russian_roulette_start_bounce=0)
+
+
+def test_global_backface_culling_can_be_changed_at_runtime():
+    renderer = PathTracingRenderer.__new__(PathTracingRenderer)
+    renderer.backface_culling = True
+    renderer.sample_index = 17
+    renderer.frame_index = 9
+    renderer._dlss_reset_history = False
+    renderer._optix_launch_graph = object()
+    renderer._optix_graph_warmed = True
+
+    renderer.set_backface_culling(False)
+
+    assert renderer.backface_culling is False
+    assert renderer.sample_index == 0
+    assert renderer.frame_index == 0
+    assert renderer._dlss_reset_history is True
+    assert renderer._optix_launch_graph is None
+    assert renderer._optix_graph_warmed is False
+
+    renderer.sample_index = 4
+    renderer.frame_index = 3
+    renderer._dlss_reset_history = False
+    renderer.set_backface_culling(False)
+    assert renderer.sample_index == 4
+    assert renderer.frame_index == 3
+    assert renderer._dlss_reset_history is False
+
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = renderer
+    assert api.backface_culling is False
+    api.set_backface_culling(True)
+    assert api.backface_culling is True

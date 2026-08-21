@@ -300,6 +300,7 @@ class PathTracingViewerBackend:
         default_clearcoat: float = 0.0,
         default_clearcoat_roughness: float = 0.1,
         enable_texture_mipmaps: bool = False,
+        backface_culling: bool = True,
     ):
         try:
             super().__init__()
@@ -376,6 +377,7 @@ class PathTracingViewerBackend:
             max_bounces=max_bounces,
             direct_light_samples=direct_light_samples,
             enable_texture_mipmaps=enable_texture_mipmaps,
+            backface_culling=backface_culling,
         )
         self._presenter = None
         if not self.headless:

@@ -37,6 +37,12 @@ contact-lines example instead draws 100k changing direction indicators through
 the depth-aware CUDA/OpenGL overlay API. It is intended for the fastest dynamic
 contact visualization and does not add those lines to the path-traced scene.
 
+Triangle backfaces are culled by default for camera, bounce, and shadow rays.
+Pass `backface_culling=False` to `PathTracerAPI`, `PathTracingRenderer`, or
+`PathTracingViewerBackend` for globally two-sided traversal. The setting can be
+changed at runtime with `api.set_backface_culling(False)`. The glTF and USD
+examples expose the same behavior as `--no-backface-culling`.
+
 The full PBR path tracer also accepts native OptiX round-linear and
 round-cubic-Bezier curves through the same reusable geometry/instance API as
 triangle meshes:

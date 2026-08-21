@@ -183,6 +183,7 @@ class PathTracingViewer:
         enable_cuda_graphs: bool = True,
         dlss_quality: str = "quality",
         enable_texture_mipmaps: bool = False,
+        backface_culling: bool = True,
     ):
         """
         Initialize the path tracing viewer.
@@ -207,6 +208,7 @@ class PathTracingViewer:
         self.enable_dlss_rr = bool(enable_dlss_rr)
         self.enable_set = bool(enable_set)
         self.enable_cuda_graphs = bool(enable_cuda_graphs)
+        self.backface_culling = bool(backface_culling)
         self.enable_texture_mipmaps = bool(enable_texture_mipmaps)
         self.dlss_quality = self._normalize_dlss_quality(dlss_quality)
         self._set_active = False
@@ -390,6 +392,18 @@ class PathTracingViewer:
             if value < 1:
                 raise ValueError("samples_per_frame must be at least 1")
             self.samples_per_frame = value
+
+    def set_backface_culling(self, enabled: bool) -> None:
+        """Globally enable or disable triangle backface culling for every ray."""
+        value = bool(enabled)
+        if value == self.backface_culling:
+            return
+        self.backface_culling = value
+        self.sample_index = 0
+        self.frame_index = 0
+        self._optix_launch_graph = None
+        self._optix_graph_warmed = False
+        self._dlss_reset_history = True
 
     def set_environment_hdr(self, hdr_path: str, scaling: float = 1.0):
         """
@@ -1219,6 +1233,8 @@ class PathTracingViewer:
             flags |= 2
         if self.use_path_regularization:
             flags |= 4
+        if self.backface_culling:
+            flags |= 8
         p.flags = wp.uint32(flags)
         p.override_roughness = float(self.override_roughness)
         p.override_metallic = float(self.override_metallic)

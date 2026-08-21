@@ -104,6 +104,11 @@ def _parse_args():
     parser.add_argument("--no-cuda-graphs", action="store_true", help="Disable OptiX CUDA graph replay.")
     parser.add_argument("--no-set", action="store_true", help="Disable Shader Execution Reordering.")
     parser.add_argument(
+        "--no-backface-culling",
+        action="store_true",
+        help="Render back-facing triangles for globally two-sided traversal.",
+    )
+    parser.add_argument(
         "--debug-buffer-mode",
         type=int,
         default=0,
@@ -283,6 +288,7 @@ def main():
         enable_dlss_rr=not args.no_dlss_rr,
         enable_set=not args.no_set,
         enable_cuda_graphs=not args.no_cuda_graphs,
+        backface_culling=not args.no_backface_culling,
     )
     if not api.initialize():
         raise RuntimeError("Failed to initialize pathtracing API.")

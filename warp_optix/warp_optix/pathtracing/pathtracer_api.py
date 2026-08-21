@@ -74,6 +74,7 @@ class PathTracerAPI:
         direct_light_samples: int = 1,
         russian_roulette_start_bounce: int = 3,
         enable_texture_mipmaps: bool = False,
+        backface_culling: bool = True,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -91,6 +92,7 @@ class PathTracerAPI:
             direct_light_samples=direct_light_samples,
             russian_roulette_start_bounce=russian_roulette_start_bounce,
             enable_texture_mipmaps=enable_texture_mipmaps,
+            backface_culling=backface_culling,
         )
         self._built = False
         self._running = True
@@ -173,6 +175,15 @@ class PathTracerAPI:
     def samples_per_frame(self) -> int:
         """Return the samples rendered per frame when DLSS is disabled."""
         return int(self._viewer.samples_per_frame)
+
+    @property
+    def backface_culling(self) -> bool:
+        """Whether all path-tracing rays cull back-facing triangles."""
+        return bool(self._viewer.backface_culling)
+
+    def set_backface_culling(self, enabled: bool) -> None:
+        """Globally enable or disable triangle backface culling at runtime."""
+        self._viewer.set_backface_culling(enabled)
 
     def set_dlss_quality(self, quality: str) -> None:
         """Select a DLSS quality mode and recreate DLSS resources if needed."""

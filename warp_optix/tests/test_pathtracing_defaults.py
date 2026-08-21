@@ -30,3 +30,4 @@ def test_high_level_viewers_share_the_full_hd_default():
         parameters = inspect.signature(constructor).parameters
         assert parameters["width"].default == DEFAULT_VIEWER_WIDTH
         assert parameters["height"].default == DEFAULT_VIEWER_HEIGHT
+        assert parameters["backface_culling"].default is True
