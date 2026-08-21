@@ -25,6 +25,42 @@ def test_curve_defaults_to_one_linear_segment_per_consecutive_pair():
     assert curve.sbt_offset == 2
 
 
+def test_cubic_bezier_curve_uses_native_topology_and_sbt_slot():
+    points = np.zeros((7, 3), dtype=np.float32)
+    points[:, 0] = np.arange(7)
+    curve = Curve(points, radii=np.linspace(0.1, 0.04, 7), basis="cubic_bezier")
+
+    np.testing.assert_array_equal(curve.indices, (0, 3))
+    assert curve.basis == "cubic_bezier"
+    assert curve.primitive_type == "round_cubic_bezier"
+    assert curve.control_point_count == 4
+    assert curve.sbt_offset == 4
+    assert curve.geometry_type == 2
+
+
+@pytest.mark.parametrize(
+    ("points", "indices", "message"),
+    [
+        (np.zeros((6, 3), dtype=np.float32), None, "3\\*N \\+ 1"),
+        (np.zeros((7, 3), dtype=np.float32), (4,), "four consecutive"),
+    ],
+)
+def test_cubic_bezier_curve_rejects_invalid_topology(points, indices, message):
+    with pytest.raises(ValueError, match=message):
+        Curve(points, radii=0.1, segment_indices=indices, basis="cubic_bezier")
+
+
+def test_pathtracer_api_creates_cubic_bezier_curve():
+    scene = Scene(None)
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+    curve_id = api.create_curve(
+        np.zeros((4, 3), dtype=np.float32), radii=0.1, basis="cubic_bezier"
+    )
+
+    assert scene._meshes[curve_id].basis == "cubic_bezier"
+
+
 def test_curve_accepts_scalar_radius_and_disjoint_segment_starts():
     points = np.vstack((_points(), _points() + (4.0, 0.0, 0.0)))
     curve = Curve(points, radii=0.05, segment_indices=np.array((0, 1, 3, 4)))

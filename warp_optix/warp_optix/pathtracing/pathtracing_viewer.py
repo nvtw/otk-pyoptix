@@ -898,6 +898,7 @@ class PathTracingViewer:
             pipeline_kwargs["usesPrimitiveTypeFlags"] = int(
                 optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
                 | optix.PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR
+                | optix.PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER
             )
         pco = optix.PipelineCompileOptions(**pipeline_kwargs)
 
@@ -946,38 +947,51 @@ class PathTracingViewer:
             ),
         )
 
-        builtin_options = optix.BuiltinISOptions(
-            builtinISModuleType=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
-            usesMotionBlur=False,
+        def register_curve_hit_group(primitive_type):
+            intersection_module = self._ctx.builtinISModuleGet(
+                mco,
+                pco,
+                optix.BuiltinISOptions(
+                    builtinISModuleType=primitive_type,
+                    usesMotionBlur=False,
+                ),
+            )
+            hit_group = self._sbt_manager.register_hit_shader_type(
+                HitKernel(
+                    woptix.get_entry_name(
+                        pwk.curve_primary_closest_hit,
+                        woptix.OptixKernelType.CLOSEST_HIT,
+                    ),
+                    any_hit=woptix.get_entry_name(
+                        pwk.primary_any_hit, woptix.OptixKernelType.ANY_HIT
+                    ),
+                    builtin_intersection_type=primitive_type,
+                    intersection_module=intersection_module,
+                ),
+                HitKernel(
+                    woptix.get_entry_name(
+                        pwk.secondary_closest_hit,
+                        woptix.OptixKernelType.CLOSEST_HIT,
+                    ),
+                    any_hit=woptix.get_entry_name(
+                        pwk.secondary_any_hit, woptix.OptixKernelType.ANY_HIT
+                    ),
+                    builtin_intersection_type=primitive_type,
+                    intersection_module=intersection_module,
+                ),
+            )
+            return intersection_module, hit_group
+
+        self._curve_intersection_module, curve_hit_group = register_curve_hit_group(
+            optix.PRIMITIVE_TYPE_ROUND_LINEAR
         )
-        self._curve_intersection_module = self._ctx.builtinISModuleGet(
-            mco, pco, builtin_options
-        )
-        curve_hit_group = self._sbt_manager.register_hit_shader_type(
-            HitKernel(
-                woptix.get_entry_name(
-                    pwk.curve_primary_closest_hit,
-                    woptix.OptixKernelType.CLOSEST_HIT,
-                ),
-                any_hit=woptix.get_entry_name(
-                    pwk.primary_any_hit, woptix.OptixKernelType.ANY_HIT
-                ),
-                builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
-                intersection_module=self._curve_intersection_module,
-            ),
-            HitKernel(
-                woptix.get_entry_name(
-                    pwk.secondary_closest_hit, woptix.OptixKernelType.CLOSEST_HIT
-                ),
-                any_hit=woptix.get_entry_name(
-                    pwk.secondary_any_hit, woptix.OptixKernelType.ANY_HIT
-                ),
-                builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
-                intersection_module=self._curve_intersection_module,
-            ),
+        self._bezier_curve_intersection_module, bezier_curve_hit_group = (
+            register_curve_hit_group(optix.PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER)
         )
         if self._sbt_manager.get_sbt_offset(triangle_hit_group) != 0:
             raise RuntimeError("triangle hit group must occupy SBT offset 0")
+        if self._sbt_manager.get_sbt_offset(bezier_curve_hit_group) != 4:
+            raise RuntimeError("cubic Bézier curve hit group must occupy SBT offset 4")
         if self._sbt_manager.get_sbt_offset(curve_hit_group) != 2:
             raise RuntimeError("curve hit group must occupy SBT offset 2")
 

@@ -14,48 +14,19 @@ from example_warp_optix_basic_pathtracing import (
     FreeCameraController,
     _pack_display_rgba8,
 )
-from warp_optix.pathtracing import PathTracerAPI
-
-
-_RAINBOW_SRGB = np.array(
-    [
-        (0.86, 0.06, 0.02),
-        (0.92, 0.22, 0.01),
-        (0.94, 0.42, 0.01),
-        (0.88, 0.62, 0.01),
-        (0.78, 0.72, 0.01),
-        (0.46, 0.72, 0.01),
-        (0.03, 0.60, 0.12),
-        (0.00, 0.58, 0.38),
-        (0.00, 0.62, 0.68),
-        (0.00, 0.53, 0.88),
-        (0.06, 0.30, 0.88),
-        (0.22, 0.12, 0.78),
-    ],
-    dtype=np.float32,
+from example_warp_optix_pathtraced_scene import (
+    add_checker_ground,
+    configure_demo_sky,
+    create_rainbow_materials,
+    rainbow_height_slots,
 )
-
-
-def _srgb_to_linear(colors: np.ndarray) -> np.ndarray:
-    colors = np.asarray(colors, dtype=np.float32)
-    return np.where(
-        colors <= 0.04045,
-        colors / 12.92,
-        ((colors + 0.055) / 1.055) ** 2.4,
-    )
+from warp_optix.pathtracing import PathTracerAPI
 
 
 def rainbow_segment_slots(points: np.ndarray, segments: int) -> np.ndarray:
     """Assign one palette slot per segment using gently rippled height bands."""
-    roots = points[:: segments + 1]
-    directions = roots / np.linalg.norm(roots, axis=1, keepdims=True)
-    height = 0.5 * (directions[:, 1] + 1.0)
-    azimuth = np.arctan2(directions[:, 2], directions[:, 0])
-    position = np.clip(height + 0.045 * np.sin(3.0 * azimuth + 0.5), 0.0, 1.0)
-    strand_slots = np.minimum(
-        (position * len(_RAINBOW_SRGB)).astype(np.uint32),
-        len(_RAINBOW_SRGB) - 1,
-    )
+    roots = points[:: 3 * segments + 1]
+    strand_slots = rainbow_height_slots(roots)
     return np.repeat(strand_slots, segments)
 
 
@@ -65,7 +36,7 @@ def _parse_args():
     )
     parser.add_argument("--hair-count", type=int, default=4000)
     parser.add_argument(
-        "--segments", type=int, default=14, help="Linear segments per hair."
+        "--segments", type=int, default=5, help="Cubic Bezier segments per hair."
     )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--ball-radius", type=float, default=0.8)
@@ -106,7 +77,7 @@ def generate_hair_ball(
     root_radius: float,
     seed: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Pack disjoint tapered helical hairs into one curve geometry."""
+    """Pack disjoint tapered helical hairs as C1-continuous cubic Beziers."""
     if hair_count < 1:
         raise ValueError("hair_count must be positive")
     if segments < 2:
@@ -153,18 +124,41 @@ def generate_hair_ball(
         + np.sin(angle)[..., None] * bitangent[:, None, :]
     )
     center = (ball_radius + length * u)[..., None] * radial[:, None, :]
-    points = (
+    knots = (
         center
         + (curl * envelope)[..., None] * helix
         + (0.13 * length * u * u)[..., None] * lean
     )
 
     width_scale = rng.uniform(0.8, 1.2, (hair_count, 1))
-    radii = root_radius * width_scale * (0.08 + 0.92 * (1.0 - u) ** 0.75)
-    points_per_hair = segments + 1
+    radius_knots = root_radius * width_scale * (0.08 + 0.92 * (1.0 - u) ** 0.75)
+    step = 1.0 / segments
+    derivatives = np.empty_like(knots)
+    derivatives[:, 0] = (knots[:, 1] - knots[:, 0]) / step
+    derivatives[:, -1] = (knots[:, -1] - knots[:, -2]) / step
+    derivatives[:, 1:-1] = (knots[:, 2:] - knots[:, :-2]) / (2.0 * step)
+    radius_derivatives = np.empty_like(radius_knots)
+    radius_derivatives[:, 0] = (radius_knots[:, 1] - radius_knots[:, 0]) / step
+    radius_derivatives[:, -1] = (radius_knots[:, -1] - radius_knots[:, -2]) / step
+    radius_derivatives[:, 1:-1] = (radius_knots[:, 2:] - radius_knots[:, :-2]) / (
+        2.0 * step
+    )
+
+    points_per_hair = 3 * segments + 1
+    points = np.empty((hair_count, points_per_hair, 3), dtype=np.float64)
+    radii = np.empty((hair_count, points_per_hair), dtype=np.float64)
+    points[:, 0] = knots[:, 0]
+    radii[:, 0] = radius_knots[:, 0]
+    points[:, 1::3] = knots[:, :-1] + derivatives[:, :-1] * (step / 3.0)
+    points[:, 2::3] = knots[:, 1:] - derivatives[:, 1:] * (step / 3.0)
+    points[:, 3::3] = knots[:, 1:]
+    radii[:, 1::3] = radius_knots[:, :-1] + radius_derivatives[:, :-1] * (step / 3.0)
+    radii[:, 2::3] = radius_knots[:, 1:] - radius_derivatives[:, 1:] * (step / 3.0)
+    radii[:, 3::3] = radius_knots[:, 1:]
+    radii = np.maximum(radii, root_radius * 0.01)
     segment_indices = (
         np.arange(hair_count, dtype=np.uint32)[:, None] * points_per_hair
-        + np.arange(segments, dtype=np.uint32)[None, :]
+        + 3 * np.arange(segments, dtype=np.uint32)[None, :]
     ).reshape(-1)
     return (
         points.astype(np.float32).reshape(-1, 3),
@@ -203,75 +197,23 @@ def main():
     api.tonemap_saturation = args.saturation
 
     core_mat = api.create_pbr_material((0.025, 0.03, 0.04), 0.72, 0.0)
-    palette_materials = np.array(
-        [
-            api.create_pbr_material(
-                color,
-                roughness=0.7,
-                metallic=0.0,
-                ior=1.46,
-                specular=0.15,
-                clearcoat=0.0,
-                base_color_scale=1.0,
-            )
-            for color in _srgb_to_linear(_RAINBOW_SRGB)
-        ],
-        dtype=np.uint32,
-    )
+    palette_materials = create_rainbow_materials(api)
     segment_material_ids = palette_materials[
         rainbow_segment_slots(points, args.segments)
     ]
-    ground_size = 1000.0
-    ground_height = -1.38
-    ground_mat = api.create_pbr_material(
-        _srgb_to_linear(np.array((0.7, 0.7, 0.7), dtype=np.float32)),
-        roughness=0.8,
-        metallic=0.0,
-        ior=1.46,
-        specular=0.75,
-        clearcoat=0.03,
-        clearcoat_roughness=0.4,
-        u_subdiv=ground_size,
-        v_subdiv=ground_size,
-    )
     api.add_sphere((0.0, 0.0, 0.0), args.ball_radius * 1.005, 64, core_mat)
-    ground_half_extent = 0.5 * ground_size
-    ground_id = api.create_mesh(
-        np.array(
-            [
-                (-ground_half_extent, ground_height, -ground_half_extent),
-                (ground_half_extent, ground_height, -ground_half_extent),
-                (ground_half_extent, ground_height, ground_half_extent),
-                (-ground_half_extent, ground_height, ground_half_extent),
-            ],
-            dtype=np.float32,
-        ),
-        np.array(((0, 2, 1), (0, 3, 2)), dtype=np.uint32),
-        normals=np.tile((0.0, 1.0, 0.0), (4, 1)).astype(np.float32),
-        uvs=np.array(
-            ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)), dtype=np.float32
-        ),
-        material_id=ground_mat,
-    )
-    api.create_instance(ground_id)
+    add_checker_ground(api, height=-1.38)
     curve_id = api.create_curve(
         points,
         radii,
         segment_indices,
         material_id=int(palette_materials[0]),
         material_ids=segment_material_ids,
+        basis="cubic_bezier",
     )
     api.create_instance(curve_id)
     api.build_scene()
-    api.set_use_procedural_sky(True)
-    api.set_sky_parameters(
-        (-0.55, 0.78, 0.30),
-        multiplier=1.25,
-        haze=0.18,
-        saturation=0.9,
-        sun_disk_intensity=1.2,
-        sun_glow_intensity=0.8,
-    )
+    configure_demo_sky(api)
 
     render_width, render_height = args.width, args.height
     last_elapsed = 0.0
@@ -313,7 +255,8 @@ def main():
         )
 
     print(
-        f"[optix] hair ball: {args.hair_count:,} strands, {len(segment_indices):,} curve segments"
+        f"[optix] hair ball: {args.hair_count:,} strands, "
+        f"{len(segment_indices):,} cubic Bezier segments"
     )
     print("[optix] controls: left-drag look, WASD move, Q/E down/up, wheel zoom")
     viewer.run(_render, max_frames=args.max_frames)

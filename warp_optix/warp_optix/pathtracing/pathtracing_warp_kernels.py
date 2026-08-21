@@ -3942,7 +3942,7 @@ def _resolve_material_id(
 def _compute_curve_hit_geometry(
     params: PathtraceLaunchParams, inst_id: wp.int32, segment_id: wp.int32
 ) -> HitGeometry:
-    """Extract a native round-linear curve hit for the shared PBR payload."""
+    """Extract a native round-linear or cubic Bezier curve hit."""
     geo = HitGeometry()
     geo.texture_lod = 0.0
     geo.normal = wp.vec3(0.0, 0.0, 1.0)
@@ -3977,27 +3977,57 @@ def _compute_curve_hit_geometry(
     r0 = radii[radius_base + control_id]
     r1 = radii[radius_base + control_id + 1]
     u = wp.optix_get_curve_parameter()
-    center_object = p0 * (1.0 - u) + p1 * u
+    one_minus_u = 1.0 - u
+    center_object = p0 * one_minus_u + p1 * u
+    axis_object = p1 - p0
+    radius_derivative = r1 - r0
+    instance_geometry_types = params.instance_geometry_types
+    geometry_type = wp.uint32(1)
+    if instance_geometry_types.shape[0] > 0:
+        geometry_type = instance_geometry_types[inst_id]
+    if geometry_type == wp.uint32(2):
+        p2 = _fetch_vec3(positions, position_base + control_id + 2)
+        p3 = _fetch_vec3(positions, position_base + control_id + 3)
+        r2 = radii[radius_base + control_id + 2]
+        r3 = radii[radius_base + control_id + 3]
+        one_minus_u2 = one_minus_u * one_minus_u
+        u2 = u * u
+        center_object = (
+            p0 * (one_minus_u2 * one_minus_u)
+            + p1 * (3.0 * one_minus_u2 * u)
+            + p2 * (3.0 * one_minus_u * u2)
+            + p3 * (u2 * u)
+        )
+        axis_object = (
+            (p1 - p0) * (3.0 * one_minus_u2)
+            + (p2 - p1) * (6.0 * one_minus_u * u)
+            + (p3 - p2) * (3.0 * u2)
+        )
+        radius_derivative = (
+            (r1 - r0) * (3.0 * one_minus_u2)
+            + (r2 - r1) * (6.0 * one_minus_u * u)
+            + (r3 - r2) * (3.0 * u2)
+        )
     hit_world = (
         wp.optix_get_world_ray_origin()
         + wp.optix_get_world_ray_direction() * wp.optix_get_ray_tmax()
     )
     hit_object = wp.optix_transform_point_from_world_to_object_space(hit_world)
     radial_object = wp.normalize(hit_object - center_object)
-    axis_object = p1 - p0
     axis_length = wp.length(axis_object)
     normal_object = radial_object
     # On the swept body, a changing radius tilts the normal like a cone.
     # End caps and spherical elbows retain their radial normal.
     if u > 1.0e-5 and u < 1.0 - 1.0e-5 and axis_length > 1.0e-8:
         normal_object = wp.normalize(
-            radial_object - axis_object * ((r1 - r0) / (axis_length * axis_length))
+            radial_object
+            - axis_object * (radius_derivative / (axis_length * axis_length))
         )
     geo.normal = wp.normalize(
         wp.optix_transform_normal_from_object_to_world_space(normal_object)
     )
     tangent_world = wp.normalize(
-        wp.optix_transform_vector_from_object_to_world_space(p1 - p0)
+        wp.optix_transform_vector_from_object_to_world_space(axis_object)
     )
     geo.tangent = wp.normalize(
         tangent_world - geo.normal * wp.dot(geo.normal, tangent_world)

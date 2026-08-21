@@ -37,4 +37,7 @@ class TestPipeline:
             )
         assert pipeline_options.pipelineLaunchParamsVariableName == "params2"
 
+    def test_cubic_bezier_primitive_enums(self):
+        assert int(optix.PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER) == 0x2507
+        assert int(optix.PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER) == 1 << 7
 

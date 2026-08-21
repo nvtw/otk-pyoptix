@@ -558,15 +558,17 @@ class Mesh:
 
 
 class Curve:
-    """Native OptiX round-linear curve geometry.
+    """Native OptiX round linear or cubic Bézier curve geometry.
 
-    Each primitive starts at ``segment_indices[i]`` and uses that control point
-    and the following one. ``radii`` contains one swept-surface radius per
-    control point; OptiX interpolates it linearly along each segment.
+    Each primitive starts at ``segment_indices[i]`` and consumes the number of
+    consecutive control points required by ``basis``. ``radii`` contains one
+    swept-surface radius per control point and uses the same interpolation basis.
     """
 
-    primitive_type = "round_linear"
-    sbt_offset = 2
+    _BASIS_SPECS = {
+        "linear": ("round_linear", 2, 2, 1),
+        "cubic_bezier": ("round_cubic_bezier", 4, 4, 2),
+    }
 
     def __init__(
         self,
@@ -576,12 +578,21 @@ class Curve:
         material_id: int = 0,
         material_ids: np.ndarray | None = None,
         dynamic: bool = False,
+        basis: str = "linear",
     ):
+        basis = str(basis).lower()
+        if basis not in self._BASIS_SPECS:
+            raise ValueError("curve basis must be 'linear' or 'cubic_bezier'")
+        primitive_type, control_point_count, sbt_offset, geometry_type = (
+            self._BASIS_SPECS[basis]
+        )
         vertices = np.asarray(vertices, dtype=np.float32)
         if vertices.ndim != 2 or vertices.shape[1] != 3:
             raise ValueError("curve vertices must have shape (N, 3)")
-        if len(vertices) < 2:
-            raise ValueError("a curve requires at least two control points")
+        if len(vertices) < control_point_count:
+            raise ValueError(
+                f"a {basis} curve requires at least {control_point_count} control points"
+            )
         if not np.all(np.isfinite(vertices)):
             raise ValueError("curve vertices must be finite")
 
@@ -597,7 +608,14 @@ class Curve:
             raise ValueError(f"curve radii must be finite and {qualifier}")
 
         if segment_indices is None:
-            segment_indices = np.arange(len(vertices) - 1, dtype=np.uint32)
+            if basis == "linear":
+                segment_indices = np.arange(len(vertices) - 1, dtype=np.uint32)
+            else:
+                if (len(vertices) - 1) % 3:
+                    raise ValueError(
+                        "default cubic_bezier topology requires 3*N + 1 control points"
+                    )
+                segment_indices = np.arange(0, len(vertices) - 3, 3, dtype=np.uint32)
         segment_indices = np.asarray(segment_indices)
         if segment_indices.ndim != 1 or len(segment_indices) == 0:
             raise ValueError(
@@ -605,11 +623,20 @@ class Curve:
             )
         if not np.issubdtype(segment_indices.dtype, np.integer):
             raise ValueError("segment_indices must contain integers")
-        if np.any(segment_indices < 0) or np.any(segment_indices >= len(vertices) - 1):
+        if np.any(segment_indices < 0) or np.any(
+            segment_indices > len(vertices) - control_point_count
+        ):
+            control_point_label = "two" if control_point_count == 2 else "four"
             raise ValueError(
-                "each curve segment must reference two consecutive control points"
+                f"each {basis} segment must reference {control_point_label} "
+                "consecutive control points"
             )
 
+        self.basis = basis
+        self.primitive_type = primitive_type
+        self.control_point_count = control_point_count
+        self.sbt_offset = sbt_offset
+        self.geometry_type = geometry_type
         self.vertices = np.ascontiguousarray(vertices, dtype=np.float32)
         self.radii = np.ascontiguousarray(radii, dtype=np.float32)
         self.indices = np.ascontiguousarray(segment_indices, dtype=np.uint32)
@@ -766,9 +793,7 @@ class Scene:
 
     @property
     def curve_count(self) -> int:
-        return sum(
-            geometry.primitive_type == "round_linear" for geometry in self._meshes
-        )
+        return sum(geometry.primitive_type != "triangles" for geometry in self._meshes)
 
     @property
     def instance_count(self) -> int:
@@ -1725,7 +1750,7 @@ class Scene:
             len(m.indices) for m in self._meshes if m.primitive_type == "triangles"
         )
         total_curves = sum(
-            len(m.indices) for m in self._meshes if m.primitive_type == "round_linear"
+            len(m.indices) for m in self._meshes if m.primitive_type != "triangles"
         )
         logger.info(
             "Scene build complete: %d vertices, %d triangles, %d curve segments.",
@@ -1776,7 +1801,11 @@ class Scene:
                 build_input.numSbtRecords = 1
             else:
                 build_input = optix.BuildInputCurveArray(
-                    curveType=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
+                    curveType=(
+                        optix.PRIMITIVE_TYPE_ROUND_LINEAR
+                        if geometry.primitive_type == "round_linear"
+                        else optix.PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER
+                    ),
                     numPrimitives=len(geometry.indices),
                     vertexBuffers=[geometry.d_vertices.ptr],
                     numVertices=len(geometry.vertices),
@@ -1835,7 +1864,7 @@ class Scene:
         if geometry_index < 0 or geometry_index >= len(self._meshes):
             raise IndexError("curve geometry index is out of range")
         geometry = self._meshes[geometry_index]
-        if geometry.primitive_type != "round_linear" or not geometry.dynamic:
+        if geometry.primitive_type == "triangles" or not geometry.dynamic:
             raise ValueError("geometry must be a dynamic curve")
         if self._optix is None:
             return False
@@ -2234,7 +2263,7 @@ class Scene:
                 instance_material_ids[i] = np.uint32(inst.material_id)
             instance_render_prim_ids[i] = np.uint32(inst.mesh_index)
             instance_geometry_types[i] = np.uint32(
-                self._meshes[inst.mesh_index].primitive_type == "round_linear"
+                getattr(self._meshes[inst.mesh_index], "geometry_type", 0)
             )
         self._instance_material_ids = wp.array(
             instance_material_ids, dtype=wp.uint32, device="cuda"

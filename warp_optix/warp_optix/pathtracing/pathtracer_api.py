@@ -458,16 +458,18 @@ class PathTracerAPI:
         segment_indices: np.ndarray | None = None,
         material_id: int = 0,
         material_ids: np.ndarray | None = None,
+        basis: str = "linear",
     ) -> int:
-        """Create reusable native round-linear curve geometry.
+        """Create reusable native round linear or cubic Bézier curve geometry.
 
         Args:
             positions: ``(N, 3)`` control points.
             radii: Positive scalar radius or one radius per control point.
             segment_indices: Optional start control-point index per segment.
-                When omitted, all consecutive point pairs form a polyline.
-                Exclude boundary indices to store multiple disjoint strands in
-                one geometry object.
+                Linear curves default to all consecutive pairs. Cubic Bézier
+                curves default to starts ``0, 3, 6, ...`` for ``3*N+1`` points.
+                Explicit indices can pack multiple disjoint strands.
+            basis: ``"linear"`` or ``"cubic_bezier"``.
             material_id: Existing PBR material applied to every segment.
             material_ids: Optional material-table index per segment. When
                 supplied, these assignments take precedence over material_id.
@@ -487,6 +489,7 @@ class PathTracerAPI:
             segment_indices,
             material_id=mat_id,
             material_ids=_validate_material_ids(scene, material_ids),
+            basis=basis,
         )
         return int(scene.add_curve(curve))
 

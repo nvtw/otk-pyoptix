@@ -31,16 +31,27 @@ def test_hair_ball_geometry_is_disjoint_tapered_and_deterministic():
     points, radii, starts = generate_hair_ball(**kwargs)
     repeated = generate_hair_ball(**kwargs)
 
-    assert points.shape == (42, 3)
-    assert radii.shape == (42,)
+    assert points.shape == (112, 3)
+    assert radii.shape == (112,)
     assert starts.shape == (35,)
     np.testing.assert_array_equal(points, repeated[0])
     np.testing.assert_array_equal(radii, repeated[1])
     np.testing.assert_array_equal(starts, repeated[2])
-    np.testing.assert_allclose(np.linalg.norm(points[::6], axis=1), 0.8, atol=1.0e-6)
+    np.testing.assert_allclose(np.linalg.norm(points[::16], axis=1), 0.8, atol=1.0e-6)
     assert np.all(radii > 0.0)
-    assert np.all(radii[::6] > radii[5::6])
-    assert not np.any(np.isin(np.arange(5, 42, 6, dtype=np.uint32), starts))
+    assert np.all(radii[::16] > radii[15::16])
+    assert not np.any(np.isin(np.arange(15, 112, 16, dtype=np.uint32), starts))
+
+    curves = points.reshape(7, 16, 3)
+    for join in (3, 6, 9, 12):
+        left_tangent = curves[:, join] - curves[:, join - 1]
+        right_tangent = curves[:, join + 1] - curves[:, join]
+        np.testing.assert_allclose(left_tangent, right_tangent, atol=2.0e-7)
+
+    np.testing.assert_array_equal(
+        starts,
+        (np.arange(7, dtype=np.uint32)[:, None] * 16 + (0, 3, 6, 9, 12)).reshape(-1),
+    )
 
 
 def test_rainbow_materials_are_uniform_per_strand_and_flow_bottom_to_top():
@@ -51,7 +62,7 @@ def test_rainbow_materials_are_uniform_per_strand_and_flow_bottom_to_top():
     )
     slots = rainbow_segment_slots(points, segments)
     strand_slots = slots.reshape(hair_count, segments)
-    root_heights = points[:: segments + 1, 1]
+    root_heights = points[:: 3 * segments + 1, 1]
 
     assert slots.dtype == np.uint32
     assert slots.shape == (hair_count * segments,)
