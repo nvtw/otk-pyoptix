@@ -486,8 +486,9 @@ class MaterialManager:
         mat["occlusionStrength"] = 1.0
         mat["dispersion"] = 0.0
 
-        # Specular-Glossiness
-        mat["pbrDiffuseFactor"] = (1.0, 1.0, 1.0, 1.0)
+        # The compact material path stores base-color add and desaturation in
+        # the first two legacy specular-glossiness channels.
+        mat["pbrDiffuseFactor"] = (0.0, 0.0, 1.0, 1.0)
         mat["pbrSpecularFactor"] = (1.0, 1.0, 1.0)
         mat["usePbrSpecularGlossiness"] = 0
         mat["pbrGlossinessFactor"] = 1.0

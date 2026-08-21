@@ -19,6 +19,15 @@ def test_default_material_uses_neutral_ground_reflectance():
     )
 
 
+def test_programmatic_pbr_preserves_base_color_by_default():
+    manager = MaterialManager()
+
+    material_id = manager.add_pbr(base_color=(0.8, 0.1, 0.02))
+    material = manager.get_material_entries()[material_id]
+
+    assert material["pbrDiffuseFactor"][:2] == pytest.approx((0.0, 0.0))
+
+
 def test_gltf_material_configures_checker_overlay():
     manager = MaterialManager()
 
