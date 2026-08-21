@@ -75,9 +75,11 @@ layout (triangle_strip, max_vertices = 4) out;
 
 in vec3 vertex_color[2];
 out vec3 line_color;
+noperspective out float line_distance;
 
 uniform float inverse_aspect;
 uniform float line_width;
+uniform float antialias_width;
 
 void main()
 {
@@ -97,13 +99,16 @@ void main()
 
     vec2 right_screen = vec2(direction_screen.y, -direction_screen.x) / direction_length;
     vec2 right_ndc = vec2(right_screen.x * safe_aspect, right_screen.y);
-    vec2 offset = 0.5 * line_width * right_ndc;
+    float outer_width = 0.5 * line_width + antialias_width;
+    vec2 offset = outer_width * right_ndc;
     float start_depth = 2.0 * start_clip.z / start_clip.w - 1.0;
     float end_depth = 2.0 * end_clip.z / end_clip.w - 1.0;
     line_color = 0.5 * (vertex_color[0] + vertex_color[1]);
 
+    line_distance = -outer_width;
     gl_Position = vec4(start_ndc - offset, start_depth, 1.0); EmitVertex();
     gl_Position = vec4(end_ndc - offset, end_depth, 1.0); EmitVertex();
+    line_distance = outer_width;
     gl_Position = vec4(start_ndc + offset, start_depth, 1.0); EmitVertex();
     gl_Position = vec4(end_ndc + offset, end_depth, 1.0); EmitVertex();
     EndPrimitive();
@@ -114,6 +119,7 @@ void main()
 _FRAGMENT_SHADER = """
 #version 330 core
 in vec3 line_color;
+noperspective in float line_distance;
 out vec4 fragment_color;
 
 uniform sampler2D scene_depth;
@@ -123,6 +129,8 @@ uniform float camera_near;
 uniform float camera_far;
 uniform float depth_bias;
 uniform float alpha;
+uniform float line_width;
+uniform float antialias_width;
 
 void main()
 {
@@ -136,7 +144,16 @@ void main()
         if (gl_FragCoord.z > scene_window_depth + depth_bias)
             discard;
     }
-    fragment_color = vec4(line_color, alpha);
+    float coverage = 1.0;
+    if (antialias_width > 0.0) {
+        float half_width = 0.5 * line_width;
+        coverage = 1.0 - smoothstep(
+            half_width, half_width + antialias_width, abs(line_distance));
+    }
+    float output_alpha = alpha * coverage;
+    if (output_alpha <= 0.0)
+        discard;
+    fragment_color = vec4(line_color, output_alpha);
 }
 """
 
@@ -150,12 +167,15 @@ def _float_pointer(values: np.ndarray):
 def _opengl_projection(
     projection: np.ndarray, camera_near: float, camera_far: float
 ) -> np.ndarray:
-    """Convert path-tracer projection depth terms to standard RH zero-to-one."""
+    """Convert path-tracer projection to OpenGL's presentation convention."""
     near = float(camera_near)
     far = float(camera_far)
     if near <= 0.0 or far <= near:
         raise ValueError("camera_far must be greater than positive camera_near")
     result = np.array(projection, dtype=np.float32, copy=True).reshape(4, 4)
+    # Camera projection is vertically flipped for the OptiX/Vulkan image. The
+    # displayed image has already been oriented by the presentation pass.
+    result[1, 1] = abs(result[1, 1])
     result[2, 2] = far / (near - far)
     result[2, 3] = -1.0
     result[3, 2] = -(near * far) / (far - near)
@@ -181,6 +201,7 @@ class GLLineOverlay:
         device: str | wp.context.Device = "cuda",
         depth_buffer: wp.array | None = None,
         line_width: float = 1.5,
+        antialias_width: float = 1.0,
         alpha: float = 1.0,
         depth_bias: float = 2.0e-6,
         use_depth_test: bool = True,
@@ -191,6 +212,8 @@ class GLLineOverlay:
             raise ValueError("capacity must be positive")
         if float(line_width) <= 0.0:
             raise ValueError("line_width must be positive")
+        if float(antialias_width) < 0.0:
+            raise ValueError("antialias_width must be nonnegative")
         if not 0.0 <= float(alpha) <= 1.0:
             raise ValueError("alpha must be between zero and one")
 
@@ -201,6 +224,7 @@ class GLLineOverlay:
         self.device = wp.get_device(device)
         self.stream = stream or wp.get_stream(self.device)
         self.line_width = float(line_width)
+        self.antialias_width = float(antialias_width)
         self.alpha = float(alpha)
         self.depth_bias = float(depth_bias)
         self.active_count = 0
@@ -225,6 +249,7 @@ class GLLineOverlay:
                 "projection",
                 "inverse_aspect",
                 "line_width",
+                "antialias_width",
                 "scene_depth",
                 "viewport_size",
                 "camera_near",
@@ -455,6 +480,10 @@ class GLLineOverlay:
         )
         gl.glUniform1f(self._uniforms["inverse_aspect"], height / max(width, 1))
         gl.glUniform1f(self._uniforms["line_width"], self.line_width * 2.0 / height)
+        gl.glUniform1f(
+            self._uniforms["antialias_width"],
+            self.antialias_width * 2.0 / height,
+        )
         gl.glUniform2f(self._uniforms["viewport_size"], width, height)
         gl.glUniform1f(self._uniforms["camera_near"], float(camera_near))
         gl.glUniform1f(self._uniforms["camera_far"], float(camera_far))

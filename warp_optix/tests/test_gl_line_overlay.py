@@ -16,6 +16,7 @@ from warp_optix._runtime.gl_line_overlay import _opengl_projection
     [
         ({"capacity": 0}, "capacity"),
         ({"capacity": 1, "line_width": 0.0}, "line_width"),
+        ({"capacity": 1, "antialias_width": -0.1}, "antialias_width"),
         ({"capacity": 1, "alpha": 1.1}, "alpha"),
     ],
 )
@@ -82,3 +83,54 @@ def test_pathtracer_projection_depth_is_converted_to_opengl_clip_range():
 
     assert 0.0 < depth < 1.0
     assert converted[3, 2] < 0.0
+
+
+def test_pathtracer_projection_vertical_flip_is_removed_for_opengl_overlay():
+    near, far = 0.1, 100.0
+    projection = np.zeros((4, 4), dtype=np.float32)
+    projection[0, 0] = 1.0
+    projection[1, 1] = -1.0  # OptiX/Vulkan presentation convention.
+
+    converted = _opengl_projection(projection, near, far)
+    up = np.array((0.0, 1.0, -3.5, 1.0), dtype=np.float32)
+    clip = converted.T @ up
+
+    assert converted[1, 1] > 0.0
+    assert clip[1] / clip[3] > 0.0
+
+
+@pytest.mark.parametrize("linear_depth", [0.1, 0.125, 1.0, 3.5, 25.0, 99.9, 100.0])
+def test_optix_linear_depth_conversion_matches_projected_opengl_depth(linear_depth):
+    near, far = 0.1, 100.0
+    projection = np.zeros((4, 4), dtype=np.float32)
+    converted = _opengl_projection(projection, near, far)
+    point = np.array((0.0, 0.0, -linear_depth, 1.0), dtype=np.float32)
+    clip = converted.T @ point
+    projected_window_depth = clip[2] / clip[3]
+
+    shader_window_depth = far / (far - near) - (far * near) / (
+        (far - near) * linear_depth
+    )
+
+    assert shader_window_depth == pytest.approx(projected_window_depth, abs=2.0e-7)
+
+
+def test_pixel_occlusion_from_optix_linear_depth():
+    """Exercise foreground, occluded, equal-depth, and no-hit pixels."""
+    near, far = 0.1, 100.0
+    scene_linear_depth = np.array([[2.0, 2.0, 2.0], [5.0, 5.0, 0.0]], dtype=np.float64)
+    line_linear_depth = np.array([[1.5, 2.5, 2.0], [4.0, 6.0, 80.0]], dtype=np.float64)
+
+    def window_depth(depth):
+        return far / (far - near) - (far * near) / ((far - near) * depth)
+
+    scene_window_depth = np.zeros_like(scene_linear_depth)
+    hit = scene_linear_depth > 0.0
+    scene_window_depth[hit] = window_depth(scene_linear_depth[hit])
+    line_window_depth = window_depth(line_linear_depth)
+    visible = ~hit | (line_window_depth <= scene_window_depth + 2.0e-6)
+
+    np.testing.assert_array_equal(
+        visible,
+        np.array([[True, False, True], [True, False, True]]),
+    )

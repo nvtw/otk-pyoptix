@@ -55,6 +55,7 @@ def _parse_args():
     parser.add_argument("--ball-radius", type=float, default=0.8)
     parser.add_argument("--line-length", type=float, default=0.32)
     parser.add_argument("--line-width", type=float, default=1.5)
+    parser.add_argument("--line-antialias-width", type=float, default=1.0)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=0)
@@ -136,6 +137,7 @@ def main():
         device="cuda",
         depth_buffer=api.linear_depth_output,
         line_width=args.line_width,
+        antialias_width=args.line_antialias_width,
         stream=viewer.render_stream,
         use_depth_test=not args.no_depth_test,
     )
