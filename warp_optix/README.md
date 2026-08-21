@@ -160,6 +160,54 @@ shuffle completely between frames. Use `rebuild_gas=False` only when arrow IDs
 remain spatially coherent; refitting is correct in either case, but arbitrary
 reordering can substantially degrade the refitted BVH's traversal quality.
 
+For contact vectors that only need lines, `GLLineOverlay` avoids OptiX GAS and
+TLAS updates entirely. It follows Newton's wireframe renderer: a geometry
+shader expands `GL_LINES` into constant-pixel-width quads. A fixed-capacity VBO
+is registered with CUDA and updated directly from device arrays; the active
+count and ordering may change on every frame. The path tracer's positive
+view-space depth is transferred through a CUDA/OpenGL PBO to an R32F texture,
+so fragments behind path-traced geometry are discarded:
+
+```python
+overlay = wo.GLLineOverlay(
+    gl_viewer.gl,
+    capacity=max_contact_count,
+    device="cuda",
+    depth_buffer=api.linear_depth_output,
+    stream=gl_viewer.render_stream,
+)
+overlay.update_device(contact_starts_cuda, contact_ends_cuda, contact_colors_cuda)
+
+def draw_contacts():
+    camera = api.viewer.camera
+    overlay.draw(
+        camera.get_view_matrix(),
+        camera.get_projection_matrix(),
+        (gl_viewer.width, gl_viewer.height),
+        camera_near=camera.near,
+        camera_far=camera.far,
+    )
+
+gl_viewer.set_draw_overlay(draw_contacts)
+```
+
+Call `set_depth_buffer(api.linear_depth_output)` after a path-tracer resize and
+`destroy()` while the OpenGL context is current. See
+`examples_warp/example_warp_optix_pathtraced_contact_lines.py` for 100k
+contacts with a changing count and fully shuffled ordering.
+
+The high-level curve API also accepts native cubic Bézier segments. Their
+radius is a cubic Bézier scalar using the same parameter and control topology
+as position:
+
+```python
+curve = api.create_curve(control_points, radii, basis="cubic_bezier")
+api.create_instance(curve)
+```
+
+Omitting indices requires `3*N + 1` control points and creates starts
+`0, 3, 6, ...`; explicit starts can pack disjoint strands in one geometry.
+
 USD loads also retain a path-addressable transform hierarchy instead of
 baking composed transforms into vertices:
 

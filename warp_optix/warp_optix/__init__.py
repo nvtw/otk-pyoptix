@@ -24,6 +24,7 @@ _register_with_warp()
 from warp_optix._codegen import OptixKernelType as OptixKernelType
 from warp_optix._codegen import optix_kernel as optix_kernel
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer as GLInteropViewer
+from warp_optix._runtime.gl_line_overlay import GLLineOverlay as GLLineOverlay
 from warp_optix._runtime.hit_kernels import HitKernel as HitKernel
 from warp_optix._runtime.hit_kernels import HitKernelManager as HitKernelManager
 from warp_optix._runtime.runtime import LaunchParamsBuffer as LaunchParamsBuffer
@@ -46,6 +47,7 @@ from warp_optix._runtime.sbt import SbtResources as SbtResources
 
 __all__ = [
     "GLInteropViewer",
+    "GLLineOverlay",
     "AccelResources",
     "HitKernel",
     "HitKernelManager",

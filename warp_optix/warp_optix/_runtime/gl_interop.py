@@ -160,6 +160,10 @@ class OptixGLInteropViewer:
             return
         self._render_frame()
 
+    def set_draw_overlay(self, callback: Callable[[], None] | None) -> None:
+        """Set a callback drawn after the CUDA-produced image is presented."""
+        self._on_draw_overlay = callback
+
     def _update(self, _dt):
         self._render_frame()
 
