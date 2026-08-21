@@ -17,27 +17,27 @@ from example_warp_optix_basic_pathtracing import (
 from warp_optix.pathtracing import PathTracerAPI
 
 
-_RAINBOW_SRGB_U8 = np.array(
+_RAINBOW_SRGB = np.array(
     [
-        (229, 57, 53),
-        (244, 81, 30),
-        (251, 140, 0),
-        (255, 179, 0),
-        (253, 216, 53),
-        (192, 202, 51),
-        (124, 179, 66),
-        (0, 166, 90),
-        (0, 191, 165),
-        (0, 172, 193),
-        (30, 136, 229),
-        (94, 53, 177),
+        (0.86, 0.06, 0.02),
+        (0.92, 0.22, 0.01),
+        (0.94, 0.42, 0.01),
+        (0.88, 0.62, 0.01),
+        (0.78, 0.72, 0.01),
+        (0.46, 0.72, 0.01),
+        (0.03, 0.60, 0.12),
+        (0.00, 0.58, 0.38),
+        (0.00, 0.62, 0.68),
+        (0.00, 0.53, 0.88),
+        (0.06, 0.30, 0.88),
+        (0.22, 0.12, 0.78),
     ],
     dtype=np.float32,
 )
 
 
 def _srgb_to_linear(colors: np.ndarray) -> np.ndarray:
-    colors = np.asarray(colors, dtype=np.float32) / 255.0
+    colors = np.asarray(colors, dtype=np.float32)
     return np.where(
         colors <= 0.04045,
         colors / 12.92,
@@ -53,8 +53,8 @@ def rainbow_segment_slots(points: np.ndarray, segments: int) -> np.ndarray:
     azimuth = np.arctan2(directions[:, 2], directions[:, 0])
     position = np.clip(height + 0.045 * np.sin(3.0 * azimuth + 0.5), 0.0, 1.0)
     strand_slots = np.minimum(
-        (position * len(_RAINBOW_SRGB_U8)).astype(np.uint32),
-        len(_RAINBOW_SRGB_U8) - 1,
+        (position * len(_RAINBOW_SRGB)).astype(np.uint32),
+        len(_RAINBOW_SRGB) - 1,
     )
     return np.repeat(strand_slots, segments)
 
@@ -87,7 +87,7 @@ def _parse_args():
     parser.add_argument("--screenshot", type=Path, default=None)
     parser.add_argument("--title", default="Warp OptiX Path-traced Hair Ball")
     parser.add_argument("--camera-speed", type=float, default=1.0)
-    parser.add_argument("--exposure", type=float, default=0.32)
+    parser.add_argument("--exposure", type=float, default=0.68)
     parser.add_argument("--contrast", type=float, default=1.08)
     parser.add_argument("--saturation", type=float, default=1.1)
     parser.add_argument("--no-dlss-rr", action="store_true")
@@ -207,14 +207,14 @@ def main():
         [
             api.create_pbr_material(
                 color,
-                roughness=0.82,
+                roughness=0.42,
                 metallic=0.0,
-                ior=1.0,
-                specular=0.0,
-                clearcoat=0.0,
-                emissive=color * 0.45,
+                ior=1.46,
+                specular=0.75,
+                clearcoat=0.03,
+                clearcoat_roughness=0.4,
             )
-            for color in _srgb_to_linear(_RAINBOW_SRGB_U8)
+            for color in _srgb_to_linear(_RAINBOW_SRGB)
         ],
         dtype=np.uint32,
     )
@@ -223,7 +223,7 @@ def main():
     ]
     ground_mat = api.create_pbr_material((0.18, 0.2, 0.22), 0.78, 0.0)
     api.add_sphere((0.0, 0.0, 0.0), args.ball_radius * 1.005, 64, core_mat)
-    api.add_box((-3.5, -1.42, -3.5), (3.5, -1.38, 3.5), ground_mat)
+    api.add_box((-500.0, -1.42, -500.0), (500.0, -1.38, 500.0), ground_mat)
     curve_id = api.create_curve(
         points,
         radii,
