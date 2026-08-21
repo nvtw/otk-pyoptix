@@ -38,7 +38,7 @@ def _animate_contacts(
     count = base_starts.shape[0]
     # The odd multiplier is coprime to powers of two and produces a deliberately
     # chaotic source ordering as the offset changes every frame.
-    source = (line * 104729 + permutation_offset) % count
+    source = (line * 8191 + permutation_offset) % count
     start = base_starts[source]
     direction = base_ends[source] - start
     pulse = 0.82 + 0.18 * wp.sin(phase + wp.float32(source % 97) * 0.071)
@@ -59,6 +59,7 @@ def _parse_args():
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=0)
+    parser.add_argument("--no-depth-test", action="store_true")
     parser.add_argument("--camera-speed", type=float, default=1.0)
     parser.add_argument("--no-dlss-rr", action="store_true")
     parser.add_argument("--no-cuda-graphs", action="store_true")
@@ -136,6 +137,7 @@ def main():
         depth_buffer=api.linear_depth_output,
         line_width=args.line_width,
         stream=viewer.render_stream,
+        use_depth_test=not args.no_depth_test,
     )
 
     draw_seconds = 0.0

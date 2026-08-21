@@ -118,6 +118,7 @@ out vec4 fragment_color;
 
 uniform sampler2D scene_depth;
 uniform vec2 viewport_size;
+uniform bool use_scene_depth;
 uniform float camera_near;
 uniform float camera_far;
 uniform float depth_bias;
@@ -128,7 +129,7 @@ void main()
     vec2 uv = gl_FragCoord.xy / max(viewport_size, vec2(1.0));
     uv.y = 1.0 - uv.y;
     float linear_depth = texture(scene_depth, uv).r;
-    if (linear_depth > 0.0) {
+    if (use_scene_depth && linear_depth > 0.0) {
         float scene_window_depth = camera_far / (camera_far - camera_near)
             - (camera_far * camera_near)
                 / ((camera_far - camera_near) * linear_depth);
@@ -144,6 +145,22 @@ def _float_pointer(values: np.ndarray):
     return np.ascontiguousarray(values, dtype=np.float32).ctypes.data_as(
         ctypes.POINTER(ctypes.c_float)
     )
+
+
+def _opengl_projection(
+    projection: np.ndarray, camera_near: float, camera_far: float
+) -> np.ndarray:
+    """Convert path-tracer projection depth terms to standard RH zero-to-one."""
+    near = float(camera_near)
+    far = float(camera_far)
+    if near <= 0.0 or far <= near:
+        raise ValueError("camera_far must be greater than positive camera_near")
+    result = np.array(projection, dtype=np.float32, copy=True).reshape(4, 4)
+    result[2, 2] = far / (near - far)
+    result[2, 3] = -1.0
+    result[3, 2] = -(near * far) / (far - near)
+    result[3, 3] = 0.0
+    return result
 
 
 class GLLineOverlay:
@@ -166,6 +183,7 @@ class GLLineOverlay:
         line_width: float = 1.5,
         alpha: float = 1.0,
         depth_bias: float = 2.0e-6,
+        use_depth_test: bool = True,
         fallback_to_copy: bool = True,
         stream: wp.Stream | None = None,
     ):
@@ -187,6 +205,7 @@ class GLLineOverlay:
         self.depth_bias = float(depth_bias)
         self.active_count = 0
         self.depth_buffer = None
+        self.use_depth_test = bool(use_depth_test)
         self._depth_shape = None
         self._depth_texture = None
         self._depth_pbo = None
@@ -212,6 +231,7 @@ class GLLineOverlay:
                 "camera_far",
                 "depth_bias",
                 "alpha",
+                "use_scene_depth",
             )
         }
 
@@ -417,8 +437,13 @@ class GLLineOverlay:
         if width < 1 or height < 1:
             return
         self._upload_depth()
+        view_matrix = np.ascontiguousarray(view_matrix, dtype=np.float32)
+        projection_matrix = _opengl_projection(
+            projection_matrix, camera_near, camera_far
+        )
         gl = self.gl
         gl.glUseProgram(self._program.id)
+        gl.glUniform1i(self._uniforms["use_scene_depth"], self.use_depth_test)
         gl.glUniformMatrix4fv(
             self._uniforms["view"], 1, gl.GL_FALSE, _float_pointer(view_matrix)
         )

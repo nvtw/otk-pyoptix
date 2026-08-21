@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
+
 import pytest
 import warp as wp
 
 from warp_optix import GLLineOverlay
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer
+from warp_optix._runtime.gl_line_overlay import _opengl_projection
 
 
 @pytest.mark.parametrize(
@@ -62,3 +65,20 @@ def test_viewer_overlay_callback_can_be_replaced_or_disabled():
     assert viewer._on_draw_overlay is callback
     viewer.set_draw_overlay(None)
     assert viewer._on_draw_overlay is None
+
+
+def test_pathtracer_projection_depth_is_converted_to_opengl_clip_range():
+    near, far = 0.1, 100.0
+    projection = np.zeros((4, 4), dtype=np.float32)
+    projection[0, 0] = projection[1, 1] = 1.0
+    projection[2, 2] = far / (near - far)
+    projection[2, 3] = -1.0
+    projection[3, 2] = -(near * far) / (near - far)  # Path-tracer sign.
+
+    converted = _opengl_projection(projection, near, far)
+    point = np.array((0.0, 0.0, -3.5, 1.0), dtype=np.float32)
+    clip = converted.T @ point
+    depth = clip[2] / clip[3]
+
+    assert 0.0 < depth < 1.0
+    assert converted[3, 2] < 0.0
