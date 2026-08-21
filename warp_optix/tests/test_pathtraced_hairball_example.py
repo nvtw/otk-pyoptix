@@ -11,7 +11,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "examples_warp"))
 
-from example_warp_optix_pathtraced_hairball import generate_hair_ball  # noqa: E402
+from example_warp_optix_pathtraced_hairball import (  # noqa: E402
+    generate_hair_ball,
+    rainbow_segment_slots,
+)
 
 
 def test_hair_ball_geometry_is_disjoint_tapered_and_deterministic():
@@ -38,6 +41,23 @@ def test_hair_ball_geometry_is_disjoint_tapered_and_deterministic():
     assert np.all(radii > 0.0)
     assert np.all(radii[::6] > radii[5::6])
     assert not np.any(np.isin(np.arange(5, 42, 6, dtype=np.uint32), starts))
+
+
+def test_rainbow_materials_are_uniform_per_strand_and_flow_bottom_to_top():
+    hair_count = 2000
+    segments = 5
+    points, _radii, _starts = generate_hair_ball(
+        hair_count, segments, 0.8, 0.45, 0.06, 1.5, 0.012, 123
+    )
+    slots = rainbow_segment_slots(points, segments)
+    strand_slots = slots.reshape(hair_count, segments)
+    root_heights = points[:: segments + 1, 1]
+
+    assert slots.dtype == np.uint32
+    assert slots.shape == (hair_count * segments,)
+    assert np.all(strand_slots == strand_slots[:, :1])
+    np.testing.assert_array_equal(np.unique(slots), np.arange(12, dtype=np.uint32))
+    assert np.corrcoef(root_heights, strand_slots[:, 0])[0, 1] > 0.98
 
 
 @pytest.mark.parametrize("hair_count,segments", [(0, 5), (1, 1)])

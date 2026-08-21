@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from warp_optix.pathtracing import Curve, PathTracerAPI, Scene
+from warp_optix.pathtracing import Curve, Mesh, PathTracerAPI, Scene
 
 
 def _points():
@@ -33,6 +33,28 @@ def test_curve_accepts_scalar_radius_and_disjoint_segment_starts():
     np.testing.assert_allclose(curve.radii, 0.05)
 
 
+def test_curve_and_mesh_accept_one_material_id_per_primitive():
+    curve = Curve(_points(), radii=0.05, material_id=7, material_ids=(2, 4))
+    mesh = Mesh(
+        vertices=np.array(
+            ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
+            dtype=np.float32,
+        ),
+        indices=np.array(((0, 1, 2), (1, 3, 2)), dtype=np.uint32),
+        material_id=7,
+        material_ids=(3, 5),
+    )
+
+    np.testing.assert_array_equal(curve.material_ids, (2, 4))
+    np.testing.assert_array_equal(mesh.material_ids, (3, 5))
+
+
+@pytest.mark.parametrize("material_ids", [(1,), (1, 2, 3), (0.0, 1.0), (-1, 0)])
+def test_curve_rejects_invalid_per_segment_material_ids(material_ids):
+    with pytest.raises(ValueError, match="material_ids"):
+        Curve(_points(), radii=0.05, material_ids=material_ids)
+
+
 @pytest.mark.parametrize(
     ("radii", "segments", "message"),
     [
@@ -47,15 +69,32 @@ def test_curve_rejects_invalid_radii_and_segments(radii, segments, message):
         Curve(_points(), radii=radii, segment_indices=segments)
 
 
+def test_pathtracer_api_pbr_material_accepts_emissive_term():
+    scene = Scene(None)
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(_scene=scene)
+
+    material_id = api.create_pbr_material(
+        (0.2, 0.3, 0.4), roughness=0.8, metallic=0.0, emissive=(0.1, 0.2, 0.3)
+    )
+
+    material = scene.materials._materials[material_id]
+    np.testing.assert_allclose(material["pbrBaseColorFactor"][:3], (0.2, 0.3, 0.4))
+    np.testing.assert_allclose(material["emissiveFactor"], (0.1, 0.2, 0.3))
+
+
 def test_pathtracer_api_creates_reusable_curve_geometry():
     scene = Scene(None)
     api = PathTracerAPI.__new__(PathTracerAPI)
     api._viewer = SimpleNamespace(_scene=scene)
+    scene.materials.add_diffuse((0.2, 0.3, 0.4))
+    scene.materials.add_diffuse((0.8, 0.7, 0.6))
 
     curve_id = api.create_curve(
         _points(),
         radii=(0.04, 0.06, 0.08),
         segment_indices=(0, 1),
+        material_ids=(0, 1),
     )
     instance_id = api.create_instance(curve_id)
 
@@ -66,4 +105,5 @@ def test_pathtracer_api_creates_reusable_curve_geometry():
     assert scene.geometry_count == 1
     assert scene._instances[instance_id].mesh_index == curve_id
     assert scene._meshes[curve_id].material_id == 0
-    assert scene.materials.count == 1
+    np.testing.assert_array_equal(scene._meshes[curve_id].material_ids, (0, 1))
+    assert scene.materials.count == 2

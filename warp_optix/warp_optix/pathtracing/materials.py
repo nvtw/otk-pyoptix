@@ -286,10 +286,12 @@ class MaterialManager:
         u_subdiv: float = 0.0,
         v_subdiv: float = 0.0,
         base_color_scale: float = 0.75,
+        emissive: tuple = (0.0, 0.0, 0.0),
     ) -> int:
         """Add a PBR material with custom properties."""
         mat = self._create_default_material()
         mat["pbrBaseColorFactor"] = (*base_color, 1.0)
+        mat["emissiveFactor"] = tuple(float(v) for v in emissive)
         mat["pbrMetallicFactor"] = metallic
         mat["pbrRoughnessFactor"] = roughness
         mat["ior"] = ior

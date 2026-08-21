@@ -1007,7 +1007,7 @@ class PathTracingViewerBackend:
                 [
                     instance.material_id
                     if instance.material_id is not None
-                    else self._api.scene._meshes[instance.mesh_index].material_id
+                    else np.iinfo(np.uint32).max
                     for instance in self._api.scene._instances
                 ],
                 dtype=np.uint32,

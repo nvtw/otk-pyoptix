@@ -33,6 +33,23 @@ from .materials import MaterialManager
 
 logger = logging.getLogger(__name__)
 _MAX_TEXTURE_BUILD_WORKERS = 8
+NO_MATERIAL_OVERRIDE = np.uint32(np.iinfo(np.uint32).max)
+
+
+def _normalize_primitive_material_ids(
+    material_ids: np.ndarray | None, primitive_count: int, material_id: int
+) -> np.ndarray:
+    """Return one contiguous material-table index per geometry primitive."""
+    if material_ids is None:
+        return np.full(primitive_count, int(material_id), dtype=np.uint32)
+    values = np.asarray(material_ids)
+    if values.ndim != 1 or values.shape[0] != primitive_count:
+        raise ValueError(f"material_ids must have shape ({primitive_count},)")
+    if not np.issubdtype(values.dtype, np.integer):
+        raise ValueError("material_ids must contain integers")
+    if np.any(values < 0):
+        raise ValueError("material_ids must be non-negative")
+    return np.ascontiguousarray(values, dtype=np.uint32)
 
 
 def _texture_worker_count(item_count: int) -> int:
@@ -378,6 +395,7 @@ class Mesh:
         texcoords: np.ndarray = None,
         texcoords1: np.ndarray = None,
         material_id: int = 0,
+        material_ids: np.ndarray | None = None,
     ):
         """
         Create a mesh.
@@ -404,6 +422,9 @@ class Mesh:
         self.texcoords1 = np.ascontiguousarray(texcoords1, dtype=np.float32)
 
         self.material_id = material_id
+        self.material_ids = _normalize_primitive_material_ids(
+            material_ids, len(self.indices), self.material_id
+        )
 
         # Tangents for normal mapping (computed from UVs; used when normalTexIndex >= 0)
         self.tangents = self._compute_tangents(
@@ -531,10 +552,9 @@ class Mesh:
             self.texcoords1.flatten(), dtype=wp.float32, device="cuda"
         )
 
-        # Per-triangle material IDs
-        num_triangles = len(self.indices)
-        material_ids = np.full(num_triangles, self.material_id, dtype=np.uint32)
-        self.d_material_ids = wp.array(material_ids, dtype=wp.uint32, device="cuda")
+        self.d_material_ids = wp.array(
+            self.material_ids, dtype=wp.uint32, device="cuda"
+        )
 
 
 class Curve:
@@ -554,6 +574,7 @@ class Curve:
         radii: np.ndarray | float,
         segment_indices: np.ndarray | None = None,
         material_id: int = 0,
+        material_ids: np.ndarray | None = None,
     ):
         vertices = np.asarray(vertices, dtype=np.float32)
         if vertices.ndim != 2 or vertices.shape[1] != 3:
@@ -589,6 +610,9 @@ class Curve:
         self.radii = np.ascontiguousarray(radii, dtype=np.float32)
         self.indices = np.ascontiguousarray(segment_indices, dtype=np.uint32)
         self.material_id = int(material_id)
+        self.material_ids = _normalize_primitive_material_ids(
+            material_ids, len(self.indices), self.material_id
+        )
         self.d_vertices = None
         self.d_widths = None
         self.d_indices = None
@@ -1949,9 +1973,7 @@ class Scene:
                 if is_triangle_mesh
                 else np.empty(0, dtype=np.float32)
             )
-            primitive_material_ids = np.full(
-                len(geometry.indices), geometry.material_id, dtype=np.uint32
-            )
+            primitive_material_ids = geometry.material_ids
 
             rp["indexOffset"] = np.uint32(index_offset)
             rp["materialIdOffset"] = np.uint32(material_offset)
@@ -2083,16 +2105,14 @@ class Scene:
         self._scene_desc = wp.array(sd_bytes, dtype=wp.uint8, device="cuda")
 
         # Build per-instance material ID lookup buffer.
-        instance_material_ids = np.zeros(len(self._instances), dtype=np.uint32)
+        instance_material_ids = np.full(
+            len(self._instances), NO_MATERIAL_OVERRIDE, dtype=np.uint32
+        )
         instance_render_prim_ids = np.zeros(len(self._instances), dtype=np.uint32)
         instance_geometry_types = np.zeros(len(self._instances), dtype=np.uint32)
         for i, inst in enumerate(self._instances):
-            material_id = (
-                self._meshes[inst.mesh_index].material_id
-                if inst.material_id is None
-                else inst.material_id
-            )
-            instance_material_ids[i] = np.uint32(material_id)
+            if inst.material_id is not None:
+                instance_material_ids[i] = np.uint32(inst.material_id)
             instance_render_prim_ids[i] = np.uint32(inst.mesh_index)
             instance_geometry_types[i] = np.uint32(
                 self._meshes[inst.mesh_index].primitive_type == "round_linear"

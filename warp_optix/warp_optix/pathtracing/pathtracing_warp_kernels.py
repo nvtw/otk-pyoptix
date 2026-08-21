@@ -3932,7 +3932,9 @@ def _resolve_material_id(
     if inst_id >= 0 and inst_id < int(params.instance_count):
         instance_material_ids = params.instance_material_ids
         if instance_material_ids.shape[0] > 0:
-            material_id = wp.int32(instance_material_ids[inst_id])
+            override_id = instance_material_ids[inst_id]
+            if override_id != wp.uint32(4294967295):
+                material_id = wp.int32(override_id)
     return wp.clamp(material_id, 0, int(params.material_count) - 1)
 
 
@@ -4240,7 +4242,9 @@ def _evaluate_surface_hit(
     material_id = int(tri_mats[mat_base + tri_id]) if tri_count > 0 else 0
     if params.instance_material_ids.shape[0] > 0:
         inst_mats = params.instance_material_ids
-        material_id = int(inst_mats[inst_id])
+        override_id = inst_mats[inst_id]
+        if override_id != wp.uint32(4294967295):
+            material_id = int(override_id)
     material_id = wp.clamp(material_id, 0, int(params.material_count) - 1)
     materials = params.compact_materials
     mat = materials[material_id]

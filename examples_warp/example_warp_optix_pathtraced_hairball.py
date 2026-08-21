@@ -17,6 +17,48 @@ from example_warp_optix_basic_pathtracing import (
 from warp_optix.pathtracing import PathTracerAPI
 
 
+_RAINBOW_SRGB_U8 = np.array(
+    [
+        (229, 57, 53),
+        (244, 81, 30),
+        (251, 140, 0),
+        (255, 179, 0),
+        (253, 216, 53),
+        (192, 202, 51),
+        (124, 179, 66),
+        (0, 166, 90),
+        (0, 191, 165),
+        (0, 172, 193),
+        (30, 136, 229),
+        (94, 53, 177),
+    ],
+    dtype=np.float32,
+)
+
+
+def _srgb_to_linear(colors: np.ndarray) -> np.ndarray:
+    colors = np.asarray(colors, dtype=np.float32) / 255.0
+    return np.where(
+        colors <= 0.04045,
+        colors / 12.92,
+        ((colors + 0.055) / 1.055) ** 2.4,
+    )
+
+
+def rainbow_segment_slots(points: np.ndarray, segments: int) -> np.ndarray:
+    """Assign one palette slot per segment using gently rippled height bands."""
+    roots = points[:: segments + 1]
+    directions = roots / np.linalg.norm(roots, axis=1, keepdims=True)
+    height = 0.5 * (directions[:, 1] + 1.0)
+    azimuth = np.arctan2(directions[:, 2], directions[:, 0])
+    position = np.clip(height + 0.045 * np.sin(3.0 * azimuth + 0.5), 0.0, 1.0)
+    strand_slots = np.minimum(
+        (position * len(_RAINBOW_SRGB_U8)).astype(np.uint32),
+        len(_RAINBOW_SRGB_U8) - 1,
+    )
+    return np.repeat(strand_slots, segments)
+
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -45,7 +87,7 @@ def _parse_args():
     parser.add_argument("--screenshot", type=Path, default=None)
     parser.add_argument("--title", default="Warp OptiX Path-traced Hair Ball")
     parser.add_argument("--camera-speed", type=float, default=1.0)
-    parser.add_argument("--exposure", type=float, default=0.68)
+    parser.add_argument("--exposure", type=float, default=0.32)
     parser.add_argument("--contrast", type=float, default=1.08)
     parser.add_argument("--saturation", type=float, default=1.1)
     parser.add_argument("--no-dlss-rr", action="store_true")
@@ -160,12 +202,35 @@ def main():
     api.tonemap_contrast = args.contrast
     api.tonemap_saturation = args.saturation
 
-    core_mat = api.create_pbr_material((0.12, 0.025, 0.012), 0.72, 0.0)
-    hair_mat = api.create_pbr_material((0.42, 0.075, 0.018), 0.36, 0.0, clearcoat=0.16)
+    core_mat = api.create_pbr_material((0.025, 0.03, 0.04), 0.72, 0.0)
+    palette_materials = np.array(
+        [
+            api.create_pbr_material(
+                color,
+                roughness=0.82,
+                metallic=0.0,
+                ior=1.0,
+                specular=0.0,
+                clearcoat=0.0,
+                emissive=color * 0.45,
+            )
+            for color in _srgb_to_linear(_RAINBOW_SRGB_U8)
+        ],
+        dtype=np.uint32,
+    )
+    segment_material_ids = palette_materials[
+        rainbow_segment_slots(points, args.segments)
+    ]
     ground_mat = api.create_pbr_material((0.18, 0.2, 0.22), 0.78, 0.0)
     api.add_sphere((0.0, 0.0, 0.0), args.ball_radius * 1.005, 64, core_mat)
     api.add_box((-3.5, -1.42, -3.5), (3.5, -1.38, 3.5), ground_mat)
-    curve_id = api.create_curve(points, radii, segment_indices, hair_mat)
+    curve_id = api.create_curve(
+        points,
+        radii,
+        segment_indices,
+        material_id=int(palette_materials[0]),
+        material_ids=segment_material_ids,
+    )
     api.create_instance(curve_id)
     api.build_scene()
     api.set_use_procedural_sky(True)

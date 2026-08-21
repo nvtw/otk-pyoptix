@@ -34,6 +34,19 @@ from .scene import Curve, Mesh
 logger = logging.getLogger(__name__)
 
 
+def _validate_material_ids(scene, material_ids: np.ndarray | None):
+    if material_ids is None:
+        return None
+    values = np.asarray(material_ids)
+    if not np.issubdtype(values.dtype, np.integer):
+        raise ValueError("material_ids must contain integers")
+    if np.any(values < 0) or np.any(values >= scene.materials.count):
+        raise ValueError(
+            f"material_ids must reference the {scene.materials.count} existing materials"
+        )
+    return values
+
+
 class PathTracerAPI:
     """High-level API for driving the OptiX path tracer directly from Python."""
 
@@ -410,6 +423,7 @@ class PathTracerAPI:
         normals: np.ndarray | None = None,
         uvs: np.ndarray | None = None,
         material_id: int = 0,
+        material_ids: np.ndarray | None = None,
     ) -> int:
         scene = self._require_scene()
         if scene.materials.count == 0:
@@ -423,6 +437,7 @@ class PathTracerAPI:
             normals=None if normals is None else np.asarray(normals, dtype=np.float32),
             texcoords=None if uvs is None else np.asarray(uvs, dtype=np.float32),
             material_id=mat_id,
+            material_ids=_validate_material_ids(scene, material_ids),
         )
         return int(scene.add_mesh(mesh))
 
@@ -432,6 +447,7 @@ class PathTracerAPI:
         radii: np.ndarray | float,
         segment_indices: np.ndarray | None = None,
         material_id: int = 0,
+        material_ids: np.ndarray | None = None,
     ) -> int:
         """Create reusable native round-linear curve geometry.
 
@@ -443,6 +459,8 @@ class PathTracerAPI:
                 Exclude boundary indices to store multiple disjoint strands in
                 one geometry object.
             material_id: Existing PBR material applied to every segment.
+            material_ids: Optional material-table index per segment. When
+                supplied, these assignments take precedence over material_id.
 
         The returned geometry ID works with the same instance, transform,
         visibility, and material-override methods as a mesh ID.
@@ -453,7 +471,13 @@ class PathTracerAPI:
         mat_id = int(material_id)
         if mat_id < 0 or mat_id >= scene.materials.count:
             mat_id = 0
-        curve = Curve(positions, radii, segment_indices, material_id=mat_id)
+        curve = Curve(
+            positions,
+            radii,
+            segment_indices,
+            material_id=mat_id,
+            material_ids=_validate_material_ids(scene, material_ids),
+        )
         return int(scene.add_curve(curve))
 
     def create_instance(self, mesh_id: int) -> int:
@@ -566,6 +590,7 @@ class PathTracerAPI:
         u_subdiv: float = 0.0,
         v_subdiv: float = 0.0,
         base_color_scale: float = 0.75,
+        emissive: Iterable[float] = (0.0, 0.0, 0.0),
     ) -> int:
         scene = self._require_scene()
         return int(
@@ -580,6 +605,7 @@ class PathTracerAPI:
                 u_subdiv=float(u_subdiv),
                 v_subdiv=float(v_subdiv),
                 base_color_scale=float(base_color_scale),
+                emissive=tuple(float(v) for v in emissive),
             )
         )
 
