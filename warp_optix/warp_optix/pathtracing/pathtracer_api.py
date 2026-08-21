@@ -585,6 +585,14 @@ class PathTracerAPI:
             raise ValueError("arrow batch geometry is no longer available")
         return curve
 
+    def _invalidate_optix_launch_graph_for_accel_update(self) -> None:
+        """Release a captured launch graph before changing OptiX acceleration data."""
+        renderer = self._viewer
+        if renderer._optix_launch_graph is not None:
+            wp.synchronize_stream(renderer._render_stream)
+        renderer._optix_launch_graph = None
+        renderer._optix_graph_warmed = False
+
     def update_arrow_batch(
         self,
         batch: ArrowBatch,
@@ -638,6 +646,7 @@ class PathTracerAPI:
                 dest_offset=curve._packed_material_offset,
                 count=len(curve.material_ids),
             )
+        self._invalidate_optix_launch_graph_for_accel_update()
         scene.update_curve_accel(
             batch.geometry_id,
             rebuild_gas=bool(rebuild_gas),
@@ -767,6 +776,7 @@ class PathTracerAPI:
                     device=starts.device,
                     stream=stream,
                 )
+        self._invalidate_optix_launch_graph_for_accel_update()
         scene.update_curve_accel(
             batch.geometry_id,
             rebuild_gas=bool(rebuild_gas),

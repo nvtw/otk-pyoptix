@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import warp as wp
 
 from warp_optix.pathtracing import Curve, Mesh, PathTracerAPI, Scene
 
@@ -179,6 +180,25 @@ def test_pathtracer_api_creates_one_dynamic_curve_instance_for_arrow_batch():
     np.testing.assert_array_equal(curve.indices, (0, 2, 4, 6, 8, 10, 12, 14))
     np.testing.assert_array_equal(curve.material_ids, (0, 0, 1, 1, 0, 0, 1, 1))
     np.testing.assert_allclose(curve.radii, 0.0)
+
+
+def test_accel_update_invalidates_captured_optix_launch_graph(monkeypatch):
+    graph = object()
+    stream = object()
+    synchronized = []
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(
+        _optix_launch_graph=graph,
+        _optix_graph_warmed=True,
+        _render_stream=stream,
+    )
+    monkeypatch.setattr(wp, "synchronize_stream", synchronized.append)
+
+    api._invalidate_optix_launch_graph_for_accel_update()
+
+    assert synchronized == [stream]
+    assert api._viewer._optix_launch_graph is None
+    assert not api._viewer._optix_graph_warmed
 
 
 def test_host_arrow_batch_update_builds_shaft_tip_and_clears_inactive_slots():
