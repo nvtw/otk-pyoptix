@@ -314,7 +314,7 @@ class PathTracingViewer:
         self.sky_redblueshift = 0.05
         self.sky_saturation = 1.0
         self.sky_horizon_height = 0.0
-        self.sky_ground_color = (0.4, 0.35, 0.3)
+        self.sky_ground_color = (0.4, 0.4, 0.4)
         self.sky_horizon_blur = 1.0
         self.sky_night_color = (0.0, 0.0, 0.0)
         self.sky_sun_disk_intensity = 1.0

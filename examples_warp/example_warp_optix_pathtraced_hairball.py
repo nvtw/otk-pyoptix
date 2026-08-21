@@ -87,7 +87,7 @@ def _parse_args():
     parser.add_argument("--screenshot", type=Path, default=None)
     parser.add_argument("--title", default="Warp OptiX Path-traced Hair Ball")
     parser.add_argument("--camera-speed", type=float, default=1.0)
-    parser.add_argument("--exposure", type=float, default=0.68)
+    parser.add_argument("--exposure", type=float, default=0.32)
     parser.add_argument("--contrast", type=float, default=1.08)
     parser.add_argument("--saturation", type=float, default=1.1)
     parser.add_argument("--no-dlss-rr", action="store_true")
@@ -207,12 +207,12 @@ def main():
         [
             api.create_pbr_material(
                 color,
-                roughness=0.42,
+                roughness=0.7,
                 metallic=0.0,
                 ior=1.46,
-                specular=0.75,
-                clearcoat=0.03,
-                clearcoat_roughness=0.4,
+                specular=0.15,
+                clearcoat=0.0,
+                base_color_scale=1.0,
             )
             for color in _srgb_to_linear(_RAINBOW_SRGB)
         ],
@@ -239,7 +239,6 @@ def main():
         multiplier=1.25,
         haze=0.18,
         saturation=0.9,
-        ground_color=(0.12, 0.13, 0.15),
         sun_disk_intensity=1.2,
         sun_glow_intensity=0.8,
     )
