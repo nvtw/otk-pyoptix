@@ -346,8 +346,6 @@ def main():
     render_width = int(args.width)
     render_height = int(args.height)
     last_elapsed = 0.0
-    fps_sample_start = 0.0
-    fps_sample_frame = 0
 
     def _on_resize(width: int, height: int):
         nonlocal render_width, render_height, last_elapsed
@@ -368,8 +366,8 @@ def main():
     # Attach Newton-style free camera controls to the viewer window.
     controller = FreeCameraController(viewer, api, cam_pos, cam_yaw, cam_pitch, cam_fov, args.camera_speed)
 
-    def _render(mapped_image: wp.array, frame_idx: int, elapsed_sec: float):
-        nonlocal fps_sample_frame, fps_sample_start, last_elapsed
+    def _render(mapped_image: wp.array, _frame_idx: int, elapsed_sec: float):
+        nonlocal last_elapsed
         dt = elapsed_sec - last_elapsed
         last_elapsed = elapsed_sec
         controller.update(dt)
@@ -381,12 +379,6 @@ def main():
             device="cuda",
         )
 
-        fps_elapsed = elapsed_sec - fps_sample_start
-        if fps_elapsed >= 0.5:
-            fps = float(frame_idx - fps_sample_frame) / fps_elapsed
-            viewer.window.set_caption(f"{args.title} — {fps:.1f} FPS")
-            fps_sample_start = elapsed_sec
-            fps_sample_frame = frame_idx
 
     print(f"[optix] loaded glTF scene: {scene_gltf}")
     viewer.run(_render, max_frames=args.max_frames)

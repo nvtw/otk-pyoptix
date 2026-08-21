@@ -10,6 +10,26 @@ import warp as wp
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer
 
 
+def test_fps_caption_updates_at_requested_interval():
+    captions = []
+    viewer = OptixGLInteropViewer.__new__(OptixGLInteropViewer)
+    viewer._base_title = "Example"
+    viewer._show_fps = True
+    viewer._fps_update_interval = 0.5
+    viewer._fps_sample_time = 10.0
+    viewer._fps_sample_frame = 4
+    viewer.frame_index = 14
+    viewer.window = SimpleNamespace(set_caption=captions.append)
+
+    viewer._update_fps_caption(10.49)
+    assert captions == []
+
+    viewer._update_fps_caption(10.5)
+    assert captions == ["Example — 20.0 FPS"]
+    assert viewer._fps_sample_time == 10.5
+    assert viewer._fps_sample_frame == 14
+
+
 def test_render_stream_completes_before_gl_consumes_pbo():
     events = []
 
@@ -30,6 +50,7 @@ def test_render_stream_completes_before_gl_consumes_pbo():
     viewer.height = 4
     viewer.frame_index = 3
     viewer.start_time = time.perf_counter()
+    viewer._show_fps = False
     viewer.max_frames = 0
     viewer._render_callback = lambda mapped, frame, elapsed: events.append(
         ("render", mapped, frame, elapsed)

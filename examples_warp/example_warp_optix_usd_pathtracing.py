@@ -335,8 +335,6 @@ def main():
     )
     render_width, render_height = int(args.width), int(args.height)
     last_elapsed = 0.0
-    fps_sample_start = 0.0
-    fps_sample_frame = 0
 
     def _on_resize(width: int, height: int):
         nonlocal render_width, render_height, last_elapsed
@@ -357,8 +355,8 @@ def main():
         viewer, api, cam_pos, cam_yaw, cam_pitch, cam_fov, camera_speed
     )
 
-    def _render(mapped_image: wp.array, frame_idx: int, elapsed_sec: float):
-        nonlocal fps_sample_frame, fps_sample_start, last_elapsed
+    def _render(mapped_image: wp.array, _frame_idx: int, elapsed_sec: float):
+        nonlocal last_elapsed
         controller.update(elapsed_sec - last_elapsed)
         last_elapsed = elapsed_sec
         api.render_frame()
@@ -368,11 +366,6 @@ def main():
             inputs=[api.viewer.tonemapped_output, mapped_image, render_width, render_height],
             device="cuda",
         )
-        fps_elapsed = elapsed_sec - fps_sample_start
-        if fps_elapsed >= 0.5:
-            fps = float(frame_idx - fps_sample_frame) / fps_elapsed
-            viewer.window.set_caption(f"{args.title} — {fps:.1f} FPS")
-            fps_sample_start, fps_sample_frame = elapsed_sec, frame_idx
 
     print(f"[optix] loaded USD scene: {scene_usd}")
     print(

@@ -221,9 +221,39 @@ def main():
     segment_material_ids = palette_materials[
         rainbow_segment_slots(points, args.segments)
     ]
-    ground_mat = api.create_pbr_material((0.18, 0.2, 0.22), 0.78, 0.0)
+    ground_size = 1000.0
+    ground_height = -1.38
+    ground_mat = api.create_pbr_material(
+        _srgb_to_linear(np.array((0.7, 0.7, 0.7), dtype=np.float32)),
+        roughness=0.8,
+        metallic=0.0,
+        ior=1.46,
+        specular=0.75,
+        clearcoat=0.03,
+        clearcoat_roughness=0.4,
+        u_subdiv=ground_size,
+        v_subdiv=ground_size,
+    )
     api.add_sphere((0.0, 0.0, 0.0), args.ball_radius * 1.005, 64, core_mat)
-    api.add_box((-500.0, -1.42, -500.0), (500.0, -1.38, 500.0), ground_mat)
+    ground_half_extent = 0.5 * ground_size
+    ground_id = api.create_mesh(
+        np.array(
+            [
+                (-ground_half_extent, ground_height, -ground_half_extent),
+                (ground_half_extent, ground_height, -ground_half_extent),
+                (ground_half_extent, ground_height, ground_half_extent),
+                (-ground_half_extent, ground_height, ground_half_extent),
+            ],
+            dtype=np.float32,
+        ),
+        np.array(((0, 2, 1), (0, 3, 2)), dtype=np.uint32),
+        normals=np.tile((0.0, 1.0, 0.0), (4, 1)).astype(np.float32),
+        uvs=np.array(
+            ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)), dtype=np.float32
+        ),
+        material_id=ground_mat,
+    )
+    api.create_instance(ground_id)
     curve_id = api.create_curve(
         points,
         radii,

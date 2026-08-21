@@ -54,6 +54,8 @@ class OptixGLInteropViewer:
         vsync: bool = False,
         fallback_to_copy: bool = True,
         render_stream: wp.Stream | None = None,
+        show_fps: bool = True,
+        fps_update_interval: float = 0.5,
     ):
         import pyglet
         from pyglet import gl
@@ -66,6 +68,11 @@ class OptixGLInteropViewer:
         self.gl = gl
         self.frame_index = 0
         self.start_time = time.perf_counter()
+        self._base_title = str(title)
+        self._show_fps = bool(show_fps)
+        self._fps_update_interval = max(float(fps_update_interval), 0.05)
+        self._fps_sample_time = self.start_time
+        self._fps_sample_frame = 0
         self.max_frames = 0
         self.closed = False
         self._update_scheduled = False
@@ -178,8 +185,20 @@ class OptixGLInteropViewer:
         self.window.flip()
 
         self.frame_index += 1
+        self._update_fps_caption(time.perf_counter())
         if self.max_frames > 0 and self.frame_index >= self.max_frames:
             self.pyglet.app.exit()
+
+    def _update_fps_caption(self, now: float):
+        if not self._show_fps:
+            return
+        elapsed = float(now) - self._fps_sample_time
+        if elapsed < self._fps_update_interval:
+            return
+        fps = float(self.frame_index - self._fps_sample_frame) / elapsed
+        self.window.set_caption(f"{self._base_title} — {fps:.1f} FPS")
+        self._fps_sample_time = float(now)
+        self._fps_sample_frame = self.frame_index
 
     def _on_draw(self):
         gl = self.gl
