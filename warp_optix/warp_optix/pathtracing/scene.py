@@ -2007,6 +2007,12 @@ class Scene:
                 self._gas_handles, dtype=np.uint64
             )[mesh_indices]
             self._instance_buffer.assign(inst_np.view(np.uint8).reshape(-1))
+            if self._device_instance_transforms is not None:
+                # Motion-vector reconstruction consumes this compact transform
+                # buffer, independently of the OptiX instance records above.
+                # Keep it current for host-driven transform/TLAS updates too.
+                self._device_instance_transforms.assign(inst_np["transform"])
+
             self._instance_records_dirty = False
 
         build_options = optix.AccelBuildOptions(

@@ -359,8 +359,9 @@ class PathTracerAPI:
 
     def rebuild_tlas(self):
         scene = self._require_scene()
-        # Transform-only updates retain RNG progression and DLSS history; the
-        # renderer supplies motion vectors from its previous transform snapshot.
+        # A captured OptiX launch retains acceleration-structure state. Keep
+        # temporal history, but force an ordinary launch after each TLAS update.
+        self._invalidate_optix_launch_graph_for_accel_update()
         scene.rebuild_tlas()
 
     def clear_scene(self):

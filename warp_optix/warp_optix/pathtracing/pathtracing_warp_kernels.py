@@ -2753,26 +2753,18 @@ def _make_invalid_shaded_hit() -> ShadedHitData:
 
 
 @wp.func
-def _orient_shaded_hit_for_incident_side(
+def _set_incident_medium_for_hit(
     hit: ShadedHitData, front_face: wp.uint32
 ) -> ShadedHitData:
-    """Orient a material frame toward the incident ray's side of the surface.
-
-    Material evaluation constructs the frame from the authored front face. A
-    two-sided hit needs the complete frame reversed, not just its IORs, or the
-    BSDF and geometric ray offset continue to behave as if the back face were
-    culled. Keeping T and reversing B together with the normals preserves the
-    tangent-frame handedness used by normal maps.
-    """
-    if hit.valid != wp.uint32(0) and front_face == wp.uint32(0):
-        hit.normal = -hit.normal
-        hit.Ng = -hit.Ng
-        hit.B = -hit.B
-        hit.Nc = -hit.Nc
-        if hit.is_thin_walled == 0:
-            exterior_ior = hit.ior1
-            hit.ior1 = hit.ior2
-            hit.ior2 = exterior_ior
+    """Select the incident medium after geometry has face-forwarded its frame."""
+    if (
+        hit.valid != wp.uint32(0)
+        and front_face == wp.uint32(0)
+        and hit.is_thin_walled == 0
+    ):
+        exterior_ior = hit.ior1
+        hit.ior1 = hit.ior2
+        hit.ior2 = exterior_ior
     return hit
 
 
@@ -3196,9 +3188,7 @@ def primary_raygen(params: PathtraceLaunchParams):
             hit_uv1,
             hit_barycentrics[0],
         )
-        pbr = _orient_shaded_hit_for_incident_side(
-            pbr, _payload_get_front_face(payload)
-        )
+        pbr = _set_incident_medium_for_hit(pbr, _payload_get_front_face(payload))
 
         # C++ line 253: origin = offsetRay(hitPos, pbrMat.Ng) — use geometric normal
         origin = _offset_ray(hit_pos, pbr.Ng)
@@ -3649,7 +3639,7 @@ def primary_raygen(params: PathtraceLaunchParams):
             sec_uv1,
             _payload_get_barycentrics(sec_payload)[0],
         )
-        sec_pbr = _orient_shaded_hit_for_incident_side(
+        sec_pbr = _set_incident_medium_for_hit(
             sec_pbr, _payload_get_front_face(sec_payload)
         )
 

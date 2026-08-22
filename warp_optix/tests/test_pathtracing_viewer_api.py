@@ -657,6 +657,8 @@ def test_tlas_refit_preserves_temporal_sequence():
         _scene=scene,
         sample_index=17,
         frame_index=9,
+        _optix_launch_graph=None,
+        _optix_graph_warmed=True,
     )
 
     api.rebuild_tlas()
@@ -664,6 +666,8 @@ def test_tlas_refit_preserves_temporal_sequence():
     assert scene.refit_count == 1
     assert api._viewer.sample_index == 17
     assert api._viewer.frame_index == 9
+    assert api._viewer._optix_launch_graph is None
+    assert api._viewer._optix_graph_warmed is False
 
 
 def test_scene_rebuild_resets_temporal_history():

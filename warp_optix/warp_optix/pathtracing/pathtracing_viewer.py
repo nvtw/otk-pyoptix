@@ -875,7 +875,9 @@ class PathTracingViewer:
         # First frame (or after resize): prev == current so motion is zero.
         if not self._prev_instance_transforms_valid:
             wp.copy(
-                self._prev_instance_transforms_buffer, self._instance_transforms_buffer
+                self._prev_instance_transforms_buffer,
+                self._instance_transforms_buffer,
+                stream=self._render_stream,
             )
             self._prev_instance_transforms_valid = True
 
@@ -893,7 +895,9 @@ class PathTracingViewer:
             == self._prev_instance_transforms_buffer.shape
         ):
             wp.copy(
-                self._prev_instance_transforms_buffer, self._instance_transforms_buffer
+                self._prev_instance_transforms_buffer,
+                self._instance_transforms_buffer,
+                stream=self._render_stream,
             )
 
     def _create_pipeline(self):
