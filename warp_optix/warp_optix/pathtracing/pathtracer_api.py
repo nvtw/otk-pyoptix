@@ -447,6 +447,7 @@ class PathTracerAPI:
         uvs: np.ndarray | None = None,
         material_id: int = 0,
         material_ids: np.ndarray | None = None,
+        dynamic: bool = False,
     ) -> int:
         scene = self._require_scene()
         if scene.materials.count == 0:
@@ -461,8 +462,61 @@ class PathTracerAPI:
             texcoords=None if uvs is None else np.asarray(uvs, dtype=np.float32),
             material_id=mat_id,
             material_ids=_validate_material_ids(scene, material_ids),
+            dynamic=dynamic,
         )
         return int(scene.add_mesh(mesh))
+
+    def _dynamic_triangle_mesh(self, geometry_id: int) -> Mesh:
+        scene = self._require_scene()
+        geometry_id = int(geometry_id)
+        if geometry_id < 0 or geometry_id >= scene.geometry_count:
+            raise ValueError("mesh geometry ID is out of range")
+        mesh = scene._meshes[geometry_id]
+        if mesh.primitive_type != "triangles" or not mesh.dynamic:
+            raise ValueError("geometry must be a dynamic triangle mesh")
+        return mesh
+
+    def get_mesh_vertices_device(self, geometry_id: int) -> wp.array:
+        """Return writable CUDA ``wp.vec3`` positions for a dynamic mesh."""
+        mesh = self._dynamic_triangle_mesh(geometry_id)
+        if mesh.d_vertices is None:
+            raise RuntimeError("build the scene before accessing device vertices")
+        return wp.array(
+            ptr=mesh.d_vertices.ptr,
+            shape=(len(mesh.vertices),),
+            dtype=wp.vec3,
+            device=mesh.d_vertices.device,
+        )
+
+    def get_mesh_normals_device(self, geometry_id: int) -> wp.array:
+        """Return writable CUDA ``wp.vec3`` normals for a dynamic mesh."""
+        mesh = self._dynamic_triangle_mesh(geometry_id)
+        if mesh.d_normals is None:
+            raise RuntimeError("build the scene before accessing device normals")
+        return wp.array(
+            ptr=mesh.d_normals.ptr,
+            shape=(len(mesh.normals),),
+            dtype=wp.vec3,
+            device=mesh.d_normals.device,
+        )
+
+    def update_mesh_device(
+        self,
+        geometry_id: int,
+        *,
+        stream=None,
+        rebuild_gas: bool = False,
+        rebuild_tlas: bool = True,
+    ) -> None:
+        """Update a dynamic triangle GAS after its CUDA buffers were modified."""
+        self._dynamic_triangle_mesh(geometry_id)
+        self._invalidate_optix_launch_graph_for_accel_update()
+        self._require_scene().update_mesh_accel(
+            geometry_id,
+            stream=stream,
+            rebuild_gas=bool(rebuild_gas),
+            rebuild_tlas=bool(rebuild_tlas),
+        )
 
     def create_curve(
         self,

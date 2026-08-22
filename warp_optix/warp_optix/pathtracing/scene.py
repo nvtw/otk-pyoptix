@@ -396,6 +396,7 @@ class Mesh:
         texcoords1: np.ndarray = None,
         material_id: int = 0,
         material_ids: np.ndarray | None = None,
+        dynamic: bool = False,
     ):
         """
         Create a mesh.
@@ -426,6 +427,8 @@ class Mesh:
         self.material_ids = _normalize_primitive_material_ids(
             material_ids, len(self.indices), self.material_id
         )
+        self.dynamic = bool(dynamic)
+        self._packed_normal_offset = 0
 
         # Tangents only need triangle accumulation when authored UVs exist.
         self.tangents = (
@@ -1868,6 +1871,92 @@ class Scene:
             self._gas_update_temp_sizes.append(int(sizes.tempUpdateSizeInBytes))
         self._keepalive["gas_temp"] = d_temp
 
+    def _update_dynamic_geometry_accel(
+        self,
+        geometry_index: int,
+        stream,
+        rebuild_gas: bool,
+        rebuild_tlas: bool,
+    ) -> bool:
+        required_temp = (
+            self._gas_build_temp_sizes[geometry_index]
+            if rebuild_gas
+            else self._gas_update_temp_sizes[geometry_index]
+        )
+        d_temp = self._gas_update_temp_buffers[geometry_index]
+        if d_temp is None or d_temp.size < required_temp:
+            d_temp = wp.empty(required_temp, dtype=wp.uint8, device="cuda")
+            self._gas_update_temp_buffers[geometry_index] = d_temp
+
+        optix = self._optix
+        accel_options = optix.AccelBuildOptions(
+            buildFlags=self._gas_build_flags[geometry_index],
+            operation=(
+                optix.BUILD_OPERATION_BUILD
+                if rebuild_gas
+                else optix.BUILD_OPERATION_UPDATE
+            ),
+        )
+        stream_handle = int(
+            wp.get_stream("cuda").cuda_stream
+            if stream is None
+            else getattr(stream, "cuda_stream", stream)
+        )
+        self._gas_handles[geometry_index] = int(
+            self._ctx.accelBuild(
+                stream_handle,
+                [accel_options],
+                [self._gas_build_inputs[geometry_index]],
+                d_temp.ptr,
+                required_temp,
+                self._gas_buffers[geometry_index].ptr,
+                self._gas_buffers[geometry_index].size,
+                [],
+            )
+        )
+        if rebuild_tlas:
+            self.rebuild_tlas(stream=stream)
+        return True
+
+    def update_mesh_accel(
+        self,
+        geometry_index: int,
+        stream=None,
+        rebuild_gas: bool = False,
+        rebuild_tlas: bool = True,
+    ) -> bool:
+        """Refit or rebuild a dynamic triangle GAS after device-buffer updates."""
+        geometry_index = int(geometry_index)
+        if geometry_index < 0 or geometry_index >= len(self._meshes):
+            raise IndexError("mesh geometry index is out of range")
+        geometry = self._meshes[geometry_index]
+        if geometry.primitive_type != "triangles" or not geometry.dynamic:
+            raise ValueError("geometry must be a dynamic triangle mesh")
+        if self._optix is None:
+            return False
+        if len(self._gas_handles) != len(self._meshes):
+            raise RuntimeError("build the scene before refitting dynamic meshes")
+
+        wp.copy(
+            self._packed_normals,
+            geometry.d_normals,
+            dest_offset=geometry._packed_normal_offset,
+            count=geometry.normals.size,
+            stream=stream,
+        )
+        return self._update_dynamic_geometry_accel(
+            geometry_index, stream, rebuild_gas, rebuild_tlas
+        )
+
+    def refit_mesh(self, geometry_index: int, stream=None, rebuild_tlas: bool = True):
+        """Refit one dynamic triangle GAS after its device buffers were updated."""
+        return self.update_mesh_accel(
+            geometry_index,
+            stream=stream,
+            rebuild_gas=False,
+            rebuild_tlas=rebuild_tlas,
+        )
+
     def update_curve_accel(
         self,
         geometry_index: int,
@@ -1901,44 +1990,9 @@ class Scene:
             count=geometry.radii.size,
             stream=stream,
         )
-
-        required_temp = (
-            self._gas_build_temp_sizes[geometry_index]
-            if rebuild_gas
-            else self._gas_update_temp_sizes[geometry_index]
+        return self._update_dynamic_geometry_accel(
+            geometry_index, stream, rebuild_gas, rebuild_tlas
         )
-        d_temp = self._gas_update_temp_buffers[geometry_index]
-        if d_temp is None or d_temp.size < required_temp:
-            d_temp = wp.empty(required_temp, dtype=wp.uint8, device="cuda")
-            self._gas_update_temp_buffers[geometry_index] = d_temp
-
-        optix = self._optix
-        accel_options = optix.AccelBuildOptions(
-            buildFlags=self._gas_build_flags[geometry_index],
-            operation=optix.BUILD_OPERATION_BUILD
-            if rebuild_gas
-            else optix.BUILD_OPERATION_UPDATE,
-        )
-        stream_handle = int(
-            wp.get_stream("cuda").cuda_stream
-            if stream is None
-            else getattr(stream, "cuda_stream", stream)
-        )
-        self._gas_handles[geometry_index] = int(
-            self._ctx.accelBuild(
-                stream_handle,
-                [accel_options],
-                [self._gas_build_inputs[geometry_index]],
-                d_temp.ptr,
-                required_temp,
-                self._gas_buffers[geometry_index].ptr,
-                self._gas_buffers[geometry_index].size,
-                [],
-            )
-        )
-        if rebuild_tlas:
-            self.rebuild_tlas(stream=stream)
-        return True
 
     def refit_curve(self, geometry_index: int, stream=None, rebuild_tlas: bool = True):
         """Refit one dynamic curve GAS after its retained buffers were updated."""
@@ -2155,6 +2209,7 @@ class Scene:
             rp["vertexBuffer"]["hasPrevPosition"] = np.uint32(0)
             rp["numIndices"] = np.uint32(geometry.indices.size)
             geometry._packed_position_offset = position_offset
+            geometry._packed_normal_offset = normal_offset
             geometry._packed_radius_offset = radius_offset
             geometry._packed_material_offset = material_offset
             rp["numVertices"] = np.uint32(geometry.vertices.shape[0])
