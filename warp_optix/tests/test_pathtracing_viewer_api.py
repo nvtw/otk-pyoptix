@@ -19,7 +19,24 @@ class _FakeScene:
     def __init__(self):
         self._meshes = []
         self._instances = []
+        self._gltf_textures = []
+        self.materials = SimpleNamespace(add_gltf_material=self._add_gltf_material)
+        self.textured_materials = []
         self.uploaded_material_ids = None
+
+    @property
+    def texture_count(self):
+        return len(self._gltf_textures)
+
+    def set_gltf_textures(self, textures, srgb_texture_indices=None, append=False):
+        del srgb_texture_indices
+        if not append:
+            self._gltf_textures.clear()
+        self._gltf_textures.extend(textures)
+
+    def _add_gltf_material(self, **kwargs):
+        self.textured_materials.append(kwargs)
+        return len(self.textured_materials) - 1
 
     def set_instance_material_ids_host(self, material_ids):
         self.uploaded_material_ids = np.asarray(material_ids).copy()
@@ -233,6 +250,36 @@ def test_reference_sky_and_srgb_color_mapping():
     np.testing.assert_allclose(
         api.environment_color, (0.01002283, 0.21404114, 0.78741229), rtol=1.0e-6
     )
+
+
+def test_log_mesh_binds_and_reuses_base_color_texture():
+    api = _FakePathTracerAPI()
+    viewer = PathTracingViewerBackend(device="cpu", headless=True, api=api)
+    points, indices = _triangle()
+    uvs = np.array(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)), dtype=np.float32)
+    texture = np.array([[[255, 0, 0], [0, 255, 0]]], dtype=np.uint8)
+
+    viewer.log_mesh("first", points, indices, uvs=uvs, texture=texture)
+    viewer.log_mesh("second", points, indices, uvs=uvs, texture=texture)
+    viewer.log_instances(
+        "batch",
+        "first",
+        np.array(((0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),), dtype=np.float32),
+        np.ones((1, 3), dtype=np.float32),
+        np.ones((1, 3), dtype=np.float32),
+        np.array(((0.5, 0.0, 0.0, 1.0),), dtype=np.float32),
+    )
+
+    assert len(api.scene._gltf_textures) == 1
+    assert api.scene._gltf_textures[0].shape == (1, 2, 4)
+    assert len(api.scene.textured_materials) == 2
+    assert all(
+        material["base_color_texture"] == {"index": 0, "texCoord": 0}
+        for material in api.scene.textured_materials
+    )
+    assert api.scene._meshes[0].material_id == api.scene._meshes[1].material_id
+    assert api.scene._instances[0].material_id == 1
+    assert api.materials == []
 
 
 def test_sky_parameters_normalize_sun_direction():

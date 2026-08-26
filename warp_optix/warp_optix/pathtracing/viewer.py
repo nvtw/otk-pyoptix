@@ -397,8 +397,10 @@ class PathTracingViewerBackend:
                 self._init_imgui()
 
         self._mesh_ids: dict[str, int] = {}
+        self._mesh_texture_ids: dict[str, int] = {}
         self._batches: dict[str, _InstanceBatch] = {}
         self._material_ids: dict[tuple[float, ...], int] = {}
+        self._texture_ids: dict[tuple, int] = {}
         self._device_transform_batches: dict[
             str, tuple[wp.array, wp.array, wp.array]
         ] = {}
@@ -663,7 +665,77 @@ class PathTracingViewerBackend:
         if callable(parent):
             parent(state)
 
-    def _get_or_create_material(self, color, material) -> int:
+    def _get_or_create_texture(self, texture) -> int | None:
+        if isinstance(texture, (str, Path)):
+            key = ("path", str(texture))
+        else:
+            key = ("array", id(texture))
+        if key in self._texture_ids:
+            return self._texture_ids[key]
+
+        try:
+            if isinstance(texture, (str, Path)):
+                import imageio.v3 as iio
+
+                image = np.asarray(iio.imread(texture))
+            else:
+                image = np.asarray(texture)
+            if image.ndim == 2:
+                image = image[..., None]
+            if image.ndim != 3 or image.shape[2] not in (1, 2, 3, 4):
+                raise ValueError(f"expected an HxWx1-4 image, got shape {image.shape}")
+            if image.shape[2] == 1:
+                image = np.repeat(image, 3, axis=2)
+            elif image.shape[2] == 2:
+                image = np.concatenate(
+                    (np.repeat(image[..., :1], 3, axis=2), image[..., 1:2]), axis=2
+                )
+            if image.shape[2] == 3:
+                alpha_value = 255 if np.issubdtype(image.dtype, np.integer) else 1.0
+                alpha = np.full((*image.shape[:2], 1), alpha_value)
+                image = np.concatenate((image, alpha), axis=2)
+            image = np.ascontiguousarray(image)
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            if not self._warned_texture:
+                logger.warning("Could not load mesh texture %r: %s", texture, exc)
+                self._warned_texture = True
+            return None
+
+        texture_id = self._api.scene.texture_count
+        self._api.scene.set_gltf_textures(
+            [image], srgb_texture_indices={0}, append=texture_id > 0
+        )
+        self._texture_ids[key] = texture_id
+        return texture_id
+
+    def _create_material(
+        self, color, roughness, metallic, u_subdiv=0.0, v_subdiv=0.0, texture_id=None
+    ) -> int:
+        linear_color = self.srgb_to_linear_rgb(color)
+        if texture_id is None:
+            return self._api.create_pbr_material(
+                linear_color,
+                roughness=roughness,
+                metallic=metallic,
+                ior=self._default_ior,
+                specular=self._default_specular,
+                clearcoat=self._default_clearcoat,
+                clearcoat_roughness=self._default_clearcoat_roughness,
+                u_subdiv=u_subdiv,
+                v_subdiv=v_subdiv,
+            )
+        return self._api.scene.materials.add_gltf_material(
+            base_color=(*linear_color, 1.0),
+            roughness=roughness,
+            metallic=metallic,
+            ior=self._default_ior,
+            specular=self._default_specular,
+            clearcoat=self._default_clearcoat,
+            clearcoat_roughness=self._default_clearcoat_roughness,
+            base_color_texture={"index": texture_id, "texCoord": 0},
+        )
+
+    def _get_or_create_material(self, color, material, texture_id=None) -> int:
         color_key = tuple(round(float(v), 2) for v in color[:3])
         roughness = round(float(np.clip(material[0], 0.0, 1.0)), 3)
         metallic = round(float(np.clip(material[1], 0.0, 1.0)), 3)
@@ -679,21 +751,13 @@ class PathTracingViewerBackend:
             self._default_specular,
             self._default_clearcoat,
             self._default_clearcoat_roughness,
+            -1 if texture_id is None else texture_id,
         )
         if key in self._material_ids:
             return self._material_ids[key]
 
-        linear_color = self.srgb_to_linear_rgb(color_key)
-        material_id = self._api.create_pbr_material(
-            linear_color,
-            roughness=roughness,
-            metallic=metallic,
-            ior=self._default_ior,
-            specular=self._default_specular,
-            clearcoat=self._default_clearcoat,
-            clearcoat_roughness=self._default_clearcoat_roughness,
-            u_subdiv=u_subdiv,
-            v_subdiv=v_subdiv,
+        material_id = self._create_material(
+            color_key, roughness, metallic, u_subdiv, v_subdiv, texture_id
         )
         self._material_ids[key] = material_id
         self._scene_dirty = True
@@ -717,12 +781,6 @@ class PathTracingViewerBackend:
         del hidden, backface_culling
         self._ensure_initialized()
         name = self._qualify_name(name)
-        if texture is not None and not self._warned_texture:
-            logger.warning(
-                "Direct log_mesh textures are not yet supported; using the PBR base color"
-            )
-            self._warned_texture = True
-
         points_np = np.ascontiguousarray(_as_numpy(points, np.float32).reshape(-1, 3))
         indices_np = np.ascontiguousarray(_as_numpy(indices, np.uint32).reshape(-1, 3))
         normals_np = (
@@ -742,7 +800,12 @@ class PathTracingViewerBackend:
             0.0,
             0.0,
         )
-        material_id = self._get_or_create_material(base_color, pbr)
+        texture_id = None if texture is None else self._get_or_create_texture(texture)
+        material_id = self._get_or_create_material(base_color, pbr, texture_id)
+        if texture_id is None:
+            self._mesh_texture_ids.pop(name, None)
+        else:
+            self._mesh_texture_ids[name] = texture_id
 
         if name in self._mesh_ids:
             mesh_id = self._mesh_ids[name]
@@ -836,6 +899,7 @@ class PathTracingViewerBackend:
             and materials is None
         )
         appearance_changed = False
+        texture_id = self._mesh_texture_ids.get(mesh)
         if not device_appearance:
             if colors is not None or len(batch.colors) != count:
                 updated_colors = _broadcast_rows(
@@ -900,16 +964,12 @@ class PathTracingViewerBackend:
                         "The first CUDA appearance update requires colors and materials"
                     )
                 material_id_values = []
-                default_linear = self.srgb_to_linear_rgb(self._default_color)
                 for instance_id in active_ids:
-                    material_id = self._api.create_pbr_material(
-                        default_linear,
-                        roughness=self._default_material[0],
-                        metallic=self._default_material[1],
-                        ior=self._default_ior,
-                        specular=self._default_specular,
-                        clearcoat=self._default_clearcoat,
-                        clearcoat_roughness=self._default_clearcoat_roughness,
+                    material_id = self._create_material(
+                        self._default_color,
+                        self._default_material[0],
+                        self._default_material[1],
+                        texture_id=texture_id,
                     )
                     self._api.set_instance_material(instance_id, material_id)
                     material_id_values.append(material_id)
@@ -936,7 +996,7 @@ class PathTracingViewerBackend:
         if not device_appearance and (appearance_changed or instances_added):
             for index, instance_id in enumerate(active_ids):
                 material_id = self._get_or_create_material(
-                    batch.colors[index], batch.materials[index]
+                    batch.colors[index], batch.materials[index], texture_id
                 )
                 self._api.set_instance_material(instance_id, material_id)
             self._materials_dirty = True
@@ -1107,10 +1167,12 @@ class PathTracingViewerBackend:
         self._ensure_initialized()
         self._api.clear_scene()
         self._mesh_ids.clear()
+        self._mesh_texture_ids.clear()
         self._batches.clear()
         self._device_transform_batches.clear()
         self._device_material_batches.clear()
         self._material_ids.clear()
+        self._texture_ids.clear()
         self._scene_dirty = False
         self._transforms_dirty = False
         self._materials_dirty = False
@@ -1154,10 +1216,12 @@ class PathTracingViewerBackend:
         )
         if loaded and clear_existing:
             self._mesh_ids.clear()
+            self._mesh_texture_ids.clear()
             self._batches.clear()
             self._device_transform_batches.clear()
             self._device_material_batches.clear()
             self._material_ids.clear()
+            self._texture_ids.clear()
             self._scene_dirty = False
             self._transforms_dirty = False
             self._materials_dirty = False
