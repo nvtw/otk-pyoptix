@@ -1,0 +1,322 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+import inspect
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+import numpy as np
+import pytest
+import warp as wp
+
+newton = pytest.importorskip("newton", reason="Newton viewer integration is optional")
+from newton.viewer import ViewerBase, ViewerGL
+from warp_optix.integrations.newton import ViewerOptix
+
+try:
+    import warp_optix
+except ImportError:
+    warp_optix = None
+
+
+class _FakeScene:
+    def __init__(self):
+        self._meshes = []
+        self._instances = []
+
+    def set_instance_material_ids_host(self, material_ids):
+        del material_ids
+
+
+class _FakeOptixApi:
+    def __init__(self, width: int = 8, height: int = 6):
+        self.width = width
+        self.height = height
+        self.scene = _FakeScene()
+        self.dlss_enabled = True
+        self.viewer = type("FakePathTracer", (), {"tonemapped_output": None})()
+        self.temporal_reset_count = 0
+        self.tonemap_exposure = 1.0
+        self.tonemap_contrast = 1.0
+        self.tonemap_saturation = 1.0
+        self.sky_parameters = None
+        self.camera_look_at = None
+
+    def initialize(self):
+        return True
+
+    def set_use_procedural_sky(self, enabled):
+        del enabled
+
+    def set_sky_parameters(self, **kwargs):
+        self.sky_parameters = kwargs
+
+    def set_camera_look_at(self, position, target, up, fov):
+        self.camera_look_at = (
+            np.asarray(position),
+            np.asarray(target),
+            np.asarray(up),
+            float(fov),
+        )
+
+    def get_frame_uint8(self):
+        return np.full((self.height, self.width, 4), 127, dtype=np.uint8)
+
+    def reset_temporal_history(self):
+        self.temporal_reset_count += 1
+
+    def clear_scene(self):
+        self.scene = _FakeScene()
+
+    def close(self):
+        return
+
+
+class TestViewerOptix(unittest.TestCase):
+    def test_authored_mesh_material_detection(self):
+        """Apply fallback materials only to meshes without authored PBR data."""
+        model = SimpleNamespace(
+            shape_source=[
+                SimpleNamespace(roughness=None, metallic=None, texture=None),
+                SimpleNamespace(roughness=0.2, metallic=None, texture=None),
+            ]
+        )
+        batch = SimpleNamespace(geo_type=newton.GeoType.MESH, model_shapes=[0])
+        self.assertFalse(ViewerOptix._has_authored_mesh_material(model, batch))
+
+        batch.model_shapes = [1]
+        self.assertTrue(ViewerOptix._has_authored_mesh_material(model, batch))
+
+    def test_simulation_render_overlap_disabled(self):
+        """Keep OptiX simulation and rendering serialized for stable scene updates."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        self.assertFalse(viewer.supports_simulation_render_overlap)
+
+    def test_public_viewer(self):
+        """Expose a ViewerBase-compatible class from the optional integration."""
+        self.assertTrue(issubclass(ViewerOptix, ViewerBase))
+        gl_parameters = inspect.signature(ViewerGL).parameters
+        optix_parameters = inspect.signature(ViewerOptix).parameters
+        self.assertEqual(optix_parameters["width"].default, gl_parameters["width"].default)
+        self.assertEqual(optix_parameters["height"].default, gl_parameters["height"].default)
+        self.assertEqual(optix_parameters["max_instances"].default, 16384)
+        self.assertEqual(optix_parameters["dlss_quality"].default, "performance")
+        self.assertEqual(optix_parameters["max_bounces"].default, 3)
+        self.assertEqual(optix_parameters["direct_light_samples"].default, 1)
+        self.assertEqual(optix_parameters["samples_per_frame"].default, 1)
+        self.assertEqual(optix_parameters["ground_checker_size"].default, 1.0)
+
+    def test_ground_checker_subdivisions_use_metric_plane_extents(self):
+        """Size plane checker subdivisions in meters and support disabling them."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer._ground_checker_size = 1.0
+        viewer._mesh_ids = {"ground": 0}
+        viewer._api = SimpleNamespace(
+            scene=SimpleNamespace(
+                _meshes=[
+                    SimpleNamespace(
+                        vertices=np.asarray(
+                            ((-5.0, -3.0, 0.0), (5.0, -3.0, 0.0), (5.0, 3.0, 0.0), (-5.0, 3.0, 0.0)),
+                            dtype=np.float32,
+                        )
+                    )
+                ]
+            )
+        )
+
+        self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (10.0, 6.0))
+        viewer._ground_checker_size = None
+        self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (0.0, 0.0))
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_manually_logged_plane_uses_metric_checkers(self):
+        """Apply metric checkers to planes logged outside the active model."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            xforms = wp.array([wp.transform_identity()], dtype=wp.transform, device="cpu")
+            materials = wp.array([wp.vec4(0.8, 0.2, 0.0, 0.0)], dtype=wp.vec4, device="cpu")
+            with mock.patch.object(ViewerBase, "log_shapes", autospec=True) as log_shapes:
+                viewer.log_shapes(
+                    "/manual/ground",
+                    newton.GeoType.PLANE,
+                    (10.0, 6.0),
+                    xforms,
+                    materials=materials,
+                )
+
+            forwarded = log_shapes.call_args.args[6].numpy()[0]
+            np.testing.assert_allclose(forwarded, (0.8, 0.2, 10.0, 6.0))
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_set_camera_updates_backend_pose(self):
+        """Keep the configured camera pose through the first input update."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            viewer.set_camera(wp.vec3(1.2, 0.75, 0.4), pitch=-12.0, yaw=180.0)
+            viewer._update_camera_from_input(0.0)
+
+            np.testing.assert_allclose(viewer._camera_position, (1.2, 0.75, 0.4))
+            np.testing.assert_allclose(np.asarray(viewer.camera.pos), (1.2, 0.75, 0.4))
+            self.assertAlmostEqual(viewer._camera_pitch, -12.0)
+            self.assertAlmostEqual(viewer._camera_yaw, -180.0)
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_set_camera_look_at_updates_shared_camera(self):
+        """Apply authored look-at cameras through the shared Newton camera."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            viewer.set_up_axis("Y")
+            viewer.camera.up_axis = newton.Axis.Y
+            viewer.set_camera_look_at((1.0, 3.0, 8.0), (1.0, 0.0, 0.0), fov=52.0, renderer_space=True)
+
+            np.testing.assert_allclose(np.asarray(viewer.camera.pos), (1.0, 3.0, 8.0))
+            self.assertEqual(viewer.camera.up_axis, newton.Axis.Y)
+            self.assertAlmostEqual(viewer.camera.fov, 52.0)
+            camera_direction = api.camera_look_at[1] - api.camera_look_at[0]
+            self.assertAlmostEqual(float(np.dot(camera_direction, api.camera_look_at[2])), 0.0, places=6)
+            self.assertGreater(api.camera_look_at[2][1], 0.0)
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_usd_load_syncs_converted_up_axis(self):
+        """Use renderer Y-up after converting the authored USD stage axis."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        backend_type = ViewerOptix.__mro__[1]
+        try:
+            viewer.set_up_axis("Z")
+            viewer.camera.up_axis = newton.Axis.Z
+            with mock.patch.object(backend_type, "load_scene_from_usd", return_value=True):
+                self.assertTrue(viewer.load_scene_from_usd("scene.usd"))
+
+            self.assertEqual(viewer._up_axis, newton.Axis.Y)
+            self.assertEqual(viewer.camera.up_axis, newton.Axis.Y)
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_default_color_palette(self):
+        """Remap automatic colors while preserving explicit and authored colors."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            default_colors = np.asarray([ViewerBase._shape_color_map(i) for i in range(3)], dtype=np.float32)
+            explicit_color = np.array((0.21, 0.43, 0.65), dtype=np.float32)
+            default_colors[1] = explicit_color
+            viewer.model = SimpleNamespace(shape_source=[None, None, SimpleNamespace(color=tuple(default_colors[2]))])
+            viewer._optix_model_shape_batches["shapes"] = SimpleNamespace(model_shapes=[0, 1, 2])
+
+            mapped = viewer._palette_colors("shapes", wp.array(default_colors, dtype=wp.vec3, device="cpu"))
+            mapped_numpy = mapped.numpy()
+            np.testing.assert_allclose(mapped_numpy[0], ViewerOptix._DEFAULT_COLOR_PALETTE[0])
+            np.testing.assert_allclose(mapped_numpy[1], explicit_color)
+            np.testing.assert_allclose(mapped_numpy[2], default_colors[2])
+
+            viewer.set_default_color_palette(((0.9, 0.3, 0.0),))
+            mapped = viewer._palette_colors("shapes", wp.array(default_colors, dtype=wp.vec3, device="cpu"))
+            np.testing.assert_allclose(mapped.numpy()[0], (0.9, 0.3, 0.0))
+            with self.assertRaises(ValueError):
+                viewer.set_default_color_palette(())
+        finally:
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_time_of_day_updates_sky(self):
+        """Move the procedural sun and reset temporal history when time changes."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(device="cpu", headless=True, enable_imgui=False, api=api)
+        try:
+            self.assertAlmostEqual(viewer.time_of_day, 12.0)
+            self.assertAlmostEqual(viewer.sky_azimuth, 0.0)
+            self.assertAlmostEqual(viewer.sky_intensity, 1.0)
+            self.assertAlmostEqual(viewer.grayscale_sky, 0.0)
+            self.assertIsNotNone(api.sky_parameters)
+            self.assertEqual(api.temporal_reset_count, 0)
+            np.testing.assert_allclose(api.sky_parameters["ground_color"], (0.4, 0.4, 0.4), atol=1.0e-5)
+            self.assertAlmostEqual(api.sky_parameters["sun_glow_intensity"], 1.0)
+            self.assertAlmostEqual(api.sky_parameters["grayscale"], 0.0)
+
+            viewer.time_of_day = 0.0
+            self.assertGreater(api.sky_parameters["sun_disk_intensity"], 0.0)
+            night_peak = max(api.sky_parameters["night_color"])
+            self.assertGreater(night_peak, 0.0)
+            self.assertLess(night_peak, 0.001)
+
+            viewer.grayscale_sky = 0.4
+            self.assertEqual(api.temporal_reset_count, 2)
+            self.assertAlmostEqual(api.sky_parameters["grayscale"], 0.4)
+            viewer.sky_intensity = 1.5
+            self.assertEqual(api.temporal_reset_count, 3)
+            self.assertAlmostEqual(api.sky_parameters["multiplier"], 0.015)
+            viewer.time_of_day = 18.0
+            self.assertEqual(api.temporal_reset_count, 4)
+            np.testing.assert_allclose(api.sky_parameters["sun_direction"], (1.0, 0.0, 0.0), atol=1.0e-6)
+            viewer.sky_azimuth = -90.0
+            self.assertEqual(api.temporal_reset_count, 5)
+            np.testing.assert_allclose(api.sky_parameters["sun_direction"], (0.0, 0.0, 1.0), atol=1.0e-6)
+            with self.assertRaises(ValueError):
+                viewer.time_of_day = 25.0
+            with self.assertRaises(ValueError):
+                viewer.sky_azimuth = 181.0
+            with self.assertRaises(ValueError):
+                viewer.sky_intensity = -1.0
+        finally:
+            with self.assertRaises(ValueError):
+                viewer.grayscale_sky = 1.1
+            viewer.close()
+
+    @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
+    def test_pause_step_and_frame_extraction(self):
+        """Match ViewerGL pause, single-step, and frame-extraction behavior."""
+        api = _FakeOptixApi()
+        viewer = ViewerOptix(
+            width=api.width,
+            height=api.height,
+            device="cpu",
+            headless=True,
+            paused=True,
+            enable_imgui=False,
+            api=api,
+        )
+        try:
+            self.assertFalse(viewer.should_step())
+            viewer._step_requested = True
+            self.assertTrue(viewer.should_step())
+            self.assertFalse(viewer.should_step())
+
+            reset_calls = []
+            viewer.set_reset_callback(lambda: reset_calls.append(True))
+            viewer._reset_callback()
+            self.assertAlmostEqual(viewer.exposure, 0.68)
+            self.assertEqual(viewer._ground_color, (0.7, 0.7, 0.7))
+            self.assertAlmostEqual(viewer._ground_roughness, 0.8)
+            self.assertAlmostEqual(viewer._ground_checker_size, 1.0)
+            self.assertAlmostEqual(viewer._default_roughness, 0.42)
+            self.assertAlmostEqual(viewer._default_ior, 1.46)
+            self.assertAlmostEqual(viewer._default_specular, 0.75)
+            self.assertAlmostEqual(viewer._default_clearcoat, 0.03)
+            self.assertAlmostEqual(viewer._default_clearcoat_roughness, 0.4)
+            self.assertAlmostEqual(viewer.tonemap_saturation, 1.1)
+            self.assertAlmostEqual(viewer.tonemap_contrast, 1.08)
+            self.assertEqual(reset_calls, [True])
+            self.assertEqual(api.temporal_reset_count, 1)
+
+            frame = viewer.get_frame()
+            self.assertEqual(frame.shape, (api.height, api.width, 3))
+            self.assertEqual(frame.dtype, wp.uint8)
+            np.testing.assert_array_equal(frame.numpy(), 127)
+        finally:
+            viewer.close()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

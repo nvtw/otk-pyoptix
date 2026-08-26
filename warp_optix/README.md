@@ -44,18 +44,37 @@ pip install -e . -e "warp_optix[pathtracing]"
 
 `PathTracingViewer` is a standalone OptiX path-tracing viewer with DLSS Ray
 Reconstruction. `PathTracingViewerBackend` exposes a renderer-facing `log_*`
-API without importing Newton or any other simulation framework. A framework
-can add its own inheritance in a thin wrapper; with current Newton development
-branches that wrapper is:
+API without importing Newton or any other simulation framework.
+
+### Newton integration
+
+An optional adapter implements Newton's complete viewer interface. Newton is
+not a base dependency and importing `warp_optix` does not import it. Install
+the adapter and interactive viewer dependencies explicitly:
+
+```bash
+pip install -e . -e "warp_optix[pathtracing,ui,recording,newton]"
+```
+
+Then construct the viewer in a Newton application:
 
 ```python
-from newton.viewer import ViewerBase
-from warp_optix.pathtracing import PathTracingViewerBackend
+from warp_optix.integrations.newton import ViewerOptix
 
+viewer = ViewerOptix()
+viewer.set_model(model)
 
-class ViewerOptix(PathTracingViewerBackend, ViewerBase):
-    pass
+while viewer.is_running():
+    viewer.begin_frame(sim_time)
+    viewer.log_state(state)
+    viewer.end_frame()
 ```
+
+Pass the resulting object anywhere a Newton `ViewerBase` is expected. This
+integration intentionally does not register itself as `newton.viewer.ViewerOptix`;
+applications must import and construct it from `warp_optix`. The adapter uses
+Newton's internal viewer interfaces and is therefore constrained to Newton
+1.6.x until compatibility with a newer series is verified.
 
 The optional interactive features are installed separately:
 

@@ -17,6 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+newton = [
+    "newton>=1.6.0.dev0,<1.7",
+]
 pathtracing = [
     "imageio>=2.31",
     "Pillow>=9",
