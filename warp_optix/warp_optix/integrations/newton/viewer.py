@@ -99,6 +99,41 @@ def _apply_optix_plane_checker_material(
     output[index] = wp.vec4(material[0], material[1], u_subdiv, v_subdiv)
 
 
+def _update_line_batch(batches, name, starts, ends, colors, device, *, hidden=False):
+    """Create or update a reusable Newton OpenGL line batch."""
+    if starts is None or ends is None or colors is None:
+        if name in batches:
+            batches[name].update(None, None, None)
+        return
+
+    from newton._src.viewer.gl.opengl import LinesGL
+
+    num_lines = len(starts)
+    if len(ends) != num_lines:
+        raise ValueError("Number of line ends must match line begins")
+
+    if isinstance(colors, (tuple, list)):
+        colors_array = wp.zeros(num_lines, dtype=wp.vec3, device=device)
+        if num_lines > 0:
+            colors_array.fill_(wp.vec3(*colors))
+        colors = colors_array
+    elif colors.dtype == wp.float32:
+        colors = colors.reshape((num_lines, 3)).view(dtype=wp.vec3)
+
+    if len(colors) != num_lines:
+        raise ValueError("Number of line colors must match line begins")
+
+    if name not in batches:
+        batches[name] = LinesGL(max(num_lines, 1000), device, hidden=hidden)
+    elif num_lines > batches[name].max_lines:
+        old_capacity = batches[name].max_lines
+        batches[name].destroy()
+        batches[name] = LinesGL(max(num_lines, old_capacity * 2), device, hidden=hidden)
+
+    batches[name].update(starts, ends, colors)
+    batches[name].hidden = hidden
+
+
 class _OptixOverlayRenderer:
     """Rendering controls consumed by the shared Newton GUI."""
 
@@ -165,7 +200,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         time_of_day: float = 12.0,
         sky_azimuth: float = 0.0,
         sky_intensity: float = 1.0,
-        grayscale_sky: float | bool = 0.0,
+        grayscale_sky: float | bool = 0.5,
         exposure: float = 0.68,
         contrast: float = 1.08,
         saturation: float = 1.1,
@@ -1215,13 +1250,6 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         count = 0 if xforms is None else len(xforms)
         if colors is not None and not is_ground:
             colors = self._palette_colors(name, colors)
-        if is_ground and colors is not None:
-            if count not in self._ground_color_arrays:
-                ground_colors = wp.zeros(count, dtype=wp.vec3, device=self.device)
-                if count > 0:
-                    ground_colors.fill_(wp.vec3(*self._ground_color))
-                self._ground_color_arrays[count] = ground_colors
-            colors = self._ground_color_arrays[count]
 
         roughness = None
         u_subdiv = 0.0
@@ -1229,9 +1257,15 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         if is_ground:
             roughness = self._ground_roughness
             u_subdiv, v_subdiv = self._optix_ground_subdivisions.get(mesh, (0.0, 0.0))
+            if colors is not None or materials is not None:
+                colors = np.full((count, 3), self._ground_color, dtype=np.float32)
+                materials = np.tile(
+                    np.asarray((roughness, 0.0, u_subdiv, v_subdiv), dtype=np.float32),
+                    (count, 1),
+                )
         elif mesh in self._optix_default_material_meshes:
             roughness = self._default_roughness
-        if materials is not None and roughness is not None:
+        if not is_ground and materials is not None and roughness is not None:
             key = (count, roughness, u_subdiv, v_subdiv)
             if key not in self._material_arrays:
                 material_array = wp.zeros(count, dtype=wp.vec4, device=self.device)
@@ -1263,9 +1297,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         del width
         if self._presenter is None:
             return
-        from newton._src.viewer.gl.opengl import update_line_batch
-
-        update_line_batch(self.lines, self._qualify(name), starts, ends, colors, self.device, hidden=hidden)
+        _update_line_batch(self.lines, self._qualify(name), starts, ends, colors, self.device, hidden=hidden)
 
     @override
     def log_arrows(
@@ -1281,9 +1313,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         del width
         if self._presenter is None:
             return
-        from newton._src.viewer.gl.opengl import update_line_batch
-
-        update_line_batch(self.arrows, self._qualify(name), starts, ends, colors, self.device, hidden=hidden)
+        _update_line_batch(self.arrows, self._qualify(name), starts, ends, colors, self.device, hidden=hidden)
 
     @override
     def end_frame(self) -> None:
@@ -1332,7 +1362,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @override
     def close(self) -> None:
         """Release the shared UI and OptiX presentation resources."""
-        self._destroy_simulation_stream()
+        if self._closed:
+            return
         ui = self.ui
         if ui is not None:
             ui.shutdown()

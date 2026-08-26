@@ -16,6 +16,9 @@ dependencies = [
     "numpy",
 ]
 
+[project.entry-points."newton.viewers"]
+optix = "warp_optix.integrations.newton:create_viewer"
+
 [project.optional-dependencies]
 newton = [
     "newton>=1.6.0.dev0,<1.7",

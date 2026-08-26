@@ -71,10 +71,22 @@ while viewer.is_running():
 ```
 
 Pass the resulting object anywhere a Newton `ViewerBase` is expected. This
-integration intentionally does not register itself as `newton.viewer.ViewerOptix`;
-applications must import and construct it from `warp_optix`. The adapter uses
-Newton's internal viewer interfaces and is therefore constrained to Newton
-1.6.x until compatibility with a newer series is verified.
+integration registers the `optix` entry point for Newton's example launcher,
+so compatible Newton versions can also run examples with `--viewer optix`:
+
+```bash
+python -m newton.examples basic_pendulum --viewer optix
+```
+
+The launcher entry point uses a 1280x720 output and two path bounces by
+default to favor interactive simulation frame rates. Applications that
+construct `ViewerOptix` directly can choose their own resolution and ray
+budget.
+
+It does not add `ViewerOptix` to `newton.viewer`; applications that construct
+the viewer directly must continue importing it from `warp_optix`. The adapter
+uses Newton's internal viewer interfaces and is therefore constrained to
+Newton 1.6.x until compatibility with a newer series is verified.
 
 The optional interactive features are installed separately:
 

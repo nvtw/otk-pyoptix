@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import inspect
+import pathlib
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -12,7 +13,7 @@ import warp as wp
 
 newton = pytest.importorskip("newton", reason="Newton viewer integration is optional")
 from newton.viewer import ViewerBase, ViewerGL
-from warp_optix.integrations.newton import ViewerOptix
+from warp_optix.integrations.newton import ViewerOptix, create_viewer
 
 try:
     import warp_optix
@@ -74,6 +75,60 @@ class _FakeOptixApi:
 
 
 class TestViewerOptix(unittest.TestCase):
+    def test_close_is_idempotent(self):
+        """Do not access GL resources after the viewer has already closed."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer._closed = True
+        viewer._presenter = mock.Mock()
+
+        viewer.close()
+
+        viewer._presenter.assert_not_called()
+
+    def test_clear_missing_line_batch(self):
+        """Ignore clearing an unknown line batch without private Newton helpers."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer._presenter = object()
+        viewer.device = wp.get_device("cpu")
+        viewer.lines = {}
+
+        with mock.patch.object(viewer, "_qualify", return_value="/lines"):
+            viewer.log_lines("/lines", None, None, None)
+
+        self.assertEqual(viewer.lines, {})
+
+    def test_newton_viewer_entry_point(self):
+        """Register the OptiX viewer with Newton's example launcher."""
+        pyproject_path = pathlib.Path(__file__).parents[1] / "pyproject.toml"
+        pyproject = pyproject_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            '[project.entry-points."newton.viewers"]\n'
+            'optix = "warp_optix.integrations.newton:create_viewer"',
+            pyproject,
+        )
+
+    def test_create_viewer_from_newton_arguments(self):
+        """Construct the OptiX viewer from Newton's common example arguments."""
+        for headless, expected_num_frames in ((True, 12), (False, None)):
+            with self.subTest(headless=headless):
+                args = SimpleNamespace(headless=headless, paused=True, num_frames=12)
+
+                with mock.patch(
+                    "warp_optix.integrations.newton.ViewerOptix"
+                ) as viewer_cls:
+                    viewer = create_viewer(args)
+
+                self.assertIs(viewer, viewer_cls.return_value)
+                viewer_cls.assert_called_once_with(
+                    width=1280,
+                    height=720,
+                    headless=headless,
+                    paused=True,
+                    num_frames=expected_num_frames,
+                    max_bounces=2,
+                )
+
     def test_authored_mesh_material_detection(self):
         """Apply fallback materials only to meshes without authored PBR data."""
         model = SimpleNamespace(
@@ -106,6 +161,7 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(optix_parameters["direct_light_samples"].default, 1)
         self.assertEqual(optix_parameters["samples_per_frame"].default, 1)
         self.assertEqual(optix_parameters["ground_checker_size"].default, 1.0)
+        self.assertEqual(optix_parameters["grayscale_sky"].default, 0.5)
 
     def test_ground_checker_subdivisions_use_metric_plane_extents(self):
         """Size plane checker subdivisions in meters and support disabling them."""
@@ -128,6 +184,32 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (10.0, 6.0))
         viewer._ground_checker_size = None
         self.assertEqual(viewer._checker_subdivisions_for_mesh("ground"), (0.0, 0.0))
+
+    def test_ground_uses_static_checker_material(self):
+        """Use the proven host material path for Newton ground planes."""
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer._optix_ground_meshes = {"ground"}
+        viewer._optix_ground_subdivisions = {"ground": (10.0, 6.0)}
+        viewer._ground_color = (0.7, 0.7, 0.7)
+        viewer._ground_roughness = 0.8
+        viewer._optix_default_material_meshes = set()
+        viewer._material_arrays = {}
+        viewer.device = wp.get_device("cpu")
+        xforms = wp.array([wp.transform_identity()], dtype=wp.transform, device="cpu")
+        scales = wp.array([wp.vec3(1.0)], dtype=wp.vec3, device="cpu")
+        colors = wp.array([wp.vec3(0.1)], dtype=wp.vec3, device="cpu")
+        materials = wp.array([wp.vec4(0.5, 0.0, 0.0, 0.0)], dtype=wp.vec4, device="cpu")
+        backend_type = ViewerOptix.__mro__[1]
+
+        with mock.patch.object(backend_type, "log_instances", autospec=True) as log_instances:
+            viewer.log_instances("ground_instances", "ground", xforms, scales, colors, materials)
+
+        forwarded_colors = log_instances.call_args.args[5]
+        forwarded_materials = log_instances.call_args.args[6]
+        self.assertIsInstance(forwarded_colors, np.ndarray)
+        self.assertIsInstance(forwarded_materials, np.ndarray)
+        np.testing.assert_allclose(forwarded_colors, ((0.7, 0.7, 0.7),))
+        np.testing.assert_allclose(forwarded_materials, ((0.8, 0.0, 10.0, 6.0),))
 
     @unittest.skipIf(warp_optix is None, "warp_optix is not installed")
     def test_manually_logged_plane_uses_metric_checkers(self):
@@ -238,12 +320,12 @@ class TestViewerOptix(unittest.TestCase):
             self.assertAlmostEqual(viewer.time_of_day, 12.0)
             self.assertAlmostEqual(viewer.sky_azimuth, 0.0)
             self.assertAlmostEqual(viewer.sky_intensity, 1.0)
-            self.assertAlmostEqual(viewer.grayscale_sky, 0.0)
+            self.assertAlmostEqual(viewer.grayscale_sky, 0.5)
             self.assertIsNotNone(api.sky_parameters)
             self.assertEqual(api.temporal_reset_count, 0)
             np.testing.assert_allclose(api.sky_parameters["ground_color"], (0.4, 0.4, 0.4), atol=1.0e-5)
             self.assertAlmostEqual(api.sky_parameters["sun_glow_intensity"], 1.0)
-            self.assertAlmostEqual(api.sky_parameters["grayscale"], 0.0)
+            self.assertAlmostEqual(api.sky_parameters["grayscale"], 0.5)
 
             viewer.time_of_day = 0.0
             self.assertGreater(api.sky_parameters["sun_disk_intensity"], 0.0)
