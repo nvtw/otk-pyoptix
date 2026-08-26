@@ -257,7 +257,10 @@ def test_log_mesh_binds_and_reuses_base_color_texture():
     viewer = PathTracingViewerBackend(device="cpu", headless=True, api=api)
     points, indices = _triangle()
     uvs = np.array(((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)), dtype=np.float32)
-    texture = np.array([[[255, 0, 0], [0, 255, 0]]], dtype=np.uint8)
+    texture = np.array(
+        [[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [255, 255, 0]]],
+        dtype=np.uint8,
+    )
 
     viewer.log_mesh("first", points, indices, uvs=uvs, texture=texture)
     viewer.log_mesh("second", points, indices, uvs=uvs, texture=texture)
@@ -271,7 +274,8 @@ def test_log_mesh_binds_and_reuses_base_color_texture():
     )
 
     assert len(api.scene._gltf_textures) == 1
-    assert api.scene._gltf_textures[0].shape == (1, 2, 4)
+    assert api.scene._gltf_textures[0].shape == (2, 2, 4)
+    np.testing.assert_array_equal(api.scene._gltf_textures[0][0, 0, :3], (0, 0, 255))
     assert len(api.scene.textured_materials) == 2
     assert all(
         material["base_color_texture"] == {"index": 0, "texCoord": 0}

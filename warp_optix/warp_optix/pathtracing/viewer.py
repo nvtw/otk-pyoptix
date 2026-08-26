@@ -694,7 +694,7 @@ class PathTracingViewerBackend:
                 alpha_value = 255 if np.issubdtype(image.dtype, np.integer) else 1.0
                 alpha = np.full((*image.shape[:2], 1), alpha_value)
                 image = np.concatenate((image, alpha), axis=2)
-            image = np.ascontiguousarray(image)
+            image = np.ascontiguousarray(np.flipud(image))
         except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
             if not self._warned_texture:
                 logger.warning("Could not load mesh texture %r: %s", texture, exc)
