@@ -17,17 +17,4 @@ except ImportError as error:
 
 from .viewer import ViewerOptix
 
-
-def create_viewer(args):
-    """Create the OptiX viewer from Newton's common example arguments."""
-    return ViewerOptix(
-        width=1280,
-        height=720,
-        headless=args.headless,
-        paused=args.paused,
-        num_frames=args.num_frames if args.headless else None,
-        max_bounces=2,
-    )
-
-
-__all__ = ["ViewerOptix", "create_viewer"]
+__all__ = ["ViewerOptix"]

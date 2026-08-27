@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import inspect
-import pathlib
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -12,8 +11,9 @@ import pytest
 import warp as wp
 
 newton = pytest.importorskip("newton", reason="Newton viewer integration is optional")
-from newton.viewer import ViewerBase, ViewerGL
-from warp_optix.integrations.newton import ViewerOptix, create_viewer
+from newton.viewer import ViewerBase, ViewerGL  # noqa: E402
+from warp_optix.integrations.newton import ViewerOptix  # noqa: E402
+from warp_optix.integrations.newton.launcher import activate  # noqa: E402
 
 try:
     import warp_optix
@@ -97,37 +97,15 @@ class TestViewerOptix(unittest.TestCase):
 
         self.assertEqual(viewer.lines, {})
 
-    def test_newton_viewer_entry_point(self):
-        """Register the OptiX viewer with Newton's example launcher."""
-        pyproject_path = pathlib.Path(__file__).parents[1] / "pyproject.toml"
-        pyproject = pyproject_path.read_text(encoding="utf-8")
+    def test_launcher_routes_newton_gl_viewer_to_optix(self):
+        """Select the external viewer without Newton package discovery."""
+        argv = ["python", "-m", "newton.examples", "basic_pendulum", "--viewer", "usd"]
 
-        self.assertIn(
-            '[project.entry-points."newton.viewers"]\n'
-            'optix = "warp_optix.integrations.newton:create_viewer"',
-            pyproject,
-        )
+        with mock.patch.object(newton.viewer, "ViewerGL", ViewerGL):
+            activate(argv)
+            self.assertIs(newton.viewer.ViewerGL, ViewerOptix)
 
-    def test_create_viewer_from_newton_arguments(self):
-        """Construct the OptiX viewer from Newton's common example arguments."""
-        for headless, expected_num_frames in ((True, 12), (False, None)):
-            with self.subTest(headless=headless):
-                args = SimpleNamespace(headless=headless, paused=True, num_frames=12)
-
-                with mock.patch(
-                    "warp_optix.integrations.newton.ViewerOptix"
-                ) as viewer_cls:
-                    viewer = create_viewer(args)
-
-                self.assertIs(viewer, viewer_cls.return_value)
-                viewer_cls.assert_called_once_with(
-                    width=1280,
-                    height=720,
-                    headless=headless,
-                    paused=True,
-                    num_frames=expected_num_frames,
-                    max_bounces=2,
-                )
+        self.assertEqual(argv[-1], "gl")
 
     def test_authored_mesh_material_detection(self):
         """Apply fallback materials only to meshes without authored PBR data."""
