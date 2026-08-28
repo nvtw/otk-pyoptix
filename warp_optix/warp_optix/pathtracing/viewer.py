@@ -1973,6 +1973,10 @@ class PathTracingViewerBackend:
         """Discard DLSS reconstruction history after a discontinuous scene change."""
         self._api.reset_temporal_history()
 
+    def set_volume(self, volume, bounds_min, bounds_max, **kwargs):
+        self._ensure_initialized()
+        self._api.set_volume(volume, bounds_min, bounds_max, **kwargs)
+
     def set_sky_parameters(self, **kwargs):
         self._ensure_initialized()
         kwargs = dict(kwargs)

@@ -825,6 +825,30 @@ def test_volume_configuration_forwards_to_renderer():
     ]
 
 
+def test_volume_configuration_forwards_through_backend():
+    calls = []
+    backend = PathTracingViewerBackend.__new__(PathTracingViewerBackend)
+    backend._ensure_initialized = lambda: None
+    backend._api = SimpleNamespace(
+        set_volume=lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    volume = object()
+
+    backend.set_volume(
+        volume,
+        (-1.0, -2.0, -3.0),
+        (1.0, 2.0, 3.0),
+        density_scale=2.5,
+    )
+
+    assert calls == [
+        (
+            (volume, (-1.0, -2.0, -3.0), (1.0, 2.0, 3.0)),
+            {"density_scale": 2.5},
+        )
+    ]
+
+
 def test_scene_rebuild_resets_temporal_history():
     class _Scene:
         def build(self, optix):
