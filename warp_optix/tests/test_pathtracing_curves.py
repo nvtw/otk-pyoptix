@@ -56,10 +56,14 @@ def test_pathtracer_api_creates_cubic_bezier_curve():
     api = PathTracerAPI.__new__(PathTracerAPI)
     api._viewer = SimpleNamespace(_scene=scene)
     curve_id = api.create_curve(
-        np.zeros((4, 3), dtype=np.float32), radii=0.1, basis="cubic_bezier"
+        np.zeros((4, 3), dtype=np.float32),
+        radii=0.1,
+        basis="cubic_bezier",
+        dynamic=True,
     )
 
     assert scene._meshes[curve_id].basis == "cubic_bezier"
+    assert scene._meshes[curve_id].dynamic
 
 
 def test_curve_accepts_scalar_radius_and_disjoint_segment_starts():

@@ -35,6 +35,21 @@ def test_mesh_without_uvs_uses_deterministic_fallback_tangents():
     )
 
 
+def test_generated_sphere_winding_matches_outward_normals():
+    scene = Scene(None)
+    vertices, indices, normals, _ = scene._create_sphere_geometry(
+        (0.0, 0.0, 0.0), 1.0, 16
+    )
+    geometric = np.cross(
+        vertices[indices[:, 1]] - vertices[indices[:, 0]],
+        vertices[indices[:, 2]] - vertices[indices[:, 0]],
+    )
+    nondegenerate = np.linalg.norm(geometric, axis=1) > 1.0e-8
+    alignment = np.einsum("ij,ij->i", geometric, normals[indices[:, 0]])
+
+    assert np.all(alignment[nondegenerate] > 0.0)
+
+
 @pytest.mark.skipif(
     not wp.is_cuda_available(), reason="device mesh access requires CUDA"
 )

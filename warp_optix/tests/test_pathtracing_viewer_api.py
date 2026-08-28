@@ -571,6 +571,7 @@ def test_recording_debug_and_bridge_transform_compatibility(tmp_path):
         ESCAPE=11,
         R=12,
         T=13,
+        P=14,
         _0=20,
         _1=21,
         _2=22,
@@ -622,6 +623,23 @@ def test_recording_defaults_to_system_videos_directory(tmp_path, monkeypatch):
     assert path.startswith(str(tmp_path / "NewtonRecordings"))
     assert path.endswith(".mp4")
     assert writer.closed
+
+
+def test_screenshot_exports_display_orientation(tmp_path):
+    api = _FakePathTracerAPI()
+    frame = np.zeros((2, 3, 4), dtype=np.uint8)
+    frame[0, :, 0] = 255
+    frame[1, :, 2] = 255
+    api.get_frame_uint8 = lambda: frame
+    viewer = PathTracingViewerBackend(device="cpu", headless=True, api=api)
+
+    path = viewer.save_screenshot(tmp_path / "capture.png")
+
+    from PIL import Image
+
+    image = np.asarray(Image.open(path))
+    np.testing.assert_array_equal(image[0], frame[1, :, :3])
+    np.testing.assert_array_equal(image[1], frame[0, :, :3])
 
 
 def test_viewer_loads_usd_through_public_backend_api():
@@ -719,6 +737,92 @@ def test_tlas_refit_preserves_temporal_sequence():
     assert api._viewer.frame_index == 9
     assert api._viewer._optix_launch_graph is None
     assert api._viewer._optix_graph_warmed is False
+
+
+def test_volume_composite_launches_only_when_bound(monkeypatch):
+    """Launch no volume work unless a volume is bound."""
+    launches = []
+    viewer = viewer_module.PathTracingViewer.__new__(viewer_module.PathTracingViewer)
+    viewer.sample_index = 0
+    viewer._render_width = 16
+    viewer._render_height = 8
+    viewer._dlss_enabled = True
+    viewer._launch_params = object()
+    viewer._volume_params = None
+    viewer._render_stream = object()
+    viewer._update_launch_params = lambda **kwargs: None
+    viewer._launch_optix = lambda: None
+    monkeypatch.setattr(
+        viewer_module.wp,
+        "launch",
+        lambda kernel, **kwargs: launches.append(kernel),
+    )
+    matrix = np.eye(4, dtype=np.float32)
+
+    viewer._volume = None
+    viewer._launch_samples(
+        1,
+        False,
+        view=matrix,
+        proj=matrix,
+        view_inv=matrix,
+        proj_inv=matrix,
+    )
+    assert launches == []
+
+    viewer._volume = SimpleNamespace(id=1)
+    viewer._volume_min = (0.0, 0.0, 0.0)
+    viewer._volume_max = (1.0, 1.0, 1.0)
+    viewer._volume_density_scale = 1.0
+    viewer._volume_step_size = 0.1
+    viewer._volume_cool_colors = ((0.0, 0.0, 0.0),) * 3
+    viewer._volume_warm_colors = ((0.0, 0.0, 0.0),) * 3
+    viewer._volume_emission = 0.0
+    viewer._volume_anisotropy = 0.0
+    viewer._volume_transfer_table = None
+    viewer._volume_density_feature = False
+    viewer._launch_samples(
+        1,
+        False,
+        view=matrix,
+        proj=matrix,
+        view_inv=matrix,
+        proj_inv=matrix,
+    )
+    assert launches == [viewer_module.composite_volume]
+
+
+def test_volume_configuration_forwards_to_renderer():
+    """Forward volume configuration to the renderer."""
+    calls = []
+    api = PathTracerAPI.__new__(PathTracerAPI)
+    api._viewer = SimpleNamespace(
+        set_volume=lambda *args, **kwargs: calls.append((args, kwargs))
+    )
+    volume = object()
+    transfer_table = np.array(((0.0, 0.0, 1.0, 0.5), (1.0, 0.2, 0.0, 2.0)))
+
+    api.set_volume(
+        volume,
+        (-1.0, -2.0, -3.0),
+        (1.0, 2.0, 3.0),
+        density_scale=2.5,
+        anisotropy=0.3,
+        transfer_table=transfer_table,
+        density_feature=True,
+    )
+
+    assert calls == [
+        (
+            (volume, (-1.0, -2.0, -3.0), (1.0, 2.0, 3.0)),
+            {
+                "density_scale": 2.5,
+                "anisotropy": 0.3,
+                "transfer_table": transfer_table,
+                "density_feature": True,
+            },
+        )
+    ]
 
 
 def test_scene_rebuild_resets_temporal_history():

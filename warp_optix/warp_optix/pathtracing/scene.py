@@ -1641,8 +1641,8 @@ class Scene:
                 i1 = i0 + 1
                 i2 = i0 + stride
                 i3 = i2 + 1
-                indices.append([i0, i2, i1])
-                indices.append([i1, i2, i3])
+                indices.append([i0, i1, i2])
+                indices.append([i1, i3, i2])
 
         return (
             np.array(vertices, dtype=np.float32),

@@ -98,6 +98,24 @@ def _system_videos_dir() -> Path:
     return Path.home() / "Videos"
 
 
+def _system_pictures_dir() -> Path:
+    executable = shutil.which("xdg-user-dir")
+    if executable is not None:
+        try:
+            result = subprocess.run(
+                [executable, "PICTURES"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+            if result.stdout.strip():
+                return Path(result.stdout.strip()).expanduser()
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return Path.home() / "Pictures"
+
+
 def _ffmpeg_executable() -> str:
     """Prefer system FFmpeg so distro-provided hardware encoders are visible."""
     executable = shutil.which("ffmpeg")
@@ -353,6 +371,8 @@ class PathTracingViewerBackend:
         self.recording_buffer_count = 8
         self.recording_dropped_frames = 0
         self.recording_output_path: str | None = None
+        self.screenshot_output_path: str | None = None
+        self._last_screenshot_path: Path | None = None
         self._recording_writer = None
         self._recording_writer_factory = recording_writer_factory
         self._recording_frame_index = 0
@@ -1392,6 +1412,8 @@ class PathTracingViewerBackend:
                 self.start_recording()
         elif symbol == key.T:
             self.stop_recording()
+        elif symbol == key.P:
+            self.save_screenshot()
         else:
             debug_keys = {
                 key._1: 2,  # Depth
@@ -1666,6 +1688,11 @@ class PathTracingViewerBackend:
                 elif imgui.button("Start Recording"):
                     self.start_recording()
 
+                if imgui.button("Save Screenshot"):
+                    self.save_screenshot()
+                if self._last_screenshot_path is not None:
+                    imgui.text(f"Screenshot: {self._last_screenshot_path}")
+
                 for callback, _position in self._ui_callbacks:
                     callback(imgui)
             imgui.end()
@@ -1781,6 +1808,25 @@ class PathTracingViewerBackend:
             buffer_count,
         )
         return str(self._recording_path)
+
+    def save_screenshot(self, output_path: str | Path | None = None) -> str:
+        from PIL import Image
+
+        path = Path(
+            output_path
+            or self.screenshot_output_path
+            or (
+                _system_pictures_dir()
+                / "NewtonScreenshots"
+                / time.strftime("pathtracing_%Y%m%d_%H%M%S.png")
+            )
+        ).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        frame = self._api.get_frame_uint8()
+        Image.fromarray(np.flipud(frame[..., :3]), mode="RGB").save(path)
+        self._last_screenshot_path = path.resolve()
+        logger.info("Saved screenshot to %s", self._last_screenshot_path)
+        return str(self._last_screenshot_path)
 
     def _recording_worker(self) -> None:
         """Wait for readbacks and feed FFmpeg without blocking rendering."""

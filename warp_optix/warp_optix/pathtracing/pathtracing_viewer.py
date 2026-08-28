@@ -44,6 +44,7 @@ from .lighting import RENDERER_RADIANCE_PER_NIT
 from .scene import Scene
 from .sky_lut import generate_physical_sky_lut
 from .tonemap import Tonemapper
+from .volume_composite import VolumeParams, composite_volume
 
 try:
     import optix
@@ -277,6 +278,26 @@ class PathTracingViewer:
         )
         self._device_camera_initialized = None
         self._device_camera_state = None
+        self._volume = None
+        self._volume_min = (0.0, 0.0, 0.0)
+        self._volume_max = (0.0, 0.0, 0.0)
+        self._volume_density_scale = 1.0
+        self._volume_step_size = 0.01
+        self._volume_cool_colors = (
+            (0.0, 0.025, 0.18),
+            (0.0, 0.20, 0.95),
+            (0.0, 0.92, 0.82),
+        )
+        self._volume_warm_colors = (
+            (0.30, 0.008, 0.0),
+            (1.0, 0.075, 0.0),
+            (1.0, 0.62, 0.0),
+        )
+        self._volume_emission = 0.0
+        self._volume_anisotropy = 0.0
+        self._volume_transfer_table = None
+        self._volume_density_feature = False
+        self._volume_params = None
 
         # CUDA surface objects
         self._color_surface = None
@@ -403,6 +424,71 @@ class PathTracingViewer:
         self.frame_index = 0
         self._optix_launch_graph = None
         self._optix_graph_warmed = False
+        self._dlss_reset_history = True
+
+    def set_volume(
+        self,
+        volume: wp.Volume | None,
+        bounds_min=(0.0, 0.0, 0.0),
+        bounds_max=(1.0, 1.0, 1.0),
+        *,
+        density_scale=1.0,
+        step_size=0.01,
+        cool_colors=(
+            (0.0, 0.025, 0.18),
+            (0.0, 0.20, 0.95),
+            (0.0, 0.92, 0.82),
+        ),
+        warm_colors=(
+            (0.30, 0.008, 0.0),
+            (1.0, 0.075, 0.0),
+            (1.0, 0.62, 0.0),
+        ),
+        emission=0.0,
+        anisotropy=0.0,
+        transfer_table=None,
+        density_feature=False,
+    ):
+        """Set the NanoVDB volume composited by the path tracer."""
+        self._volume = volume
+        self._volume_min = tuple(float(v) for v in bounds_min)
+        self._volume_max = tuple(float(v) for v in bounds_max)
+        self._volume_density_scale = float(density_scale)
+        self._volume_step_size = float(step_size)
+        self._volume_cool_colors = tuple(
+            tuple(float(v) for v in color) for color in cool_colors
+        )
+        self._volume_warm_colors = tuple(
+            tuple(float(v) for v in color) for color in warm_colors
+        )
+        self._volume_emission = float(emission)
+        self._volume_anisotropy = float(anisotropy)
+        self._volume_density_feature = bool(density_feature)
+        if transfer_table is None:
+            self._volume_transfer_table = None
+        elif isinstance(transfer_table, wp.array):
+            if (
+                transfer_table.ndim != 1
+                or transfer_table.dtype != wp.vec4
+                or len(transfer_table) < 2
+            ):
+                raise ValueError(
+                    "transfer_table must be a 1D Warp vec4 array with at least two entries"
+                )
+            if not transfer_table.device.is_cuda:
+                raise ValueError("transfer_table must be CUDA-resident")
+            self._volume_transfer_table = transfer_table
+        else:
+            table = np.asarray(transfer_table, dtype=np.float32)
+            if table.ndim != 2 or table.shape[1] != 4 or len(table) < 2:
+                raise ValueError("transfer_table must have shape (N, 4) with N >= 2")
+            if not np.all(np.isfinite(table)) or np.any(table < 0.0):
+                raise ValueError(
+                    "transfer_table entries must be finite and nonnegative"
+                )
+            self._volume_transfer_table = wp.array(table, dtype=wp.vec4, device="cuda")
+        self.sample_index = 0
+        self.frame_index = 0
         self._dlss_reset_history = True
 
     def set_environment_hdr(self, hdr_path: str, scaling: float = 1.0):
@@ -772,14 +858,14 @@ class PathTracingViewer:
             (self._spec_hit_dist_buffer, self._dlss_spec_hit_dist_tex),
         )
         for src_buffer, dst_tex in copies:
-            dst_tex.copy_from_array(src_buffer)
+            dst_tex.copy_from(src_buffer)
 
     def _copy_dlss_output_to_color(self):
         if not self._dlss_enabled:
             return
         if self._dlss_output_buffer is None:
             return
-        self._dlss_color_out_tex.copy_to_array(self._dlss_output_buffer)
+        self._dlss_color_out_tex.copy_to(self._dlss_output_buffer)
 
     def _run_dlss_rr(self, reset: bool):
         if not self._dlss_enabled or self._dlss_denoiser is None:
@@ -914,11 +1000,13 @@ class PathTracingViewer:
             "pipelineLaunchParamsVariableName": "params",
         }
         if tuple(optix.version()) >= (7, 2):
-            pipeline_kwargs["usesPrimitiveTypeFlags"] = int(
+            primitive_flags = (
                 optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
                 | optix.PRIMITIVE_TYPE_FLAGS_ROUND_LINEAR
-                | optix.PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER
             )
+            if hasattr(optix, "PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER"):
+                primitive_flags |= optix.PRIMITIVE_TYPE_FLAGS_ROUND_CUBIC_BEZIER
+            pipeline_kwargs["usesPrimitiveTypeFlags"] = int(primitive_flags)
         pco = optix.PipelineCompileOptions(**pipeline_kwargs)
 
         mco = optix.ModuleCompileOptions(
@@ -1004,12 +1092,18 @@ class PathTracingViewer:
         self._curve_intersection_module, curve_hit_group = register_curve_hit_group(
             optix.PRIMITIVE_TYPE_ROUND_LINEAR
         )
-        self._bezier_curve_intersection_module, bezier_curve_hit_group = (
-            register_curve_hit_group(optix.PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER)
-        )
+        self._bezier_curve_intersection_module = None
+        bezier_curve_hit_group = None
+        if hasattr(optix, "PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER"):
+            self._bezier_curve_intersection_module, bezier_curve_hit_group = (
+                register_curve_hit_group(optix.PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER)
+            )
         if self._sbt_manager.get_sbt_offset(triangle_hit_group) != 0:
             raise RuntimeError("triangle hit group must occupy SBT offset 0")
-        if self._sbt_manager.get_sbt_offset(bezier_curve_hit_group) != 4:
+        if (
+            bezier_curve_hit_group is not None
+            and self._sbt_manager.get_sbt_offset(bezier_curve_hit_group) != 4
+        ):
             raise RuntimeError("cubic Bézier curve hit group must occupy SBT offset 4")
         if self._sbt_manager.get_sbt_offset(curve_hit_group) != 2:
             raise RuntimeError("curve hit group must occupy SBT offset 2")
@@ -1199,7 +1293,6 @@ class PathTracingViewer:
         p.emissive_material_intensity = float(self.emissive_material_intensity)
         p.output_mode = int(self.OUTPUT_FINAL)
         p.device_camera = self._device_camera_state
-
         if self.use_halton_jitter:
             jitter_x = self._halton(frame_index_value, 2) - 0.5
             jitter_y = self._halton(frame_index_value, 3) - 0.5
@@ -1449,6 +1542,37 @@ class PathTracingViewer:
             )
 
             self._launch_optix()
+
+            if self._volume is not None:
+                p = VolumeParams()
+                p.volume = wp.uint64(self._volume.id)
+                p.bounds_min = wp.vec3(*self._volume_min)
+                p.bounds_max = wp.vec3(*self._volume_max)
+                p.density_scale = self._volume_density_scale
+                p.step_size = self._volume_step_size
+                p.cool_dark = wp.vec3(*self._volume_cool_colors[0])
+                p.cool_mid = wp.vec3(*self._volume_cool_colors[1])
+                p.cool_light = wp.vec3(*self._volume_cool_colors[2])
+                p.warm_dark = wp.vec3(*self._volume_warm_colors[0])
+                p.warm_mid = wp.vec3(*self._volume_warm_colors[1])
+                p.warm_light = wp.vec3(*self._volume_warm_colors[2])
+                p.emission = self._volume_emission
+                p.anisotropy = self._volume_anisotropy
+                p.transfer_table = self._volume_transfer_table
+                p.transfer_count = wp.uint32(
+                    0
+                    if self._volume_transfer_table is None
+                    else len(self._volume_transfer_table)
+                )
+                p.density_feature = wp.uint32(self._volume_density_feature)
+                self._volume_params = p
+                wp.launch(
+                    composite_volume,
+                    dim=(self._render_width, self._render_height),
+                    inputs=[self._launch_params, self._volume_params],
+                    device="cuda",
+                    stream=self._render_stream,
+                )
 
             if not self._dlss_enabled:
                 accum_sample_index = int(self.frame_index if use_external_accum else s)

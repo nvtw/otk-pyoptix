@@ -353,6 +353,16 @@ class PathTracerAPI:
         self._viewer._prev_instance_transforms_valid = False
         self._viewer._sync_prev_camera_matrices_to_current()
 
+    def set_volume(
+        self,
+        volume: wp.Volume | None,
+        bounds_min=(0.0, 0.0, 0.0),
+        bounds_max=(1.0, 1.0, 1.0),
+        **kwargs,
+    ):
+        """Set or clear the NanoVDB volume rendered by the viewer."""
+        self._viewer.set_volume(volume, bounds_min, bounds_max, **kwargs)
+
     def reset_temporal_history(self):
         """Discard DLSS reconstruction history before a discontinuous scene change."""
         self._viewer._dlss_reset_history = True
@@ -526,6 +536,7 @@ class PathTracerAPI:
         material_id: int = 0,
         material_ids: np.ndarray | None = None,
         basis: str = "linear",
+        dynamic: bool = False,
     ) -> int:
         """Create reusable native round linear or cubic Bézier curve geometry.
 
@@ -557,8 +568,57 @@ class PathTracerAPI:
             material_id=mat_id,
             material_ids=_validate_material_ids(scene, material_ids),
             basis=basis,
+            dynamic=dynamic,
         )
         return int(scene.add_curve(curve))
+
+    def update_curve_device(
+        self,
+        geometry_id: int,
+        positions: wp.array,
+        *,
+        radii: wp.array | None = None,
+        material_ids: wp.array | None = None,
+        stream=None,
+        rebuild_gas: bool = False,
+        rebuild_tlas: bool = True,
+    ) -> None:
+        """Update a dynamic curve from CUDA-resident flat buffers."""
+        scene = self._require_scene()
+        curve = scene._meshes[int(geometry_id)]
+        if curve.primitive_type == "triangles" or not curve.dynamic:
+            raise ValueError("geometry must be a dynamic curve")
+        if curve.d_vertices is None:
+            raise RuntimeError("build the scene before updating curves")
+        if not positions.device.is_cuda or positions.dtype != wp.float32:
+            raise ValueError("positions must be a CUDA float32 Warp array")
+        if positions.ndim != 1 or len(positions) != len(curve.d_vertices):
+            raise ValueError("positions must contain three floats per control point")
+        wp.copy(curve.d_vertices, positions, stream=stream)
+        if radii is not None:
+            if not radii.device.is_cuda or radii.dtype != wp.float32:
+                raise ValueError("radii must be a CUDA float32 Warp array")
+            if radii.ndim != 1 or len(radii) != len(curve.d_widths):
+                raise ValueError("radii must contain one value per control point")
+            wp.copy(curve.d_widths, radii, stream=stream)
+        if material_ids is not None:
+            if not material_ids.device.is_cuda or material_ids.dtype != wp.uint32:
+                raise ValueError("material_ids must be a CUDA uint32 Warp array")
+            if material_ids.ndim != 1 or len(material_ids) != len(curve.material_ids):
+                raise ValueError("material_ids must contain one value per segment")
+            wp.copy(
+                scene._packed_material_ids,
+                material_ids,
+                dest_offset=curve._packed_material_offset,
+                stream=stream,
+            )
+        self._invalidate_optix_launch_graph_for_accel_update()
+        scene.update_curve_accel(
+            int(geometry_id),
+            stream=stream,
+            rebuild_gas=bool(rebuild_gas),
+            rebuild_tlas=bool(rebuild_tlas),
+        )
 
     def create_arrow_batch(
         self,
