@@ -6,14 +6,13 @@ option(PYOPTIX_AUTO_DOWNLOAD_DLSS
   "Automatically download DLSS SDK when DLSS_ROOT is not set."
   ON
 )
-# The 310.6.0 Linux runtime lacks the signed ELF metadata required by NGX.
-set(PYOPTIX_DLSS_VERSION "310.5.3" CACHE STRING "DLSS SDK version to fetch.")
+set(PYOPTIX_DLSS_VERSION "310.9.1" CACHE STRING "DLSS SDK version to fetch.")
 set(PYOPTIX_DLSS_URL
   "https://github.com/NVIDIA/DLSS/archive/refs/tags/v${PYOPTIX_DLSS_VERSION}.tar.gz"
   CACHE STRING "DLSS SDK archive URL."
 )
 set(PYOPTIX_DLSS_URL_HASH
-  "6b54a684b5b31e819a51742ad534abb4e8cdada76572f061a5d3149c7432a0a1"
+  "81b17f2f34bbd6b18b50df4c2a5632956b7feaba301567f29fcc5fbdd5c4ee06"
   CACHE STRING "SHA256 for DLSS SDK archive."
 )
 set(PYOPTIX_DLSS_DIR

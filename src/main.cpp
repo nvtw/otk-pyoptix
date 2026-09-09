@@ -204,7 +204,7 @@ struct DlssRRInitInfo
     unsigned int outputWidth = 0;
     unsigned int outputHeight = 0;
     NVSDK_NGX_PerfQuality_Value quality = NVSDK_NGX_PerfQuality_Value_MaxQuality;
-    NVSDK_NGX_RayReconstruction_Hint_Render_Preset preset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default;
+    NVSDK_NGX_RayReconstruction_Hint_Render_Preset preset = NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F;
     bool mvJittered = false;
     bool lowResolutionMotionVectors = true;
     bool isContentHDR = true;
@@ -2965,6 +2965,7 @@ PYBIND11_MODULE( _optix, m )
         .value( "DEFAULT", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_Default )
         .value( "D", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_D )
         .value( "E", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E )
+        .value( "F", NVSDK_NGX_RayReconstruction_Hint_Render_Preset_F )
         .export_values();
 
     py::enum_<pyoptix::DlssRRResource>(m, "DlssRRResource", py::arithmetic())

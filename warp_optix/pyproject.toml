@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
 authors = [{name = "NVIDIA"}]
 dependencies = [
-    "warp-lang>=1.15",
+    "warp-lang>=1.17",
     "pyoptix>=9.1",
     "numpy",
 ]

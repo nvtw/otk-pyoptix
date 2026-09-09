@@ -27,11 +27,10 @@ From the otk-pyoptix repo root:
 pip install -e . -e warp_optix/
 ```
 
-`warp_optix` uses Warp's public addon hooks when they are available. With
-vanilla `warp-lang>=1.15`, it falls back to a version-checked private API
-adapter for builtin registration, OptiX entry-point generation, and PTX
-compilation. The fallback changes only the active Python process; it does not
-patch or overwrite the installed Warp package.
+`warp_optix` requires `warp-lang>=1.17` and uses Warp's supported addon
+registration, external-entry kernel, and AOT compilation APIs. A
+version-checked private compatibility adapter remains only for older development
+environments; it does not patch or overwrite the installed Warp package.
 
 ## Path-tracing viewer
 

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Compatibility helpers for Warp releases without public addon hooks."""
+"""Compatibility helpers for Warp releases without addon hooks."""
 
 from __future__ import annotations
 
@@ -43,19 +43,27 @@ def _find_cuda_include_dir() -> Path | None:
 def has_public_addon_hooks(wp) -> bool:
     """Return whether Warp exposes the addon hooks used by warp_optix."""
     kernel_parameters = inspect.signature(wp.kernel).parameters
+    build_api = _get_build_api(wp)
     return (
-        hasattr(wp, "build")
-        and hasattr(wp.build, "add_builtin")
+        build_api is not None
+        and hasattr(build_api, "add_builtin")
         and hasattr(wp, "ModuleBuildOptions")
+        and hasattr(wp, "compile_aot_module")
         and "name" in kernel_parameters
         and "entry_point_abi" in kernel_parameters
     )
 
 
+def _get_build_api(wp):
+    """Return Warp's supported builtin-registration namespace, when present."""
+    return getattr(wp, "build_experimental", None) or getattr(wp, "build", None)
+
+
 def get_add_builtin(wp):
-    """Return Warp's public builtin registrar or a private-API adapter."""
-    if hasattr(wp, "build") and hasattr(wp.build, "add_builtin"):
-        return wp.build.add_builtin
+    """Return Warp's addon builtin registrar or a private-API adapter."""
+    build_api = _get_build_api(wp)
+    if build_api is not None and hasattr(build_api, "add_builtin"):
+        return build_api.add_builtin
 
     from warp._src.context import add_builtin as private_add_builtin
 

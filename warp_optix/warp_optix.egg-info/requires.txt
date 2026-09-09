@@ -1,4 +1,4 @@
-warp-lang>=1.15
+warp-lang>=1.17
 pyoptix>=9.1
 numpy
 

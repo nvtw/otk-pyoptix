@@ -735,9 +735,11 @@ class PathTracingViewer:
                 )
             init_info.quality = getattr(quality_enum, quality_name)
             preset_enum = self._optix.RayReconstructionHintRenderPreset
-            # Preset E's latest transformer better rejects stale illumination
-            # at moving shadow boundaries.
-            init_info.preset = getattr(preset_enum, "E", preset_enum.DEFAULT)
+            # Preset F selects the DLSS 4.5 Ray Reconstruction transformer
+            # (RR2), introduced by SDK 310.9.1.
+            init_info.preset = getattr(
+                preset_enum, "F", getattr(preset_enum, "E", preset_enum.DEFAULT)
+            )
             # Match reference behavior:
             # - MVJittered=false while still passing per-frame jitter to denoise()
             # - lowResolutionMotionVectors=true (motion vectors provided at render resolution)
