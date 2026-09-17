@@ -536,7 +536,7 @@ def test_optional_picking_uses_physics_camera_ray_and_applies_forces():
     model = SimpleNamespace(up_axis=2)
     viewer.set_model(model)
     picking = created[0]
-    assert picking.settings == (10000.0, 1000.0)
+    assert picking.settings == (50.0, 5.0)
 
     state = object()
     origin, direction = viewer._get_ray_from_mouse(viewer.width / 2, viewer.height / 2)

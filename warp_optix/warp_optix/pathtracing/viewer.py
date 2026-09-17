@@ -649,7 +649,8 @@ class PathTracingViewerBackend:
             factory = Picking
 
         try:
-            self._picking = factory(model, pick_stiffness=10000.0, pick_damping=1000.0)
+            # Match Newton viewers: excessive damping kicks moving bodies on mouse-down.
+            self._picking = factory(model, pick_stiffness=50.0, pick_damping=5.0)
             if hasattr(self._picking, "world_offsets"):
                 self._picking.world_offsets = getattr(self, "world_offsets", None)
             if hasattr(self._picking, "visible_worlds_mask"):
