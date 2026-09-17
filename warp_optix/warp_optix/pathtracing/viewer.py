@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -255,6 +255,7 @@ class _InstanceBatch:
     materials: np.ndarray
     hidden: bool = False
     active_count: int = 0
+    device_material_ids: list[int] = field(default_factory=list)
 
 
 def _as_numpy(value: Any, dtype=None) -> np.ndarray | None:
@@ -952,6 +953,12 @@ class PathTracingViewerBackend:
             batch.hidden = bool(hidden)
             batch.active_count = count
 
+        if count == 0:
+            # Hide-only updates keep the cached appearance for later reuse.
+            if visibility_changed:
+                self._transforms_dirty = True
+            return
+
         if xforms is not None:
             if isinstance(xforms, wp.array) and xforms.device.is_cuda:
                 if not isinstance(scales, wp.array) or not scales.device.is_cuda:
@@ -983,8 +990,8 @@ class PathTracingViewerBackend:
                     raise ValueError(
                         "The first CUDA appearance update requires colors and materials"
                     )
-                material_id_values = []
-                for instance_id in active_ids:
+                material_count = len(batch.device_material_ids)
+                for instance_id in active_ids[material_count:]:
                     material_id = self._create_material(
                         self._default_color,
                         self._default_material[0],
@@ -992,11 +999,12 @@ class PathTracingViewerBackend:
                         texture_id=texture_id,
                     )
                     self._api.set_instance_material(instance_id, material_id)
-                    material_id_values.append(material_id)
+                    batch.device_material_ids.append(material_id)
                 material_ids = wp.array(
-                    material_id_values, dtype=wp.int32, device=self.device
+                    batch.device_material_ids[:count], dtype=wp.int32, device=self.device
                 )
-                self._scene_dirty = True
+                if len(batch.device_material_ids) != material_count:
+                    self._scene_dirty = True
             else:
                 material_ids = cached_materials[0]
                 colors = cached_materials[1] if colors is None else colors
@@ -1014,6 +1022,8 @@ class PathTracingViewerBackend:
                 self._api.set_instance_material_arrays(material_ids, colors, materials)
 
         if not device_appearance and (appearance_changed or instances_added):
+            batch.device_material_ids.clear()
+            self._device_material_batches.pop(name, None)
             for index, instance_id in enumerate(active_ids):
                 material_id = self._get_or_create_material(
                     batch.colors[index], batch.materials[index], texture_id

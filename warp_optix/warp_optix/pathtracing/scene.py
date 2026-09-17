@@ -1742,6 +1742,9 @@ class Scene:
         self._gas_build_temp_sizes.clear()
         self._gas_update_temp_sizes.clear()
         self._tlas_instance_count = 0
+        # Full builds may change the instance count. Scene buffers below
+        # allocate the matching motion transforms after rebuilding the TLAS.
+        self._device_instance_transforms = None
         self._keepalive.clear()
         self._instance_records_dirty = True
 

@@ -121,3 +121,27 @@ def test_host_instance_transform_update_produces_motion_vectors():
         assert int(np.count_nonzero(magnitude > 1.0e-5)) > 100
     finally:
         api.close()
+
+
+def test_scene_rebuild_after_adding_instances_resizes_motion_buffers():
+    """Runtime instance additions must not upload into the old motion buffer."""
+    api = _new_gpu_api()
+    try:
+        material = api.create_emissive_material((1.0, 0.3, 0.05), intensity=2.0)
+        vertices = np.asarray(
+            ((-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.0, 0.5, 0.0)),
+            dtype=np.float32,
+        )
+        geometry = api.create_mesh(
+            vertices, np.asarray(((0, 1, 2),), dtype=np.uint32), material_id=material
+        )
+        api.set_camera_look_at((0.0, 0.0, 2.0), (0.0, 0.0, 0.0))
+        for count in (1, 2, 3):
+            api.create_instance(geometry)
+            api.build_scene()
+            api.render_frame()
+            assert api.scene._device_instance_transforms.shape == (count, 12)
+            assert api._viewer._prev_instance_transforms_buffer.shape == (count, 12)
+            assert np.isfinite(api.get_frame()).all()
+    finally:
+        api.close()

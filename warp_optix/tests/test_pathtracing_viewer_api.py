@@ -946,3 +946,37 @@ def test_global_backface_culling_can_be_changed_at_runtime():
     assert api.backface_culling is False
     api.set_backface_culling(True)
     assert api.backface_culling is True
+
+
+def test_cuda_instance_batches_reuse_materials_after_count_changes():
+    """Shrinking, hiding, and restoring batches must not rebuild materials."""
+    import warp as wp
+
+    if not wp.is_cuda_available():
+        pytest.skip("CUDA device unavailable")
+    api = _FakePathTracerAPI()
+    api.set_instance_material_arrays = lambda *args: None
+    viewer = PathTracingViewerBackend(device="cuda", headless=True, api=api)
+    points, indices = _triangle()
+    viewer.log_mesh("triangle", points, indices)
+    colors = wp.array(np.ones((3, 3), dtype=np.float32), dtype=wp.vec3, device="cuda")
+    materials = wp.array(np.ones((3, 4), dtype=np.float32), dtype=wp.vec4, device="cuda")
+    xforms = np.tile((0, 0, 0, 0, 0, 0, 1), (3, 1)).astype(np.float32)
+    viewer.log_instances("batch", "triangle", xforms, None, colors, materials)
+    viewer._flush_scene()
+    material_count = len(api.materials)
+    for count in (2, 1, 3):
+        viewer.log_instances(
+            "batch", "triangle", xforms[:count], None, colors[:count], materials[:count]
+        )
+        viewer._flush_scene()
+        assert len(api.materials) == material_count
+        assert api.build_count == 1
+    viewer.log_instances("batch", "triangle", None, None, None, None, hidden=True)
+    viewer._flush_scene()
+    assert all(not instance.visible for instance in api.scene._instances)
+    viewer.log_instances("batch", "triangle", xforms, None, colors, materials)
+    viewer._flush_scene()
+    assert all(instance.visible for instance in api.scene._instances)
+    assert len(api.materials) == material_count
+    assert api.build_count == 1
