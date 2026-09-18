@@ -6,8 +6,13 @@ Runtime modules intentionally do not import :mod:`warp_nn`; it is only used by
 the optional offline training tools.
 """
 
+from collections.abc import Mapping, Sequence
+
 import numpy as np
 
+from .device import NeuralTextureView as NeuralTextureView
+from .device import neural_texture_sample as neural_texture_sample
+from .device import neural_texture_sample_texel as neural_texture_sample_texel
 from .format import NetworkLayer as NetworkLayer
 from .format import CompressionResult as CompressionResult
 from .format import NeuralTextureAsset as NeuralTextureAsset
@@ -57,16 +62,54 @@ def compress_texture(
     )
 
 
+def compress_texture_set(
+    textures: Mapping[str, np.ndarray],
+    *,
+    color_spaces: Mapping[str, str] | None = None,
+    channel_weights: Mapping[str, float | Sequence[float]] | None = None,
+    steps: int = 1000,
+    refinement_steps: int | None = None,
+    learning_rate: float = 1e-2,
+    latent_scale: int = 4,
+    batch_size: int = 65536,
+    device: str = "cuda:0",
+    seed: int = 42,
+) -> CompressionResult:
+    """Compress named, same-resolution material textures with warp-nn.
+
+    Importing this module remains independent of the optional training package;
+    warp-nn is loaded only when this function is called.
+    """
+    from .training import compress_texture_set as _compress_texture_set
+
+    return _compress_texture_set(
+        textures,
+        color_spaces=color_spaces,
+        channel_weights=channel_weights,
+        steps=steps,
+        refinement_steps=refinement_steps,
+        learning_rate=learning_rate,
+        latent_scale=latent_scale,
+        batch_size=batch_size,
+        device=device,
+        seed=seed,
+    )
+
+
 __all__ = [
     "NetworkLayer",
     "NeuralTextureAsset",
     "CompressionResult",
     "NeuralTextureRuntime",
+    "NeuralTextureView",
     "TextureChannel",
     "compress_texture",
+    "compress_texture_set",
     "load_asset",
     "decode_texel",
     "decode_image",
+    "neural_texture_sample",
+    "neural_texture_sample_texel",
     "pack_latents",
     "network_input",
     "save_asset",

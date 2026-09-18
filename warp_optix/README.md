@@ -104,38 +104,70 @@ The Python API is equally direct:
 ```python
 import numpy as np
 from warp_optix.neural_texture import (
-    compress_texture, load_asset, save_asset, upload_asset,
+    compress_texture_set, load_asset, save_asset, upload_asset,
 )
 
-image = np.load("albedo.npy", allow_pickle=False).astype(np.float32)
-result = compress_texture(image, steps=1000, channel_name="albedo")
-save_asset("albedo.wnt", result.asset)
+textures = {
+    "albedo": np.load("albedo.npy", allow_pickle=False),
+    "normal": np.load("normal.npy", allow_pickle=False),
+    "roughness": np.load("roughness.npy", allow_pickle=False),
+}
+result = compress_texture_set(
+    textures,
+    color_spaces={"albedo": "srgb"},
+    channel_weights={"normal": 2.0},
+    steps=1000,
+)
+save_asset("material.wnt", result.asset)
+print(result.psnr, result.psnr_by_texture)
 
 # Loading, upload, and OptiX inference do not import warp-nn.
-asset = load_asset("albedo.wnt")
+asset = load_asset("material.wnt")
 runtime = upload_asset(asset, context, optix, device="cuda:0")
 ```
 
-For an OptiX program, construct the 32-value input and evaluate the decoder
-with `neural_texture_input_8()` and
-`neural_texture_infer_8x32x32x16()` from
-`warp_optix.neural_texture.device`. Pass the runtime's latent arrays,
-mip-description arrays, matrix/bias pointers, and byte offsets through launch
-parameters. The device path consists only of Warp-generated OptiX code and the
-exposed OptiX intrinsics; it has no `warp-nn` dependency.
+All maps must have the same resolution and may contain one to four channels;
+the set may contain at most 16 channels. Integer images are normalized
+automatically, while floating-point images must already be in `[0, 1]`.
+`color_spaces` records metadata and does not transform input values.
+`compress_texture()` remains the short single-image helper.
 
-The compressor uses shuffled bounded pixel batches, 4-bit latent refinement,
-and projected FP8 E4M3 weights. `CompressionResult.psnr` evaluates the
-exported representation with the dependency-free NumPy reference decoder.
+Inference needs one device view and one Warp call:
+
+```python
+from warp_optix.neural_texture import NeuralTextureView, neural_texture_sample
+
+@wp.struct
+class Params:
+    material: NeuralTextureView
+
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def closest_hit(params: Params):
+    values = neural_texture_sample(params.material, wp.vec2(0.25, 0.75))
+    albedo = wp.vec3(values[0], values[1], values[2])
+
+params.material = runtime.device_view()
+```
+
+The device path is Warp-generated OptiX code plus cooperative-vector
+intrinsics and has no `warp-nn` dependency.
+
+The compressor stages source values as FP16 on the GPU, samples batches there,
+and captures the training and refinement steps as CUDA graphs. Allow GPU memory
+for two bytes per source channel per pixel in addition to the model and training
+buffers. It uses 4-bit latent refinement and projected FP8 E4M3 weights.
+`CompressionResult.psnr` and
+`psnr_by_texture` evaluate the exported representation with the dependency-free
+NumPy reference decoder.
 The format is deliberately safe to memory-map: it uses no pickle data and
 validates shapes, dtypes, bounds, alignment, and SHA-256 payload checksums.
 
 This is a research-informed, compact integration rather than a reimplementation
 of NVIDIA RTXNTC. Version 1 has one fixed architecture, two learned latent
-levels, wrap addressing, no entropy coding, and no stochastic texture
+feature grids, base-level decoding, wrap addressing, no entropy coding, and no stochastic texture
 filtering or renderer material integration. Its `.wnt` format is not
-compatible with RTXNTC's `.ntc` format. For production compression,
-multi-level material bundles, and filtering guidance, consult NVIDIA's
+compatible with RTXNTC's `.ntc` format. For production compression, full mip
+pyramids, and filtering guidance, consult NVIDIA's
 [Random-Access Neural Compression of Material Textures](https://research.nvidia.com/publication/2023-08_random-access-neural-compression-material-textures),
 [RTXNTC SDK](https://github.com/NVIDIA-RTX/RTXNTC), and
 [inference-on-sample integration guide](https://github.com/NVIDIA-RTX/RTXNTC/blob/main/docs/integration/InferenceOnSample.md).

@@ -211,6 +211,7 @@ class CompressionResult:
     asset: NeuralTextureAsset
     losses: tuple[float, ...]
     psnr: float
+    psnr_by_texture: dict[str, float] = field(default_factory=dict)
 
 
 def _array_view(array: np.ndarray, offset: int) -> dict:

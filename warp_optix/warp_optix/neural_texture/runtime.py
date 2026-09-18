@@ -13,6 +13,7 @@ import numpy as np
 import warp as wp
 
 from .format import ALIGNMENT, NeuralTextureAsset
+from .device import NeuralTextureView
 
 
 def _align(value: int, alignment: int) -> int:
@@ -47,6 +48,22 @@ class NeuralTextureRuntime:
     @property
     def bias_ptr(self) -> int:
         return int(self.biases.ptr)
+
+    def device_view(self) -> NeuralTextureView:
+        """Return the small Warp struct passed to :func:`neural_texture_sample`."""
+        view = NeuralTextureView()
+        view.latents = self.latents
+        view.mip_offsets = self.mip_offsets
+        view.mip_widths = self.mip_widths
+        view.mip_heights = self.mip_heights
+        view.matrices = wp.uint64(self.matrix_ptr)
+        view.biases = wp.uint64(self.bias_ptr)
+        view.weight_offsets = wp.vec3ui(*self.weight_offsets)
+        view.bias_offsets = wp.vec3ui(*self.bias_offsets)
+        view.width = self.asset.width
+        view.height = self.asset.height
+        view.latent_level_count = len(self.asset.latent_mips)
+        return view
 
 
 def _description(optix, n, k, element_type, layout, offset, size):

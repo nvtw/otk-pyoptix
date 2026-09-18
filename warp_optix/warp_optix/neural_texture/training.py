@@ -10,6 +10,8 @@ decoder is optimized for the representation it will actually consume.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+
 import numpy as np
 import warp as wp
 
@@ -102,13 +104,15 @@ def _hgelu(input: wp.array2d(dtype=wp.float32), output: wp.array2d(dtype=wp.floa
 @wp.kernel
 def _mse(
     prediction: wp.array2d(dtype=wp.float32),
-    target: wp.array2d(dtype=wp.float32),
+    target: wp.array2d(dtype=wp.float16),
+    pixel_indices: wp.array(dtype=wp.int32),
+    channel_weights: wp.array(dtype=wp.float32),
     normalization: float,
     loss: wp.array(dtype=wp.float32),
 ):
     i, j = wp.tid()
-    difference = prediction[i, j] - target[i, j]
-    wp.atomic_add(loss, 0, difference * difference * normalization)
+    difference = prediction[i, j] - wp.float32(target[pixel_indices[i], j])
+    wp.atomic_add(loss, 0, difference * difference * channel_weights[j] * normalization)
 
 
 @wp.func
@@ -142,6 +146,39 @@ def _fake_quantize_fp8_e4m3_kernel(
 ):
     i, j = wp.tid()
     output[i, j] = _fake_quantize_fp8_e4m3(input[i, j])
+
+
+@wp.kernel(enable_backward=False)
+def _sample_pixels(
+    pixel_indices: wp.array(dtype=wp.int32),
+    step: wp.array(dtype=wp.int32),
+    seed: int,
+    pixel_count: int,
+):
+    sample = wp.tid()
+    state = wp.rand_init(seed, sample + step[0] * pixel_indices.shape[0])
+    pixel_indices[sample] = wp.randi(state, 0, pixel_count)
+
+
+@wp.kernel(enable_backward=False)
+def _sequential_pixels(pixel_indices: wp.array(dtype=wp.int32)):
+    pixel_indices[wp.tid()] = wp.tid()
+
+
+@wp.kernel(enable_backward=False)
+def _project_fp8_in_place(values: wp.array2d(dtype=wp.float32)):
+    i, j = wp.tid()
+    values[i, j] = _fake_quantize_fp8_e4m3(values[i, j])
+
+
+@wp.kernel(enable_backward=False)
+def _record_loss(
+    loss: wp.array(dtype=wp.float32),
+    history: wp.array(dtype=wp.float32),
+    step: wp.array(dtype=wp.int32),
+):
+    history[step[0]] = loss[0]
+    step[0] += 1
 
 
 class _FP8Quantizer:
@@ -213,6 +250,16 @@ class _Decoder(nn.Module):
         return self.fc2(hidden1)
 
 
+def _seeded_decoder(seed: int) -> _Decoder:
+    # warp-nn's initializers currently use NumPy's legacy global RNG. Preserve
+    # its state so this public seed is deterministic without surprising callers.
+    state = np.random.get_state()
+    np.random.seed(seed)
+    try:
+        return _Decoder()
+    finally:
+        np.random.set_state(state)
+
 def _quantized_array(array: wp.array, device: str) -> tuple[wp.array, np.ndarray]:
     host = array.numpy()
     packed = pack_latents(host)
@@ -225,8 +272,10 @@ def _project_model_weights(model: _Decoder) -> None:
         linear.weight.data.assign(_quantize_fp8_e4m3(linear.weight.data.numpy()))
 
 
-def compress_texture(
+def _compress_channels(
     image: np.ndarray,
+    texture_channels: tuple[TextureChannel, ...],
+    channel_weights: np.ndarray,
     *,
     steps: int = 1000,
     refinement_steps: int | None = None,
@@ -235,23 +284,7 @@ def compress_texture(
     batch_size: int = 65536,
     device: str = "cuda:0",
     seed: int = 42,
-    channel_name: str = "texture",
-    color_space: str = "linear",
 ) -> CompressionResult:
-    """Train and export one texture as a v1 neural-texture asset.
-
-    ``image`` must be float-like ``(height, width, channels)`` data normalized
-    to ``[0, 1]`` with at most 16 channels. ``steps`` trains latents and decoder;
-    ``refinement_steps`` then freezes quantized latents and refines an FP8-
-    projected decoder. Training samples at most ``batch_size`` pixels per step.
-    """
-    image = np.asarray(image, dtype=np.float32)
-    if image.ndim != 3 or not 1 <= image.shape[2] <= 16:
-        raise ValueError("image must have shape (height, width, 1..16)")
-    if image.shape[0] <= 0 or image.shape[1] <= 0:
-        raise ValueError("image dimensions must be positive")
-    if not np.all(np.isfinite(image)) or np.min(image) < 0.0 or np.max(image) > 1.0:
-        raise ValueError("image values must be finite and normalized to [0, 1]")
     if steps < 0 or (refinement_steps is not None and refinement_steps < 0):
         raise ValueError("training step counts must be non-negative")
     if latent_scale <= 0:
@@ -260,6 +293,8 @@ def compress_texture(
         raise ValueError("learning_rate must be finite and positive")
     if batch_size <= 0:
         raise ValueError("batch_size must be positive")
+    if not isinstance(seed, (int, np.integer)) or not 0 <= seed <= 0x7FFFFFFF:
+        raise ValueError("seed must be an integer in [0, 2**31 - 1]")
     if refinement_steps is None:
         refinement_steps = max(steps // 4, 1) if steps else 0
 
@@ -275,12 +310,10 @@ def compress_texture(
         max((latent0_shape[1] + 1) // 2, 1),
         8,
     )
-    target_host = np.zeros((height * width, 16), dtype=np.float32)
-    target_host[:, :channels] = image.reshape(-1, channels)
+    target_host = image.reshape(-1, channels)
 
     batch_count = min(batch_size, height * width)
     with wp.ScopedDevice(device):
-        wp.rand_init(seed)
         latent0 = wp.array(
             rng.uniform(-0.1, 0.1, latent0_shape).astype(np.float32),
             device=device,
@@ -291,13 +324,14 @@ def compress_texture(
             device=device,
             requires_grad=True,
         )
-        target = wp.empty((batch_count, 16), dtype=wp.float32, device=device)
+        target = wp.array(target_host, dtype=wp.float16, device=device)
+        weights = wp.array(channel_weights, dtype=wp.float32, device=device)
         pixel_indices = wp.empty(batch_count, dtype=wp.int32, device=device)
         inputs = wp.empty(
             (batch_count, 32), dtype=wp.float32, device=device, requires_grad=True
         )
         loss = wp.zeros(1, dtype=wp.float32, device=device, requires_grad=True)
-        model = _Decoder()
+        model = _seeded_decoder(int(seed))
         model.to(device)
         optimizer = optimizers.Adam(
             [latent0, latent1, *model.parameters()],
@@ -305,20 +339,37 @@ def compress_texture(
             device=device,
             disable_graph=True,
         )
-        losses = []
+        total_steps = steps + refinement_steps
+        loss_history = wp.empty(max(total_steps, 1), dtype=wp.float32, device=device)
+        step = wp.zeros(1, dtype=wp.int32, device=device)
+        full_batch = batch_count == height * width
+        if total_steps and full_batch:
+            wp.launch(
+                _sequential_pixels,
+                dim=batch_count,
+                inputs=[pixel_indices],
+                device=device,
+            )
 
         def train_step(
-            active_latent0, active_latent1, active_optimizer, project_weights=False
+            active_latent0, active_latent1, active_optimizer, project_weights
         ):
             loss.zero_()
-            if batch_count == height * width:
-                indices = np.arange(batch_count, dtype=np.int32)
-            else:
-                indices = rng.integers(0, height * width, batch_count, dtype=np.int32)
-            pixel_indices.assign(indices)
-            target.assign(target_host[indices])
+            if not full_batch:
+                wp.launch(
+                    _sample_pixels,
+                    dim=batch_count,
+                    inputs=[pixel_indices, step, seed, height * width],
+                    device=device,
+                )
             if project_weights:
-                _project_model_weights(model)
+                for linear in (model.fc0, model.fc1, model.fc2):
+                    wp.launch(
+                        _project_fp8_in_place,
+                        dim=linear.weight.data.shape,
+                        inputs=[linear.weight.data],
+                        device=device,
+                    )
 
             with wp.Tape() as tape:
                 wp.launch(
@@ -337,19 +388,66 @@ def compress_texture(
                 prediction = model(inputs)
                 wp.launch(
                     _mse,
-                    dim=prediction.shape,
-                    inputs=[prediction, target, 1.0 / prediction.size],
+                    dim=(batch_count, channels),
+                    inputs=[
+                        prediction,
+                        target,
+                        pixel_indices,
+                        weights,
+                        loss_normalization,
+                    ],
                     outputs=[loss],
                     device=device,
                 )
             tape.backward(loss)
             active_optimizer.step()
-            value = float(loss.numpy()[0])
+            wp.launch(
+                _record_loss,
+                dim=1,
+                inputs=[loss, loss_history, step],
+                device=device,
+            )
             tape.zero()
-            return value
 
-        for _ in range(steps):
-            losses.append(train_step(latent0, latent1, optimizer))
+        loss_normalization = 1.0 / (batch_count * float(np.sum(channel_weights)))
+
+        def train_phase(
+            count, active_latent0, active_latent1, active_optimizer, project_weights
+        ):
+            if count == 0:
+                return
+            # One real step allocates lazy layer/Tape buffers and compiles every
+            # kernel before capture. The remaining identical steps replay one graph.
+            train_step(
+                active_latent0, active_latent1, active_optimizer, project_weights
+            )
+            if count == 1:
+                return
+            if wp.get_device(device).is_cuda:
+                wp.capture_begin(device=device)
+                try:
+                    train_step(
+                        active_latent0,
+                        active_latent1,
+                        active_optimizer,
+                        project_weights,
+                    )
+                except Exception:
+                    wp.capture_end(device=device)
+                    raise
+                graph = wp.capture_end(device=device)
+                for _ in range(count - 1):
+                    wp.capture_launch(graph)
+            else:
+                for _ in range(count - 1):
+                    train_step(
+                        active_latent0,
+                        active_latent1,
+                        active_optimizer,
+                        project_weights,
+                    )
+
+        train_phase(steps, latent0, latent1, optimizer, False)
 
         quantized0, packed0 = _quantized_array(latent0, device)
         quantized1, packed1 = _quantized_array(latent1, device)
@@ -360,8 +458,8 @@ def compress_texture(
             disable_graph=True,
         )
         model.fp8_inputs = True
-        for _ in range(refinement_steps):
-            losses.append(train_step(quantized0, quantized1, refine_optimizer, True))
+        train_phase(refinement_steps, quantized0, quantized1, refine_optimizer, True)
+        losses = tuple(float(value) for value in loss_history.numpy()[:total_steps])
 
         _project_model_weights(model)
         layers = []
@@ -376,15 +474,7 @@ def compress_texture(
         asset = NeuralTextureAsset(
             width=width,
             height=height,
-            channels=tuple(
-                TextureChannel(
-                    channel_name if first == 0 else f"{channel_name}_{first // 4}",
-                    first,
-                    min(4, channels - first),
-                    color_space,
-                )
-                for first in range(0, channels, 4)
-            ),
+            channels=texture_channels,
             latent_features=8,
             latent_mips=(packed0, packed1),
             layers=tuple(layers),
@@ -400,4 +490,160 @@ def compress_texture(
     decoded = decode_image(asset, batch_size=batch_size)
     mse = float(np.mean((decoded - image) ** 2))
     psnr = float("inf") if mse == 0.0 else float(-10.0 * np.log10(mse))
-    return CompressionResult(asset=asset, losses=tuple(losses), psnr=psnr)
+
+    psnr_by_texture = {}
+    for texture in texture_channels:
+        channel_slice = slice(
+            texture.first_channel, texture.first_channel + texture.channel_count
+        )
+        texture_mse = float(
+            np.mean((decoded[..., channel_slice] - image[..., channel_slice]) ** 2)
+        )
+        psnr_by_texture[texture.name] = (
+            float("inf") if texture_mse == 0.0 else float(-10.0 * np.log10(texture_mse))
+        )
+    return CompressionResult(
+        asset=asset, losses=tuple(losses), psnr=psnr, psnr_by_texture=psnr_by_texture
+    )
+
+
+def _normalized_image(image: np.ndarray, name: str, *, max_channels: int) -> np.ndarray:
+    image = np.asarray(image)
+    if np.issubdtype(image.dtype, np.integer):
+        image = image.astype(np.float32) / np.iinfo(image.dtype).max
+    else:
+        image = image.astype(np.float32)
+    if image.ndim == 2:
+        image = image[..., None]
+    if image.ndim != 3 or not 1 <= image.shape[2] <= max_channels:
+        raise ValueError(
+            f"texture '{name}' must have shape (height, width, 1..{max_channels})"
+        )
+    if image.shape[0] <= 0 or image.shape[1] <= 0:
+        raise ValueError("texture dimensions must be positive")
+    if not np.all(np.isfinite(image)) or np.min(image) < 0.0 or np.max(image) > 1.0:
+        raise ValueError(
+            f"texture '{name}' values must be finite and normalized to [0, 1]"
+        )
+    return image
+
+
+def compress_texture_set(
+    textures: Mapping[str, np.ndarray],
+    *,
+    color_spaces: Mapping[str, str] | None = None,
+    channel_weights: Mapping[str, float | Sequence[float]] | None = None,
+    steps: int = 1000,
+    refinement_steps: int | None = None,
+    learning_rate: float = 1e-2,
+    latent_scale: int = 4,
+    batch_size: int = 65536,
+    device: str = "cuda:0",
+    seed: int = 42,
+) -> CompressionResult:
+    """Compress a named, same-resolution texture set into one neural asset.
+
+    Values are HWC (or HW for scalar maps), normalized to ``[0, 1]``, and may
+    have one to four channels. Up to 16 channels are decoded together, allowing
+    correlated material maps such as albedo, normal, and roughness to share the
+    same latents and network.
+    """
+    if not isinstance(textures, Mapping) or not textures:
+        raise ValueError("textures must be a non-empty mapping")
+    color_spaces = {} if color_spaces is None else color_spaces
+    channel_weights = {} if channel_weights is None else channel_weights
+    if not isinstance(color_spaces, Mapping):
+        raise TypeError("color_spaces must be a mapping")
+    if not isinstance(channel_weights, Mapping):
+        raise TypeError("channel_weights must be a mapping")
+    unknown = (set(color_spaces) | set(channel_weights)) - set(textures)
+    if unknown:
+        raise ValueError(f"options provided for unknown textures: {sorted(unknown)}")
+
+    images = []
+    descriptors = []
+    weights = []
+    shape = None
+    first_channel = 0
+    for name, value in textures.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError("texture names must be non-empty strings")
+        image = _normalized_image(value, name, max_channels=4)
+        if shape is None:
+            shape = image.shape[:2]
+        elif image.shape[:2] != shape:
+            raise ValueError("all textures must have the same height and width")
+        if first_channel + image.shape[2] > 16:
+            raise ValueError("a neural texture set supports at most 16 channels")
+
+        color_space = color_spaces.get(name, "linear")
+        descriptors.append(
+            TextureChannel(name, first_channel, image.shape[2], color_space)
+        )
+        texture_weight = np.asarray(channel_weights.get(name, 1.0), dtype=np.float32)
+        if texture_weight.ndim == 0:
+            texture_weight = np.full(image.shape[2], texture_weight, dtype=np.float32)
+        if texture_weight.shape != (image.shape[2],):
+            raise ValueError(
+                f"channel_weights['{name}'] must be scalar or have one value per channel"
+            )
+        if not np.all(np.isfinite(texture_weight)) or np.any(texture_weight <= 0.0):
+            raise ValueError("channel weights must be finite and positive")
+        images.append(image)
+        weights.append(texture_weight)
+        first_channel += image.shape[2]
+
+    return _compress_channels(
+        np.concatenate(images, axis=2),
+        tuple(descriptors),
+        np.concatenate(weights),
+        steps=steps,
+        refinement_steps=refinement_steps,
+        learning_rate=learning_rate,
+        latent_scale=latent_scale,
+        batch_size=batch_size,
+        device=device,
+        seed=seed,
+    )
+
+
+def compress_texture(
+    image: np.ndarray,
+    *,
+    steps: int = 1000,
+    refinement_steps: int | None = None,
+    learning_rate: float = 1e-2,
+    latent_scale: int = 4,
+    batch_size: int = 65536,
+    device: str = "cuda:0",
+    seed: int = 42,
+    channel_name: str = "texture",
+    color_space: str = "linear",
+) -> CompressionResult:
+    """Compress one normalized HWC texture.
+
+    This compatibility helper accepts up to 16 channels. Prefer
+    :func:`compress_texture_set` for named material maps.
+    """
+    image = _normalized_image(image, channel_name, max_channels=16)
+    descriptors = tuple(
+        TextureChannel(
+            channel_name if first == 0 else f"{channel_name}_{first // 4}",
+            first,
+            min(4, image.shape[2] - first),
+            color_space,
+        )
+        for first in range(0, image.shape[2], 4)
+    )
+    return _compress_channels(
+        image,
+        descriptors,
+        np.ones(image.shape[2], dtype=np.float32),
+        steps=steps,
+        refinement_steps=refinement_steps,
+        learning_rate=learning_rate,
+        latent_scale=latent_scale,
+        batch_size=batch_size,
+        device=device,
+        seed=seed,
+    )

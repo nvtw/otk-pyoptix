@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
 import sys
 from pathlib import Path
 
@@ -23,47 +24,25 @@ from warp_optix.neural_texture import (  # noqa: E402
     upload_asset,
 )
 from warp_optix.neural_texture.device import (  # noqa: E402
-    neural_texture_infer_8x32x32x16,
-    neural_texture_input_8,
+    NeuralTextureView,
+    neural_texture_sample,
+    neural_texture_sample_texel,
 )
 
 
 @wp.struct
 class NeuralParams:
     output: wp.array(dtype=wp.float32)
-    latents: wp.array(dtype=wp.uint16)
-    mip_offsets: wp.array(dtype=wp.int32)
-    mip_widths: wp.array(dtype=wp.int32)
-    mip_heights: wp.array(dtype=wp.int32)
-    matrices: wp.uint64
-    biases: wp.uint64
-    weight_offsets: wp.vec3ui
-    bias_offsets: wp.vec3ui
+    texture: NeuralTextureView
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
 def neural_raygen(params: NeuralParams):
-    inputs = neural_texture_input_8(
-        params.latents,
-        params.mip_offsets,
-        params.mip_widths,
-        params.mip_heights,
-        2,
-        3,
-        8,
-        8,
-        0,
-        2,
-    )
-    value = neural_texture_infer_8x32x32x16(
-        inputs,
-        params.matrices,
-        params.biases,
-        params.weight_offsets,
-        params.bias_offsets,
-    )
+    value = neural_texture_sample_texel(params.texture, 2, 3)
+    uv_value = neural_texture_sample(params.texture, wp.vec2(2.5 / 8.0, 3.5 / 8.0))
     for channel in range(3):
         params.output[channel] = wp.float32(value[channel])
+        params.output[channel + 3] = wp.float32(uv_value[channel])
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.MISS)
@@ -136,23 +115,29 @@ def test_neural_texture_device_inference(tmp_path, monkeypatch):
             num_attribute_values=0,
             device=device_name,
         )
-        output = wp.zeros(3, dtype=wp.float32, device=device_name)
+        output = wp.zeros(6, dtype=wp.float32, device=device_name)
         params = NeuralParams()
         params.output = output
-        params.latents = runtime.latents
-        params.mip_offsets = runtime.mip_offsets
-        params.mip_widths = runtime.mip_widths
-        params.mip_heights = runtime.mip_heights
-        params.matrices = wp.uint64(runtime.matrix_ptr)
-        params.biases = wp.uint64(runtime.bias_ptr)
-        params.weight_offsets = wp.vec3ui(*runtime.weight_offsets)
-        params.bias_offsets = wp.vec3ui(*runtime.bias_offsets)
+        params.texture = runtime.device_view()
         params_buffer = woptix.create_launch_params_buffer(NeuralParams, device_name)
         woptix.write_launch_params(params_buffer, params)
         woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
-        np.testing.assert_allclose(output.numpy(), decode_texel(asset, 2, 3), atol=3e-3)
+        expected = decode_texel(asset, 2, 3)
+        np.testing.assert_allclose(output.numpy()[:3], expected, atol=3e-3)
+        np.testing.assert_allclose(output.numpy()[3:], expected, atol=3e-3)
         assert resources
+
+        single_level = replace(asset, latent_mips=asset.latent_mips[:1])
+        single_runtime = upload_asset(single_level, context, optix, device=device_name)
+        output.zero_()
+        params.texture = single_runtime.device_view()
+        woptix.write_launch_params(params_buffer, params)
+        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        wp.synchronize_device(device_name)
+        expected = decode_texel(single_level, 2, 3)
+        np.testing.assert_allclose(output.numpy()[:3], expected, atol=3e-3)
+        np.testing.assert_allclose(output.numpy()[3:], expected, atol=3e-3)
 
         if importlib.util.find_spec("warp_nn") is not None:
             from warp_optix.neural_texture import compress_texture
@@ -173,17 +158,10 @@ def test_neural_texture_device_inference(tmp_path, monkeypatch):
             ).asset
             trained_runtime = upload_asset(trained, context, optix, device=device_name)
             output.zero_()
-            params.latents = trained_runtime.latents
-            params.mip_offsets = trained_runtime.mip_offsets
-            params.mip_widths = trained_runtime.mip_widths
-            params.mip_heights = trained_runtime.mip_heights
-            params.matrices = wp.uint64(trained_runtime.matrix_ptr)
-            params.biases = wp.uint64(trained_runtime.bias_ptr)
-            params.weight_offsets = wp.vec3ui(*trained_runtime.weight_offsets)
-            params.bias_offsets = wp.vec3ui(*trained_runtime.bias_offsets)
+            params.texture = trained_runtime.device_view()
             woptix.write_launch_params(params_buffer, params)
             woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
             wp.synchronize_device(device_name)
             np.testing.assert_allclose(
-                output.numpy(), decode_texel(trained, 2, 3), atol=5e-3
+                output.numpy()[:3], decode_texel(trained, 2, 3), atol=5e-3
             )

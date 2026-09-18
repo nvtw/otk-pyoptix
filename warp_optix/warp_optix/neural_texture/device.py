@@ -14,6 +14,23 @@ Vec32h = wp.types.vector(length=32, dtype=wp.float16)
 Vec16h = wp.types.vector(length=16, dtype=wp.float16)
 
 
+@wp.struct
+class NeuralTextureView:
+    """Compact device view stored in an OptiX launch-parameter struct."""
+
+    latents: wp.array(dtype=wp.uint16)
+    mip_offsets: wp.array(dtype=wp.int32)
+    mip_widths: wp.array(dtype=wp.int32)
+    mip_heights: wp.array(dtype=wp.int32)
+    matrices: wp.uint64
+    biases: wp.uint64
+    weight_offsets: wp.vec3ui
+    bias_offsets: wp.vec3ui
+    width: wp.int32
+    height: wp.int32
+    latent_level_count: wp.int32
+
+
 @wp.func
 def _wrap_index(value: int, size: int):
     return ((value % size) + size) % size
@@ -188,3 +205,39 @@ def neural_texture_infer_8x32x32x16(
         output,
     )
     return output
+
+
+@wp.func
+def neural_texture_sample_texel(texture: NeuralTextureView, x: int, y: int):
+    """Decode all 16 output channels for one integer texel."""
+    inputs = neural_texture_input_8(
+        texture.latents,
+        texture.mip_offsets,
+        texture.mip_widths,
+        texture.mip_heights,
+        x,
+        y,
+        int(texture.width),
+        int(texture.height),
+        0,
+        int(texture.latent_level_count),
+    )
+    return neural_texture_infer_8x32x32x16(
+        inputs,
+        texture.matrices,
+        texture.biases,
+        texture.weight_offsets,
+        texture.bias_offsets,
+    )
+
+
+@wp.func
+def neural_texture_sample(texture: NeuralTextureView, uv: wp.vec2):
+    """Decode the base-level texel at a normalized, repeat-wrapped UV."""
+    width = int(texture.width)
+    height = int(texture.height)
+    u = uv[0] - wp.floor(uv[0])
+    v = uv[1] - wp.floor(uv[1])
+    x = wp.min(int(wp.floor(u * wp.float32(width))), width - 1)
+    y = wp.min(int(wp.floor(v * wp.float32(height))), height - 1)
+    return neural_texture_sample_texel(texture, x, y)
