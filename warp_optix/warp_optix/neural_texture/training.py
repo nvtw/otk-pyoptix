@@ -4,8 +4,8 @@
 
 Nothing in the inference/runtime path imports this module. Training follows the
 NTC design: two learned latent grids, positional features, and a tiny per-asset
-MLP. A final refinement phase freezes 4-bit-quantized latents so the exported
-decoder is optimized for the representation it will actually consume.
+MLP. A final refinement phase trains through 4-bit latent quantization so the
+decoder and latents adapt to the representation used at inference.
 """
 
 from __future__ import annotations
@@ -28,9 +28,18 @@ from .format import (
     NeuralTextureAsset,
     TextureChannel,
     pack_latents,
-    unpack_latents,
 )
 from .reference import _quantize_fp8_e4m3, decode_image
+
+
+@wp.func
+def _quantize_latent(value: float):
+    return wp.rint((wp.clamp(value, -1.0, 1.0) + 1.0) * 7.5) * (2.0 / 15.0) - 1.0
+
+
+@wp.func_grad(_quantize_latent)
+def _adj_quantize_latent(value: float, adj_ret: float):
+    wp.adjoint[value] += adj_ret
 
 
 @wp.kernel
@@ -40,6 +49,7 @@ def _build_inputs(
     pixel_indices: wp.array(dtype=wp.int32),
     image_width: int,
     image_height: int,
+    quantize: bool,
     output: wp.array2d(dtype=wp.float32),
 ):
     sample = wp.tid()
@@ -72,6 +82,11 @@ def _build_inputs(
                 s10 = latent1[iy0, ix1, feature]
                 s01 = latent1[iy1, ix0, feature]
                 s11 = latent1[iy1, ix1, feature]
+            if quantize:
+                s00 = _quantize_latent(s00)
+                s10 = _quantize_latent(s10)
+                s01 = _quantize_latent(s01)
+                s11 = _quantize_latent(s11)
             output[sample, grid_index * 8 + feature] = (
                 s00 * (1.0 - tx) * (1.0 - ty)
                 + s10 * tx * (1.0 - ty)
@@ -260,12 +275,6 @@ def _seeded_decoder(seed: int) -> _Decoder:
     finally:
         np.random.set_state(state)
 
-def _quantized_array(array: wp.array, device: str) -> tuple[wp.array, np.ndarray]:
-    host = array.numpy()
-    packed = pack_latents(host)
-    restored = unpack_latents(packed, 8)
-    return wp.array(restored, dtype=wp.float32, device=device), packed
-
 
 def _project_model_weights(model: _Decoder) -> None:
     for linear in (model.fc0, model.fc1, model.fc2):
@@ -381,6 +390,7 @@ def _compress_channels(
                         pixel_indices,
                         width,
                         height,
+                        project_weights,
                     ],
                     outputs=[inputs],
                     device=device,
@@ -449,16 +459,16 @@ def _compress_channels(
 
         train_phase(steps, latent0, latent1, optimizer, False)
 
-        quantized0, packed0 = _quantized_array(latent0, device)
-        quantized1, packed1 = _quantized_array(latent1, device)
         refine_optimizer = optimizers.Adam(
-            model.parameters(),
+            [latent0, latent1, *model.parameters()],
             lr=learning_rate * 0.25,
             device=device,
             disable_graph=True,
         )
         model.fp8_inputs = True
-        train_phase(refinement_steps, quantized0, quantized1, refine_optimizer, True)
+        train_phase(refinement_steps, latent0, latent1, refine_optimizer, True)
+        packed0 = pack_latents(latent0.numpy())
+        packed1 = pack_latents(latent1.numpy())
         losses = tuple(float(value) for value in loss_history.numpy()[:total_steps])
 
         _project_model_weights(model)

@@ -155,10 +155,28 @@ intrinsics and has no `warp-nn` dependency.
 The compressor stages source values as FP16 on the GPU, samples batches there,
 and captures the training and refinement steps as CUDA graphs. Allow GPU memory
 for two bytes per source channel per pixel in addition to the model and training
-buffers. It uses 4-bit latent refinement and projected FP8 E4M3 weights.
+buffers. Refinement keeps training both the decoder and latents through 4-bit
+quantization, using straight-through gradients and projected FP8 E4M3 weights.
+This improves exported quality without increasing storage or inference work.
 `CompressionResult.psnr` and
 `psnr_by_texture` evaluate the exported representation with the dependency-free
 NumPy reference decoder.
+
+Use `latent_scale` to choose the storage/quality tradeoff. The default is 4;
+larger values use smaller grids. For large images the latent rate is approximately
+`40 / latent_scale**2` bits per material texel, shared across all channels:
+
+| `latent_scale` | Latent bits/texel | Intended use |
+| --- | ---: | --- |
+| 3 | 4.44 | More detail |
+| 4 | 2.50 | Default balance |
+| 5 | 1.60 | Smaller assets, especially smoother images |
+
+All three use the same decoder and number of latent samples; larger grids can
+still affect cache behavior. Increasing `steps` can improve quality without changing
+the asset size or device code. Full-image NumPy quality evaluation is included
+in compression time and can take longer than GPU optimization itself.
+
 The format is deliberately safe to memory-map: it uses no pickle data and
 validates shapes, dtypes, bounds, alignment, and SHA-256 payload checksums.
 
