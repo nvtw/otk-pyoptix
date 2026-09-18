@@ -26,6 +26,9 @@ vec2 = wp.vec2
 vec3 = wp.vec3
 vec3ui = wp.vec3ui
 mat33 = wp.mat33
+mat24 = wp.types.matrix(shape=(2, 4), dtype=float)
+mat34 = wp.types.matrix(shape=(3, 4), dtype=float)
+mat44 = wp.mat44
 
 
 def register_addon_builtins() -> None:
@@ -124,6 +127,50 @@ def register_addon_builtins() -> None:
         doc="Return the current triangle's three object-space vertices as rows of a mat33.",
     )
 
+    for _name in (
+        "optix_is_triangle_hit",
+        "optix_is_triangle_front_face_hit",
+        "optix_is_triangle_back_face_hit",
+    ):
+        add_builtin(
+            _name,
+            input_types={},
+            value_type=bool,
+            doc="Query the current triangle hit in any-hit or closest-hit programs.",
+        )
+
+    add_builtin(
+        "optix_get_linear_curve_vertex_data",
+        input_types={},
+        value_type=mat24,
+    )
+    for _name in (
+        "quadratic_bspline",
+        "ribbon",
+    ):
+        add_builtin(
+            f"optix_get_{_name}_vertex_data",
+            input_types={},
+            value_type=mat34,
+        )
+    for _name in (
+        "cubic_bspline",
+        "catmull_rom",
+        "cubic_bezier",
+    ):
+        add_builtin(
+            f"optix_get_{_name}_vertex_data",
+            input_types={},
+            value_type=mat44,
+        )
+
+    add_builtin("optix_get_ribbon_parameters", input_types={}, value_type=vec2)
+    add_builtin(
+        "optix_get_ribbon_normal",
+        input_types={"parameters": vec2},
+        value_type=vec3,
+    )
+
     add_builtin(
         "optix_get_curve_parameter",
         input_types={},
@@ -207,6 +254,29 @@ def register_addon_builtins() -> None:
             input_types={_argument: vec3},
             value_type=vec3,
         )
+
+    for _name in (
+        "optix_get_object_to_world_transform_matrix",
+        "optix_get_world_to_object_transform_matrix",
+    ):
+        add_builtin(
+            _name,
+            input_types={},
+            value_type=mat44,
+            doc="Return the current composite affine transform as a homogeneous mat44.",
+        )
+
+    add_builtin("optix_get_transform_list_size", input_types={}, value_type=uint32)
+    add_builtin(
+        "optix_get_transform_list_handle",
+        input_types={"index": uint32},
+        value_type=uint64,
+    )
+    add_builtin(
+        "optix_get_transform_type_from_handle",
+        input_types={"handle": uint64},
+        value_type=uint32,
+    )
 
     add_builtin(
         "optix_terminate_ray",

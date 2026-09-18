@@ -264,6 +264,93 @@ inline CUDA_CALLABLE_DEVICE mat33 optix_get_triangle_vertex_data()
 #endif
 }
 
+inline CUDA_CALLABLE_DEVICE bool optix_is_triangle_hit()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixIsTriangleHit();
+#else
+    return false;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE bool optix_is_triangle_front_face_hit()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixIsTriangleFrontFaceHit();
+#else
+    return false;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE bool optix_is_triangle_back_face_hit()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return optixIsTriangleBackFaceHit();
+#else
+    return false;
+#endif
+}
+
+template <unsigned Count>
+inline CUDA_CALLABLE_DEVICE mat_t<Count, 4, float> optix_curve_vertices_to_matrix(const float4 (&vertices)[Count])
+{
+    mat_t<Count, 4, float> result;
+    for (unsigned i = 0; i < Count; ++i) {
+        result.data[i][0] = vertices[i].x;
+        result.data[i][1] = vertices[i].y;
+        result.data[i][2] = vertices[i].z;
+        result.data[i][3] = vertices[i].w;
+    }
+    return result;
+}
+
+#define WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(NAME, OPTIX_NAME, COUNT) \
+    inline CUDA_CALLABLE_DEVICE mat_t<COUNT, 4, float> NAME()       \
+    {                                                               \
+        float4 vertices[COUNT] = {};                                \
+        OPTIX_NAME(vertices);                                        \
+        return optix_curve_vertices_to_matrix(vertices);             \
+    }
+
+#if defined(WP_ENABLE_OPTIX)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_linear_curve_vertex_data, optixGetLinearCurveVertexData, 2)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_quadratic_bspline_vertex_data, optixGetQuadraticBSplineVertexData, 3)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_cubic_bspline_vertex_data, optixGetCubicBSplineVertexData, 4)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_catmull_rom_vertex_data, optixGetCatmullRomVertexData, 4)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_cubic_bezier_vertex_data, optixGetCubicBezierVertexData, 4)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_ribbon_vertex_data, optixGetRibbonVertexData, 3)
+#else
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_linear_curve_vertex_data, (void), 2)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_quadratic_bspline_vertex_data, (void), 3)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_cubic_bspline_vertex_data, (void), 4)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_catmull_rom_vertex_data, (void), 4)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_cubic_bezier_vertex_data, (void), 4)
+WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY(optix_get_ribbon_vertex_data, (void), 3)
+#endif
+
+#undef WP_DEFINE_OPTIX_CURVE_VERTEX_QUERY
+
+inline CUDA_CALLABLE_DEVICE vec2 optix_get_ribbon_parameters()
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float2 parameters = optixGetRibbonParameters();
+    return vec2(parameters.x, parameters.y);
+#else
+    return vec2(0.0f);
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE vec3 optix_get_ribbon_normal(const vec2& parameters)
+{
+#if defined(WP_ENABLE_OPTIX)
+    const float3 normal = optixGetRibbonNormal(make_float2(parameters[0], parameters[1]));
+    return vec3(normal.x, normal.y, normal.z);
+#else
+    (void)parameters;
+    return vec3(0.0f);
+#endif
+}
+
 inline CUDA_CALLABLE_DEVICE float optix_get_curve_parameter()
 {
 #if defined(WP_ENABLE_OPTIX)
@@ -431,17 +518,61 @@ inline CUDA_CALLABLE_DEVICE vec3 optix_transform_normal_from_world_to_object_spa
 #endif
 }
 
-inline CUDA_CALLABLE_DEVICE void optix_get_object_to_world_transform_matrix(float* matrix)
+inline CUDA_CALLABLE_DEVICE mat44 optix_get_object_to_world_transform_matrix()
 {
+    float matrix[12] = {};
 #if defined(WP_ENABLE_OPTIX)
     optixGetObjectToWorldTransformMatrix(matrix);
+#else
+    matrix[0] = matrix[5] = matrix[10] = 1.0f;
+#endif
+    return mat44(matrix[0], matrix[1], matrix[2], matrix[3],
+                 matrix[4], matrix[5], matrix[6], matrix[7],
+                 matrix[8], matrix[9], matrix[10], matrix[11],
+                 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+inline CUDA_CALLABLE_DEVICE mat44 optix_get_world_to_object_transform_matrix()
+{
+    float matrix[12] = {};
+#if defined(WP_ENABLE_OPTIX)
+    optixGetWorldToObjectTransformMatrix(matrix);
+#else
+    matrix[0] = matrix[5] = matrix[10] = 1.0f;
+#endif
+    return mat44(matrix[0], matrix[1], matrix[2], matrix[3],
+                 matrix[4], matrix[5], matrix[6], matrix[7],
+                 matrix[8], matrix[9], matrix[10], matrix[11],
+                 0.0f, 0.0f, 0.0f, 1.0f);
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_transform_list_size()
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(optixGetTransformListSize());
+#else
+    return 0u;
 #endif
 }
 
-inline CUDA_CALLABLE_DEVICE void optix_get_world_to_object_transform_matrix(float* matrix)
+inline CUDA_CALLABLE_DEVICE uint64 optix_get_transform_list_handle(uint32 index)
 {
 #if defined(WP_ENABLE_OPTIX)
-    optixGetWorldToObjectTransformMatrix(matrix);
+    return static_cast<uint64>(optixGetTransformListHandle(index));
+#else
+    (void)index;
+    return 0ull;
+#endif
+}
+
+inline CUDA_CALLABLE_DEVICE uint32 optix_get_transform_type_from_handle(uint64 handle)
+{
+#if defined(WP_ENABLE_OPTIX)
+    return static_cast<uint32>(
+        optixGetTransformTypeFromHandle(static_cast<OptixTraversableHandle>(handle)));
+#else
+    (void)handle;
+    return 0u;
 #endif
 }
 

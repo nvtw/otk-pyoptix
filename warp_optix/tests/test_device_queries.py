@@ -135,6 +135,39 @@ def query_closest_hit(params: QueryParams):
     ):
         error |= wp.uint32(8)
 
+    if not wp.optix_is_triangle_hit():
+        error |= wp.uint32(128)
+    if not wp.optix_is_triangle_front_face_hit():
+        error |= wp.uint32(256)
+    if wp.optix_is_triangle_back_face_hit():
+        error |= wp.uint32(512)
+
+    object_to_world = wp.optix_get_object_to_world_transform_matrix()
+    world_to_object = wp.optix_get_world_to_object_transform_matrix()
+    if (
+        wp.abs(object_to_world[0, 0]) > 1.0e-5
+        or wp.abs(object_to_world[0, 1] + 2.0) > 1.0e-5
+        or wp.abs(object_to_world[1, 0] - 1.0) > 1.0e-5
+        or wp.abs(object_to_world[0, 3] - 2.0) > 1.0e-5
+        or wp.abs(object_to_world[3, 3] - 1.0) > 1.0e-5
+    ):
+        error |= wp.uint32(1024)
+    if (
+        wp.abs(world_to_object[0, 0]) > 1.0e-5
+        or wp.abs(world_to_object[0, 1] - 1.0) > 1.0e-5
+        or wp.abs(world_to_object[1, 0] + 0.5) > 1.0e-5
+        or wp.abs(world_to_object[1, 3] - 1.0) > 1.0e-5
+        or wp.abs(world_to_object[3, 3] - 1.0) > 1.0e-5
+    ):
+        error |= wp.uint32(2048)
+
+    if wp.optix_get_transform_list_size() != wp.uint32(1):
+        error |= wp.uint32(4096)
+    else:
+        transform_handle = wp.optix_get_transform_list_handle(wp.uint32(0))
+        if wp.optix_get_transform_type_from_handle(transform_handle) != wp.uint32(4):
+            error |= wp.uint32(8192)
+
     vertices = wp.optix_get_triangle_vertex_data()
     if (
         wp.length(
@@ -220,6 +253,79 @@ def curve_closest_hit(params: QueryParams):
     params.output[3] = wp.float_to_uint32(world_hit[2])
     object_origin = wp.optix_transform_point_from_object_to_world_space(wp.vec3(0.0))
     params.output[4] = wp.float_to_uint32(object_origin[2])
+
+    error = wp.uint32(0)
+    vertices = wp.optix_get_linear_curve_vertex_data()
+    if (
+        wp.length(
+            wp.vec3(vertices[0, 0], vertices[0, 1], vertices[0, 2])
+            - wp.vec3(0.0, -1.0, 0.0)
+        )
+        > 1.0e-5
+        or wp.abs(vertices[0, 3] - 0.25) > 1.0e-5
+    ):
+        error |= wp.uint32(1)
+    if (
+        wp.length(
+            wp.vec3(vertices[1, 0], vertices[1, 1], vertices[1, 2])
+            - wp.vec3(0.0, 1.0, 0.0)
+        )
+        > 1.0e-5
+        or wp.abs(vertices[1, 3] - 0.25) > 1.0e-5
+    ):
+        error |= wp.uint32(2)
+    if wp.optix_is_triangle_hit():
+        error |= wp.uint32(4)
+    params.output[5] = error
+
+    # Keep every current-hit curve query in a live entry point. The primitive
+    # type makes only the matching branch execute, while OptiX compiles all of
+    # the device calls below.
+    primitive_type = wp.optix_get_primitive_type()
+    probe = wp.float32(0.0)
+    if primitive_type == wp.uint32(0x2501):
+        quadratic = wp.optix_get_quadratic_bspline_vertex_data()
+        probe = quadratic[0, 0]
+    elif primitive_type == wp.uint32(0x2502):
+        cubic_bspline = wp.optix_get_cubic_bspline_vertex_data()
+        probe = cubic_bspline[0, 0]
+    elif primitive_type == wp.uint32(0x2504):
+        catmull_rom = wp.optix_get_catmull_rom_vertex_data()
+        probe = catmull_rom[0, 0]
+    elif primitive_type == wp.uint32(0x2505):
+        ribbon = wp.optix_get_ribbon_vertex_data()
+        parameters = wp.optix_get_ribbon_parameters()
+        normal = wp.optix_get_ribbon_normal(parameters)
+        probe = ribbon[0, 0] + normal[0]
+    elif primitive_type == wp.uint32(0x2507):
+        cubic_bezier = wp.optix_get_cubic_bezier_vertex_data()
+        probe = cubic_bezier[0, 0]
+    params.output[6] = wp.float_to_uint32(probe)
+
+
+@woptix.optix_kernel(woptix.OptixKernelType.CLOSEST_HIT)
+def higher_order_curve_closest_hit(params: QueryParams):
+    primitive_type = wp.optix_get_primitive_type()
+    error = wp.uint32(0)
+    if primitive_type == wp.uint32(0x2501):
+        quadratic_vertices = wp.optix_get_quadratic_bspline_vertex_data()
+        if (
+            wp.abs(quadratic_vertices[0, 1] + 1.0) > 1.0e-5
+            or wp.abs(quadratic_vertices[2, 1] - 1.0) > 1.0e-5
+            or wp.abs(quadratic_vertices[1, 3] - 0.25) > 1.0e-5
+        ):
+            error = wp.uint32(1)
+    elif primitive_type == wp.uint32(0x2507):
+        bezier_vertices = wp.optix_get_cubic_bezier_vertex_data()
+        if (
+            wp.abs(bezier_vertices[0, 1] + 1.5) > 1.0e-5
+            or wp.abs(bezier_vertices[3, 1] - 1.5) > 1.0e-5
+            or wp.abs(bezier_vertices[2, 3] - 0.25) > 1.0e-5
+        ):
+            error = wp.uint32(2)
+    else:
+        error = wp.uint32(4)
+    params.output[0] = error
 
 
 @woptix.optix_kernel(woptix.OptixKernelType.RAYGEN)
@@ -314,7 +420,7 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         )
         hit_handle = pipeline_buffers["hit_group_handles"][0]
         hit_offset = pipeline_buffers["sbt_manager"].get_sbt_offset(hit_handle)
-        transform = [1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        transform = [0.0, -2.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
         instance = optix.Instance(
             transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, gas
         )
@@ -614,11 +720,82 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
         object_origin_z = np.array(result[4], dtype=np.uint32).view(np.float32).item()
         assert hit_z == pytest.approx(0.25)
         assert object_origin_z == 0.0
+        assert result[5] == 0
+        assert result[6] == np.float32(0.0).view(np.uint32)
+
+        higher_order_resources = []
+        curve_cases = (
+            (
+                optix.PRIMITIVE_TYPE_ROUND_QUADRATIC_BSPLINE,
+                np.array(
+                    [[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    dtype=np.float32,
+                ),
+            ),
+            (
+                optix.PRIMITIVE_TYPE_ROUND_CUBIC_BEZIER,
+                np.array(
+                    [
+                        [0.0, -1.5, 0.0],
+                        [0.0, -0.5, 0.0],
+                        [0.0, 0.5, 0.0],
+                        [0.0, 1.5, 0.0],
+                    ],
+                    dtype=np.float32,
+                ),
+            ),
+        )
+        for curve_type, control_points in curve_cases:
+            higher_order_gas, higher_order_buffers = woptix.create_curve_gas(
+                optix,
+                context,
+                control_points,
+                np.full(len(control_points), 0.25, dtype=np.float32),
+                np.array([0], dtype=np.uint32),
+                device_name,
+                curve_type=curve_type,
+            )
+            higher_order_pipeline, higher_order_sbt, higher_order_pipeline_buffers = (
+                woptix.create_pipeline_and_sbt(
+                    optix,
+                    context,
+                    ptx,
+                    curve_raygen,
+                    query_miss,
+                    None,
+                    num_payload_values=1,
+                    num_attribute_values=1,
+                    device=device_name,
+                    hit_groups=[
+                        woptix.HitKernel(
+                            closest_hit=higher_order_curve_closest_hit,
+                            builtin_intersection_type=curve_type,
+                        )
+                    ],
+                )
+            )
+            output.zero_()
+            params.traversable = wp.uint64(higher_order_gas)
+            woptix.write_launch_params(params_buffer, params)
+            woptix.launch(
+                optix,
+                higher_order_pipeline,
+                higher_order_sbt,
+                1,
+                1,
+                params_buffer,
+            )
+            wp.synchronize_device(device_name)
+            assert output.numpy()[0] == 0
+            higher_order_resources.append(
+                (higher_order_buffers, higher_order_pipeline_buffers)
+            )
 
         _keepalive = (
             motion_buffers,
             motion_pipeline_buffers,
             curve_buffers,
             curve_pipeline_buffers,
+            higher_order_resources,
             params_buffer,
         )

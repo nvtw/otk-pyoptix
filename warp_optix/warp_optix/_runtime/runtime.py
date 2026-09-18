@@ -716,6 +716,7 @@ def _primitive_type_flag(optix, primitive_type) -> int:
         "ROUND_CUBIC_BSPLINE",
         "ROUND_LINEAR",
         "ROUND_CATMULLROM",
+        "FLAT_QUADRATIC_BSPLINE",
         "ROUND_CUBIC_BEZIER",
     )
     for name in names:

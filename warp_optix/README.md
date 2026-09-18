@@ -81,6 +81,39 @@ signed int8, and unsigned int8. Named matrix variants use an
 inference-optimal, non-transposed matrix with the element interpretation in
 the function name.
 
+## Geometry and transform queries
+
+Current triangle hits expose barycentrics, object-space vertices, generic and
+triangle-specific face predicates. Built-in curve hits expose their object-space
+control points as fixed Warp matrices whose rows are `(x, y, z, radius)`:
+
+| Query family | Return type |
+| --- | --- |
+| Linear curve | `2 x 4` float matrix |
+| Quadratic B-spline and ribbon | `3 x 4` float matrix |
+| Cubic B-spline, Catmull-Rom, and cubic Bezier | `wp.mat44` |
+
+Ribbons additionally expose their two intersection parameters and derived
+normal. Geometry current-hit queries are valid in any-hit and closest-hit
+programs for the corresponding primitive type.
+
+The current transform list can be inspected with
+`wp.optix_get_transform_list_size()`,
+`wp.optix_get_transform_list_handle(index)`, and
+`wp.optix_get_transform_type_from_handle(handle)`. Composite affine
+transforms are returned as ordinary homogeneous `wp.mat44` values:
+
+```python
+object_to_world = wp.optix_get_object_to_world_transform_matrix()
+world_to_object = wp.optix_get_world_to_object_transform_matrix()
+```
+
+The current transform matrix and transform-list queries are valid in
+intersection, any-hit, and closest-hit programs.
+
+Random-access geometry fetches and raw SDK transform pointers are deliberately
+not exposed.
+
 ## Neural textures
 
 `warp_optix.neural_texture` is a small, independent inference-on-sample

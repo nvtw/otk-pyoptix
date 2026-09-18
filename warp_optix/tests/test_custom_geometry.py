@@ -66,6 +66,10 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     fake_warp.vec3 = type("vec3", (), {})
     fake_warp.vec3ui = type("vec3ui", (), {})
     fake_warp.mat33 = type("mat33", (), {})
+    fake_warp.mat44 = type("mat44", (), {})
+    fake_warp.types = SimpleNamespace(
+        matrix=lambda *, shape, dtype: type(f"mat{shape[0]}{shape[1]}", (), {})
+    )
 
     module_name = "warp_optix_builtins_under_test"
     builtins_path = Path(__file__).parents[1] / "warp_optix" / "_builtins.py"
@@ -92,6 +96,24 @@ def test_custom_primitive_builtins_register_all_attribute_arities():
     assert "optix_get_hit_kind" in registered_names
     assert "optix_get_triangle_vertex_data" in registered_names
     assert "optix_get_curve_parameter" in registered_names
+    assert {
+        "optix_is_triangle_hit",
+        "optix_is_triangle_front_face_hit",
+        "optix_is_triangle_back_face_hit",
+        "optix_get_linear_curve_vertex_data",
+        "optix_get_quadratic_bspline_vertex_data",
+        "optix_get_cubic_bspline_vertex_data",
+        "optix_get_catmull_rom_vertex_data",
+        "optix_get_cubic_bezier_vertex_data",
+        "optix_get_ribbon_vertex_data",
+        "optix_get_ribbon_parameters",
+        "optix_get_ribbon_normal",
+        "optix_get_object_to_world_transform_matrix",
+        "optix_get_world_to_object_transform_matrix",
+        "optix_get_transform_list_size",
+        "optix_get_transform_list_handle",
+        "optix_get_transform_type_from_handle",
+    } <= registered_names
     assert "optix_direct_call" in registered_names
     assert "optix_continuation_call" in registered_names
     assert "optix_get_exception_code" in registered_names
