@@ -212,6 +212,8 @@ class CompressionResult:
     losses: tuple[float, ...]
     psnr: float
     psnr_by_texture: dict[str, float] = field(default_factory=dict)
+    evaluation_pixels: int = 0
+    selection_reason: str = ""
 
 
 def _array_view(array: np.ndarray, offset: int) -> dict:

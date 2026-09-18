@@ -116,10 +116,9 @@ result = compress_texture_set(
     textures,
     color_spaces={"albedo": "srgb"},
     channel_weights={"normal": 2.0},
-    steps=1000,
 )
 save_asset("material.wnt", result.asset)
-print(result.psnr, result.psnr_by_texture)
+print(result.psnr, result.psnr_by_texture, result.selection_reason)
 
 # Loading, upload, and OptiX inference do not import warp-nn.
 asset = load_asset("material.wnt")
@@ -152,30 +151,43 @@ params.material = runtime.device_view()
 The device path is Warp-generated OptiX code plus cooperative-vector
 intrinsics and has no `warp-nn` dependency.
 
-The compressor stages source values as FP16 on the GPU, samples batches there,
-and captures the training and refinement steps as CUDA graphs. Allow GPU memory
-for two bytes per source channel per pixel in addition to the model and training
-buffers. Refinement keeps training both the decoder and latents through 4-bit
-quantization, using straight-through gradients and projected FP8 E4M3 weights.
-This improves exported quality without increasing storage or inference work.
-`CompressionResult.psnr` and
-`psnr_by_texture` evaluate the exported representation with the dependency-free
-NumPy reference decoder.
+By default, compression trains two candidates (latent scales 4 and 5) and keeps
+the smaller asset only if every named texture stays within 0.5 dB of the larger
+candidate. This is a bounded heuristic, not an exhaustive quality search. No
+settings are required: `compress_texture(image)` and
+`compress_texture_set(textures)` both select automatically. Both use exactly
+the same inference function and asset format.
 
-Use `latent_scale` to choose the storage/quality tradeoff. The default is 4;
-larger values use smaller grids. For large images the latent rate is approximately
+Training and quantization-aware refinement run in captured CUDA graphs.
+Source values are staged as FP16 for training and FP32 for quality scoring:
+allow six bytes per source channel per pixel plus model, scoring and training
+buffers. Training loss and scoring use `tile_sum` with one atomic add per tile.
+Refinement trains both decoder and latents through 4-bit quantization using
+straight-through gradients and projected FP8 E4M3 weights, without increasing
+storage or inference work.
+
+On CUDA, quality scoring calls the same OptiX texel sampler used by rendering.
+The candidates share a deterministic, stratified sample of up to 65,536 pixels;
+only per-channel error sums return to the CPU. `CompressionResult.psnr` and
+`psnr_by_texture` are therefore estimates when `evaluation_pixels` is smaller
+than the image pixel count. CPU compression uses the NumPy reference decoder.
+`selection_reason` explains the automatic choice.
+
+Advanced users can override `latent_scale` to train just one candidate;
+explicit-scale compression scores every pixel (with larger scoring buffers).
+Larger scales use smaller grids. For large images the latent rate is roughly
 `40 / latent_scale**2` bits per material texel, shared across all channels:
 
 | `latent_scale` | Latent bits/texel | Intended use |
 | --- | ---: | --- |
 | 3 | 4.44 | More detail |
-| 4 | 2.50 | Default balance |
-| 5 | 1.60 | Smaller assets, especially smoother images |
+| 4 | 2.50 | Larger automatic candidate |
+| 5 | 1.60 | Smaller automatic candidate |
 
-All three use the same decoder and number of latent samples; larger grids can
-still affect cache behavior. Increasing `steps` can improve quality without changing
-the asset size or device code. Full-image NumPy quality evaluation is included
-in compression time and can take longer than GPU optimization itself.
+All use the same decoder and number of latent samples; grid sizes can still
+affect cache behavior. Increasing `steps` can improve quality without changing
+asset size or device code. The default is 1,000 training steps followed by
+250 refinement steps per candidate.
 
 The format is deliberately safe to memory-map: it uses no pickle data and
 validates shapes, dtypes, bounds, alignment, and SHA-256 payload checksums.

@@ -49,7 +49,8 @@ def test_compress_texture_exports_quantized_asset(tmp_path):
 
     decoded = decode_image(result.asset, batch_size=7)
     expected_psnr = -10.0 * np.log10(np.mean((decoded - image) ** 2))
-    np.testing.assert_allclose(result.psnr, expected_psnr, rtol=1.0e-6)
+    # Actual OptiX FP16/FP8 arithmetic differs slightly from the float32 oracle.
+    np.testing.assert_allclose(result.psnr, expected_psnr, atol=0.02, rtol=0.0)
 
     path = tmp_path / "compressed.wnt"
     save_asset(path, result.asset)
@@ -63,6 +64,7 @@ def test_fp8_projection_uses_optix_tie_to_even_rounding():
         _quantize_fp8_e4m3(values),
         np.array([-160.0, -128.0, 128.0, 160.0], dtype=np.float32),
     )
+
 
 def test_compression_seed_is_repeatable_and_preserves_numpy_rng():
     image = np.linspace(0.0, 1.0, 4 * 4 * 3, dtype=np.float32).reshape(4, 4, 3)

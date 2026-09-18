@@ -142,7 +142,23 @@ def decode_image(
     *,
     batch_size: int = 65536,
 ) -> np.ndarray:
-    """Decode an image in bounded NumPy batches.
+    """Decode a full image in bounded NumPy batches."""
+    result = _decode_pixels(asset, mip_level, batch_size=batch_size)
+    return result.reshape(
+        max(asset.height >> mip_level, 1),
+        max(asset.width >> mip_level, 1),
+        asset.channel_count,
+    )
+
+
+def _decode_pixels(
+    asset: NeuralTextureAsset,
+    mip_level: int = 0,
+    *,
+    batch_size: int = 65536,
+    pixel_indices: np.ndarray | None = None,
+) -> np.ndarray:
+    """Decode all pixels or selected flattened pixel indices in bounded batches.
 
     Latent mips are unpacked once, which makes this suitable for offline quality
     evaluation while :func:`decode_texel` remains the simple scalar oracle.
@@ -157,12 +173,17 @@ def decode_image(
     second_level = min(latent_level + 1, len(asset.latent_mips) - 1)
     first = unpack_latents(asset.latent_mips[latent_level], asset.latent_features)
     second = unpack_latents(asset.latent_mips[second_level], asset.latent_features)
-    result = np.empty((height * width, asset.channel_count), dtype=np.float32)
+    count = height * width if pixel_indices is None else len(pixel_indices)
+    result = np.empty((count, asset.channel_count), dtype=np.float32)
     input_width = asset.layers[0].weights.shape[1]
 
-    for begin in range(0, height * width, batch_size):
-        end = min(begin + batch_size, height * width)
-        indices = np.arange(begin, end, dtype=np.int64)
+    for begin in range(0, count, batch_size):
+        end = min(begin + batch_size, count)
+        indices = (
+            np.arange(begin, end, dtype=np.int64)
+            if pixel_indices is None
+            else pixel_indices[begin:end]
+        )
         x = indices % width
         y = indices // width
         u = (x.astype(np.float32) + 0.5) / width
@@ -200,4 +221,4 @@ def decode_image(
             if layer.activation == "hgelu":
                 value = hgelu(value)
         result[begin:end] = value[:, : asset.channel_count]
-    return result.reshape(height, width, asset.channel_count)
+    return result

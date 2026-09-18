@@ -34,14 +34,14 @@ def compress_texture(
     steps: int = 1000,
     refinement_steps: int | None = None,
     learning_rate: float = 1e-2,
-    latent_scale: int = 4,
+    latent_scale: int | None = None,
     batch_size: int = 65536,
     device: str = "cuda:0",
     seed: int = 42,
     channel_name: str = "texture",
     color_space: str = "linear",
 ) -> CompressionResult:
-    """Compress a texture with the optional warp-nn training backend.
+    """Compress a texture, automatically balancing size and sampled quality.
 
     The import is deliberately lazy so loading or evaluating a neural texture
     never requires the offline-training dependency.
@@ -70,12 +70,12 @@ def compress_texture_set(
     steps: int = 1000,
     refinement_steps: int | None = None,
     learning_rate: float = 1e-2,
-    latent_scale: int = 4,
+    latent_scale: int | None = None,
     batch_size: int = 65536,
     device: str = "cuda:0",
     seed: int = 42,
 ) -> CompressionResult:
-    """Compress named, same-resolution material textures with warp-nn.
+    """Compress named material textures, automatically balancing size and quality.
 
     Importing this module remains independent of the optional training package;
     warp-nn is loaded only when this function is called.

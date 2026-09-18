@@ -64,11 +64,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--width", type=int, default=128)
     parser.add_argument("--height", type=int, default=128)
-    parser.add_argument("--steps", type=int, default=500)
+    parser.add_argument("--steps", type=int, default=1000)
     parser.add_argument("--refinement-steps", type=int)
     parser.add_argument("--batch-size", type=int, default=65536)
     parser.add_argument("--learning-rate", type=float, default=1.0e-2)
-    parser.add_argument("--latent-scale", type=int, default=4)
+    parser.add_argument(
+        "--latent-scale",
+        type=int,
+        help="Advanced: fix the latent scale instead of automatic selection.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--srgb", action="store_true")
@@ -100,11 +104,10 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     save_asset(args.output, result.asset)
     stored = load_asset(args.output)
-    reconstruction = decode_image(stored, batch_size=args.batch_size)
 
     if args.reconstruction is not None:
         args.reconstruction.parent.mkdir(parents=True, exist_ok=True)
-        np.save(args.reconstruction, reconstruction)
+        np.save(args.reconstruction, decode_image(stored, batch_size=args.batch_size))
 
     dense_bytes = image.nbytes
     file_bytes = args.output.stat().st_size
@@ -112,7 +115,11 @@ def main() -> None:
     print(f"portable payload: {stored.storage_bytes:,} bytes")
     print(f"dense float32 input: {dense_bytes:,} bytes")
     print(f"file compression ratio: {dense_bytes / file_bytes:.2f}x")
-    print(f"FP8-projected reference PSNR: {result.psnr:.2f} dB")
+    estimated = result.evaluation_pixels < stored.width * stored.height
+    label = "Estimated PSNR" if estimated else "Full-image PSNR"
+    print(f"{label}: {result.psnr:.2f} dB")
+    if result.selection_reason:
+        print(result.selection_reason)
     if result.losses:
         print(f"training loss: {result.losses[0]:.6g} -> {result.losses[-1]:.6g}")
 

@@ -11,6 +11,7 @@ decoder and latents adapt to the representation used at inference.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 import numpy as np
 import warp as wp
@@ -29,7 +30,7 @@ from .format import (
     TextureChannel,
     pack_latents,
 )
-from .reference import _quantize_fp8_e4m3, decode_image
+from .reference import _decode_pixels, _quantize_fp8_e4m3
 
 
 @wp.func
@@ -123,11 +124,20 @@ def _mse(
     pixel_indices: wp.array(dtype=wp.int32),
     channel_weights: wp.array(dtype=wp.float32),
     normalization: float,
-    loss: wp.array(dtype=wp.float32),
+    errors: wp.array2d(dtype=wp.float32),
 ):
     i, j = wp.tid()
     difference = prediction[i, j] - wp.float32(target[pixel_indices[i], j])
-    wp.atomic_add(loss, 0, difference * difference * channel_weights[j] * normalization)
+    errors[i, j] = difference * difference * channel_weights[j] * normalization
+
+
+@wp.kernel
+def _sum_training_loss(
+    errors: wp.array(dtype=wp.float32), loss: wp.array(dtype=wp.float32)
+):
+    block = wp.tid()
+    values = wp.tile_load(errors, shape=(256,), offset=(block * 256,))
+    wp.tile_atomic_add(loss, wp.tile_sum(values))
 
 
 @wp.func
@@ -289,14 +299,16 @@ def _compress_channels(
     steps: int = 1000,
     refinement_steps: int | None = None,
     learning_rate: float = 1e-2,
-    latent_scale: int = 4,
+    latent_scale: int | None = None,
     batch_size: int = 65536,
     device: str = "cuda:0",
     seed: int = 42,
+    _evaluation_indices: np.ndarray | None = None,
+    _evaluator=None,
 ) -> CompressionResult:
     if steps < 0 or (refinement_steps is not None and refinement_steps < 0):
         raise ValueError("training step counts must be non-negative")
-    if latent_scale <= 0:
+    if latent_scale is not None and latent_scale <= 0:
         raise ValueError("latent_scale must be positive")
     if not np.isfinite(learning_rate) or learning_rate <= 0.0:
         raise ValueError("learning_rate must be finite and positive")
@@ -308,6 +320,66 @@ def _compress_channels(
         refinement_steps = max(steps // 4, 1) if steps else 0
 
     height, width, channels = image.shape
+    if _evaluator is None and wp.get_device(device).is_cuda:
+        from .evaluation import _QualityEvaluator
+
+        with _QualityEvaluator(
+            image, sampled=latent_scale is None, device=device
+        ) as evaluator:
+            return _compress_channels(
+                image,
+                texture_channels,
+                channel_weights,
+                steps=steps,
+                refinement_steps=refinement_steps,
+                learning_rate=learning_rate,
+                latent_scale=latent_scale,
+                batch_size=batch_size,
+                device=device,
+                seed=seed,
+                _evaluation_indices=_evaluation_indices,
+                _evaluator=evaluator,
+            )
+    if latent_scale is None:
+        # A bounded search: choose the smaller asset only if every named map
+        # remains within 0.5 dB of scale 4. Both see the same evaluation pixels.
+        count = height * width
+        indices = (
+            np.random.default_rng(0).choice(count, 65536, replace=False)
+            if _evaluator is None and count > 65536
+            else None
+        )
+        candidates = []
+        for scale in (4, 5):
+            candidates.append(
+                _compress_channels(
+                    image,
+                    texture_channels,
+                    channel_weights,
+                    steps=steps,
+                    refinement_steps=refinement_steps,
+                    learning_rate=learning_rate,
+                    latent_scale=scale,
+                    batch_size=batch_size,
+                    device=device,
+                    seed=seed,
+                    _evaluation_indices=indices,
+                    _evaluator=_evaluator,
+                )
+            )
+        reference, compact = candidates
+        acceptable = all(
+            compact.psnr_by_texture[name] >= value - 0.5
+            for name, value in reference.psnr_by_texture.items()
+        )
+        if acceptable and compact.asset.storage_bytes < reference.asset.storage_bytes:
+            selected = compact
+            reason = "Chose the smaller asset: every texture stayed within 0.5 dB of the larger candidate."
+        else:
+            selected = reference
+            reason = "Kept the larger asset to preserve texture detail or because the smaller grid saved no space."
+        return replace(selected, selection_reason=reason)
+
     rng = np.random.default_rng(seed)
     latent0_shape = (
         max((height + latent_scale - 1) // latent_scale, 1),
@@ -340,6 +412,10 @@ def _compress_channels(
             (batch_count, 32), dtype=wp.float32, device=device, requires_grad=True
         )
         loss = wp.zeros(1, dtype=wp.float32, device=device, requires_grad=True)
+        loss_terms = wp.empty(
+            (batch_count, channels), dtype=wp.float32, device=device, requires_grad=True
+        )
+        flat_loss_terms = loss_terms.flatten()
         model = _seeded_decoder(int(seed))
         model.to(device)
         optimizer = optimizers.Adam(
@@ -406,7 +482,15 @@ def _compress_channels(
                         weights,
                         loss_normalization,
                     ],
+                    outputs=[loss_terms],
+                    device=device,
+                )
+                wp.launch_tiled(
+                    _sum_training_loss,
+                    dim=(flat_loss_terms.size + 255) // 256,
+                    inputs=[flat_loss_terms],
                     outputs=[loss],
+                    block_dim=128,
                     device=device,
                 )
             tape.backward(loss)
@@ -497,23 +581,39 @@ def _compress_channels(
                 "weight_type": "fp8_e4m3",
             },
         )
-    decoded = decode_image(asset, batch_size=batch_size)
-    mse = float(np.mean((decoded - image) ** 2))
+    if _evaluator is not None:
+        channel_mse = _evaluator.mse(asset)
+        evaluation_pixels = _evaluator.count
+    else:
+        decoded = _decode_pixels(
+            asset, batch_size=batch_size, pixel_indices=_evaluation_indices
+        )
+        target_values = image.reshape(-1, channels)
+        if _evaluation_indices is not None:
+            target_values = target_values[_evaluation_indices]
+        channel_mse = np.mean((decoded - target_values) ** 2, axis=0, dtype=np.float64)
+        evaluation_pixels = len(decoded)
+    mse = float(np.mean(channel_mse))
     psnr = float("inf") if mse == 0.0 else float(-10.0 * np.log10(mse))
-
     psnr_by_texture = {}
     for texture in texture_channels:
-        channel_slice = slice(
-            texture.first_channel, texture.first_channel + texture.channel_count
-        )
         texture_mse = float(
-            np.mean((decoded[..., channel_slice] - image[..., channel_slice]) ** 2)
+            np.mean(
+                channel_mse[
+                    texture.first_channel : texture.first_channel
+                    + texture.channel_count
+                ]
+            )
         )
         psnr_by_texture[texture.name] = (
             float("inf") if texture_mse == 0.0 else float(-10.0 * np.log10(texture_mse))
         )
     return CompressionResult(
-        asset=asset, losses=tuple(losses), psnr=psnr, psnr_by_texture=psnr_by_texture
+        asset=asset,
+        losses=tuple(losses),
+        psnr=psnr,
+        psnr_by_texture=psnr_by_texture,
+        evaluation_pixels=evaluation_pixels,
     )
 
 
@@ -546,7 +646,7 @@ def compress_texture_set(
     steps: int = 1000,
     refinement_steps: int | None = None,
     learning_rate: float = 1e-2,
-    latent_scale: int = 4,
+    latent_scale: int | None = None,
     batch_size: int = 65536,
     device: str = "cuda:0",
     seed: int = 42,
@@ -556,7 +656,9 @@ def compress_texture_set(
     Values are HWC (or HW for scalar maps), normalized to ``[0, 1]``, and may
     have one to four channels. Up to 16 channels are decoded together, allowing
     correlated material maps such as albedo, normal, and roughness to share the
-    same latents and network.
+    same latents and network. By default the compressor selects a size using
+    sampled quality checks. Set ``latent_scale`` explicitly to train one size
+    and compute full-image PSNR instead.
     """
     if not isinstance(textures, Mapping) or not textures:
         raise ValueError("textures must be a non-empty mapping")
@@ -623,7 +725,7 @@ def compress_texture(
     steps: int = 1000,
     refinement_steps: int | None = None,
     learning_rate: float = 1e-2,
-    latent_scale: int = 4,
+    latent_scale: int | None = None,
     batch_size: int = 65536,
     device: str = "cuda:0",
     seed: int = 42,
