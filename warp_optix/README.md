@@ -32,6 +32,114 @@ registration, external-entry kernel, and AOT compilation APIs. A
 version-checked private compatibility adapter remains only for older development
 environments; it does not patch or overwrite the installed Warp package.
 
+
+## OptiX cooperative vectors
+
+OptiX 9 cooperative vectors are native SDK facilities, not Warp operations.
+The Python extension exposes the host-side SDK pieces needed to prepare
+matrices:
+
+- `DEVICE_PROPERTY_COOP_VEC` and `DevicePropertyCoopVecFlags` for support
+  queries.
+- `CoopVecElemType`, `CoopVecMatrixLayout`, and
+  `CoopVecMatrixDescription`.
+- `DeviceContext.coopVecMatrixComputeSize()` and
+  `DeviceContext.coopVecMatrixConvert()`.
+
+The conversion call is asynchronous and follows OptiX's 64-byte alignment and
+allocation-lifetime requirements. The higher-level neural-texture uploader
+synchronizes before returning and owns all GPU allocations.
+
+Importing `warp_optix` also registers Warp spellings of the OptiX device
+intrinsics. They are available only inside `@warp_optix.optix_kernel`
+programs and use explicit output vectors, which is the convention required by
+Warp's public addon API:
+
+```python
+Vec32h = wp.types.vector(length=32, dtype=wp.float16)
+Vec16h = wp.types.vector(length=16, dtype=wp.float16)
+
+@wo.optix_kernel(wo.OptixKernelType.CLOSEST_HIT)
+def closest_hit(params: LaunchParams):
+    inputs = Vec32h(wp.float16(0.0))
+    outputs = Vec16h()
+    wp.optix_coop_vec_matmul_bias_fp8_e4m3(
+        inputs,
+        params.matrices,
+        params.weight_offset,
+        params.biases,
+        params.bias_offset,
+        wp.uint32(0),
+        outputs,
+    )
+```
+
+The registered family includes load, conversion, elementwise arithmetic,
+`exp2`, `log2`, `tanh`, fused multiply-add, reductions, outer products,
+matrix-size queries, and matrix multiply variants for FP16, FP8 E4M3/E5M2,
+signed int8, and unsigned int8. Named matrix variants use an
+inference-optimal, non-transposed matrix with the element interpretation in
+the function name.
+
+## Neural textures
+
+`warp_optix.neural_texture` is a small, independent inference-on-sample
+pipeline inspired by NVIDIA's neural material texture research. It stores two
+4-bit latent grids and a fixed per-material `32 -> 32 -> 32 -> 16` decoder.
+Portable `.wnt` files contain memory-mappable packed latents, row-major FP16
+biases and FP8-representable weights, checksums, channel mappings, and JSON
+metadata. On upload, weights are converted once into OptiX's device-specific
+FP8 E4M3 inference-optimal layout.
+
+Only offline compression depends on `warp-nn`:
+
+```bash
+pip install -e . -e "warp_optix[training]"
+python examples_warp/example_warp_optix_neural_texture.py \
+  --output material.wnt --reconstruction material-decoded.npy
+```
+
+The Python API is equally direct:
+
+```python
+import numpy as np
+from warp_optix.neural_texture import (
+    compress_texture, load_asset, save_asset, upload_asset,
+)
+
+image = np.load("albedo.npy", allow_pickle=False).astype(np.float32)
+result = compress_texture(image, steps=1000, channel_name="albedo")
+save_asset("albedo.wnt", result.asset)
+
+# Loading, upload, and OptiX inference do not import warp-nn.
+asset = load_asset("albedo.wnt")
+runtime = upload_asset(asset, context, optix, device="cuda:0")
+```
+
+For an OptiX program, construct the 32-value input and evaluate the decoder
+with `neural_texture_input_8()` and
+`neural_texture_infer_8x32x32x16()` from
+`warp_optix.neural_texture.device`. Pass the runtime's latent arrays,
+mip-description arrays, matrix/bias pointers, and byte offsets through launch
+parameters. The device path consists only of Warp-generated OptiX code and the
+exposed OptiX intrinsics; it has no `warp-nn` dependency.
+
+The compressor uses shuffled bounded pixel batches, 4-bit latent refinement,
+and projected FP8 E4M3 weights. `CompressionResult.psnr` evaluates the
+exported representation with the dependency-free NumPy reference decoder.
+The format is deliberately safe to memory-map: it uses no pickle data and
+validates shapes, dtypes, bounds, alignment, and SHA-256 payload checksums.
+
+This is a research-informed, compact integration rather than a reimplementation
+of NVIDIA RTXNTC. Version 1 has one fixed architecture, two learned latent
+levels, wrap addressing, no entropy coding, and no stochastic texture
+filtering or renderer material integration. Its `.wnt` format is not
+compatible with RTXNTC's `.ntc` format. For production compression,
+multi-level material bundles, and filtering guidance, consult NVIDIA's
+[Random-Access Neural Compression of Material Textures](https://research.nvidia.com/publication/2023-08_random-access-neural-compression-material-textures),
+[RTXNTC SDK](https://github.com/NVIDIA-RTX/RTXNTC), and
+[inference-on-sample integration guide](https://github.com/NVIDIA-RTX/RTXNTC/blob/main/docs/integration/InferenceOnSample.md).
+
 ## Path-tracing viewer
 
 The example path tracer is also installed as `warp_optix.pathtracing`. Install

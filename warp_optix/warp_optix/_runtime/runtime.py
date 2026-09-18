@@ -218,6 +218,10 @@ def compile_warp_module_to_ptx(
     device: str = "cuda",
 ) -> bytes:
     del script_dir  # Preserved for backward-compatible call sites.
+    # Device-only cooperative-vector wrappers deliberately fail when compiled
+    # as an ordinary Warp CUDA kernel. Mark both OptiX compilation paths before
+    # the addon header is included so those wrappers can be instantiated.
+    launch_preamble = "#define WP_OPTIX_PROGRAM 1\n" + launch_preamble
 
     if not has_public_addon_hooks(wp):
         return compile_module_to_ptx(wp, module, launch_preamble, module_tag, device)

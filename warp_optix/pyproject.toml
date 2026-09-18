@@ -20,6 +20,9 @@ dependencies = [
 newton = [
     "newton>=1.6.0.dev0,<1.7",
 ]
+training = [
+    "warp-nn>=0.3.1",
+]
 pathtracing = [
     "imageio>=2.31",
     "Pillow>=9",

@@ -2,6 +2,9 @@ warp-lang>=1.17
 pyoptix>=9.1
 numpy
 
+[newton]
+newton<1.7,>=1.6.0.dev0
+
 [pathtracing]
 imageio>=2.31
 Pillow>=9
@@ -10,6 +13,9 @@ pyglet<3,>=2.1
 [recording]
 imageio>=2.31
 imageio-ffmpeg>=0.5
+
+[training]
+warp-nn>=0.3.1
 
 [ui]
 imgui-bundle>=1.92

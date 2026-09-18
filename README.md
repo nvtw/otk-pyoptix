@@ -65,6 +65,30 @@ On Windows with Python 3.8+, PyOptiX automatically registers the packaged DLSS
 runtime and the CUDA directory from `CUDA_PATH`. Set `CUDA_BIN_DIR` if CUDA
 cannot be detected automatically.
 
+
+## Cooperative vectors (OptiX 9+)
+
+The Python bindings expose OptiX's host-side cooperative-vector support query,
+element/layout enums, matrix descriptor, size calculation, and asynchronous
+matrix conversion:
+
+```python
+flags = context.getProperty(optix.DEVICE_PROPERTY_COOP_VEC)
+if flags & int(optix.DEVICE_PROPERTY_COOP_VEC_FLAG_STANDARD):
+    size = context.coopVecMatrixComputeSize(
+        32,
+        32,
+        optix.COOP_VEC_ELEM_TYPE_FLOAT8_E4M3,
+        optix.COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL,
+    )
+```
+
+Use `context.coopVecMatrixConvert(...)` to convert row- or column-major
+matrices into the device-specific optimal layout. Input/output pointers and
+network strides must be 64-byte aligned, and allocations must remain alive
+until the CUDA stream completes. Device intrinsics and the independent neural
+texture pipeline are documented in [warp_optix/README.md](warp_optix/README.md).
+
 ---
 ## Examples programs
 

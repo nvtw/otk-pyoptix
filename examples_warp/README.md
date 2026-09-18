@@ -11,10 +11,12 @@ pip install -e .. -e ../warp_optix/
 Then run individual examples, e.g.
 
 ```bash
+python example_warp_optix_neural_texture.py --output material.wnt
 python example_warp_optix_kernels.py
 python example_warp_optix_curves.py
 python example_warp_optix_motion_blur.py
 python example_warp_optix_mixed_geometry.py
+
 python example_warp_optix_tiny_raytracer.py
 python example_warp_optix_basic_pathtracing.py
 python example_warp_optix_pathtraced_hairball.py
@@ -22,6 +24,14 @@ python example_warp_optix_pathtraced_arrowball.py
 python example_warp_optix_pathtraced_contact_lines.py
 python example_warp_optix_usd_pathtracing.py path/to/scene.usd
 ```
+
+The neural-texture example procedurally generates a material texture (or loads
+an HWC NumPy array with `--input`), trains packed latents and a small decoder
+with the optional warp-nn backend, writes a memory-mappable `.wnt` asset, and
+reports its stored size and FP8-projected reconstruction PSNR. Install
+`warp_optix[training]` to run compression. Loading and OptiX inference do not
+depend on warp-nn.
+
 
 The hair-ball example procedurally packs thousands of randomized, tapered
 helical strands into one native round-cubic-Bezier curve geometry. Twelve saturated

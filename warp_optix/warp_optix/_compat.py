@@ -231,6 +231,7 @@ def _generate_cuda_source(wp, module, launch_preamble: str):
     preamble = (
         "// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n"
         "// SPDX-License-Identifier: Apache-2.0\n"
+        "#define WP_OPTIX_PROGRAM 1\n"
     )
     if launch_preamble:
         preamble += launch_preamble

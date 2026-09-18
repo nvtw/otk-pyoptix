@@ -943,5 +943,221 @@ WP_DEFINE_OPTIX_PAYLOAD_ACCESSOR(31)
 
 #undef WP_DEFINE_OPTIX_PAYLOAD_ACCESSOR
 
+// OptiX cooperative vectors use CUDA's global half type, while Warp uses its
+// own ABI-compatible wp::half. This adapter keeps Warp kernels on wp.vector.
+template <typename A, typename B> struct optix_coop_is_same { static constexpr bool value = false; };
+template <typename A> struct optix_coop_is_same<A, A> { static constexpr bool value = true; };
+template <typename T> struct optix_coop_elem_type;
+template <> struct optix_coop_elem_type<half> { static constexpr OptixCoopVecElemType value = OPTIX_COOP_VEC_ELEM_TYPE_FLOAT16; };
+template <> struct optix_coop_elem_type<float> { static constexpr OptixCoopVecElemType value = OPTIX_COOP_VEC_ELEM_TYPE_FLOAT32; };
+template <> struct optix_coop_elem_type<int8> { static constexpr OptixCoopVecElemType value = OPTIX_COOP_VEC_ELEM_TYPE_INT8; };
+template <> struct optix_coop_elem_type<uint8> { static constexpr OptixCoopVecElemType value = OPTIX_COOP_VEC_ELEM_TYPE_UINT8; };
+template <> struct optix_coop_elem_type<int32> { static constexpr OptixCoopVecElemType value = OPTIX_COOP_VEC_ELEM_TYPE_INT32; };
+template <> struct optix_coop_elem_type<uint32> { static constexpr OptixCoopVecElemType value = OPTIX_COOP_VEC_ELEM_TYPE_UINT32; };
+template <typename T> struct optix_coop_is_supported_scalar { static constexpr bool value = false; };
+template <> struct optix_coop_is_supported_scalar<half> { static constexpr bool value = true; };
+template <> struct optix_coop_is_supported_scalar<float> { static constexpr bool value = true; };
+template <> struct optix_coop_is_supported_scalar<int8> { static constexpr bool value = true; };
+template <> struct optix_coop_is_supported_scalar<uint8> { static constexpr bool value = true; };
+template <> struct optix_coop_is_supported_scalar<int32> { static constexpr bool value = true; };
+template <> struct optix_coop_is_supported_scalar<uint32> { static constexpr bool value = true; };
+
+template <typename T> struct optix_coop_scalar {
+    using type = T;
+    inline CUDA_CALLABLE_DEVICE static type to_optix(T value) { return value; }
+    inline CUDA_CALLABLE_DEVICE static T from_optix(type value) { return value; }
+};
+template <> struct optix_coop_scalar<half> {
+    using type = ::half;
+    inline CUDA_CALLABLE_DEVICE static type to_optix(half value) { return __ushort_as_half(value.u); }
+    inline CUDA_CALLABLE_DEVICE static half from_optix(type value)
+    {
+        half result;
+        result.u = __half_as_ushort(value);
+        return result;
+    }
+};
+
+template <typename Vec> struct optix_coop_vec_traits;
+template <unsigned Length, typename T> struct optix_coop_vec_traits<vec_t<Length, T>> {
+    static_assert(Length > 0, "OptiX cooperative vectors must have at least one component");
+    static_assert(optix_coop_is_supported_scalar<T>::value, "unsupported OptiX cooperative-vector scalar type");
+    using scalar_type = T;
+    using optix_scalar_type = typename optix_coop_scalar<T>::type;
+    using optix_type = OptixCoopVec<optix_scalar_type, Length>;
+    static constexpr unsigned size = Length;
+};
+
+template <typename Vec>
+inline CUDA_CALLABLE_DEVICE typename optix_coop_vec_traits<Vec>::optix_type optix_coop_to_native(const Vec& value)
+{
+    using Traits = optix_coop_vec_traits<Vec>;
+    typename Traits::optix_type result;
+#pragma unroll
+    for (unsigned i = 0; i < Traits::size; ++i)
+        result[i] = optix_coop_scalar<typename Traits::scalar_type>::to_optix(value[i]);
+    return result;
+}
+
+template <typename Vec>
+inline CUDA_CALLABLE_DEVICE Vec optix_coop_from_native(const typename optix_coop_vec_traits<Vec>::optix_type& value)
+{
+    using Traits = optix_coop_vec_traits<Vec>;
+    Vec result;
+#pragma unroll
+    for (unsigned i = 0; i < Traits::size; ++i)
+        result[i] = optix_coop_scalar<typename Traits::scalar_type>::from_optix(value[i]);
+    return result;
+}
+
+#if !defined(WP_OPTIX_PROGRAM)
+template <typename T> struct optix_coop_requires_optix_program {
+    static_assert(sizeof(T) == 0, "OptiX cooperative-vector builtins require an @optix_kernel program");
+};
+#define WP_OPTIX_COOP_REQUIRE_PROGRAM(T) (void)sizeof(optix_coop_requires_optix_program<T>)
+#else
+#define WP_OPTIX_COOP_REQUIRE_PROGRAM(T) ((void)0)
+#endif
+
+template <typename Vec> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_load(uint64 address, Vec& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec);
+    using Native = typename optix_coop_vec_traits<Vec>::optix_type;
+    output = optix_coop_from_native<Vec>(optixCoopVecLoad<Native>(static_cast<CUdeviceptr>(address)));
+}
+
+#define WP_DEFINE_OPTIX_COOP_UNARY(NAME, OPTIX_NAME) \
+    template <typename Vec> inline CUDA_CALLABLE_DEVICE void NAME(const Vec& input, Vec& output) \
+    { WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec); output = optix_coop_from_native<Vec>(OPTIX_NAME(optix_coop_to_native(input))); }
+WP_DEFINE_OPTIX_COOP_UNARY(optix_coop_vec_exp2, optixCoopVecExp2)
+WP_DEFINE_OPTIX_COOP_UNARY(optix_coop_vec_log2, optixCoopVecLog2)
+WP_DEFINE_OPTIX_COOP_UNARY(optix_coop_vec_tanh, optixCoopVecTanh)
+#undef WP_DEFINE_OPTIX_COOP_UNARY
+
+template <typename Vec> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_min_scalar(
+    const Vec& a, typename optix_coop_vec_traits<Vec>::scalar_type b, Vec& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec);
+    output = optix_coop_from_native<Vec>(optixCoopVecMin(
+        optix_coop_to_native(a), optix_coop_scalar<typename optix_coop_vec_traits<Vec>::scalar_type>::to_optix(b)));
+}
+
+template <typename Vec> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_max_scalar(
+    const Vec& a, typename optix_coop_vec_traits<Vec>::scalar_type b, Vec& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec);
+    output = optix_coop_from_native<Vec>(optixCoopVecMax(
+        optix_coop_to_native(a), optix_coop_scalar<typename optix_coop_vec_traits<Vec>::scalar_type>::to_optix(b)));
+}
+
+template <typename VecIn, typename VecOut>
+inline CUDA_CALLABLE_DEVICE void optix_coop_vec_cvt(const VecIn& input, VecOut& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(VecIn);
+    static_assert(optix_coop_vec_traits<VecIn>::size == optix_coop_vec_traits<VecOut>::size,
+        "optix_coop_vec_cvt input and output must have equal vector lengths");
+    using NativeOut = typename optix_coop_vec_traits<VecOut>::optix_type;
+    output = optix_coop_from_native<VecOut>(optixCoopVecCvt<NativeOut>(optix_coop_to_native(input)));
+}
+
+#define WP_DEFINE_OPTIX_COOP_BINARY(NAME, OPTIX_NAME) \
+    template <typename Vec> inline CUDA_CALLABLE_DEVICE void NAME(const Vec& a, const Vec& b, Vec& output) \
+    { WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec); output = optix_coop_from_native<Vec>(OPTIX_NAME(optix_coop_to_native(a), optix_coop_to_native(b))); }
+WP_DEFINE_OPTIX_COOP_BINARY(optix_coop_vec_min, optixCoopVecMin)
+WP_DEFINE_OPTIX_COOP_BINARY(optix_coop_vec_max, optixCoopVecMax)
+WP_DEFINE_OPTIX_COOP_BINARY(optix_coop_vec_mul, optixCoopVecMul)
+WP_DEFINE_OPTIX_COOP_BINARY(optix_coop_vec_add, optixCoopVecAdd)
+WP_DEFINE_OPTIX_COOP_BINARY(optix_coop_vec_sub, optixCoopVecSub)
+WP_DEFINE_OPTIX_COOP_BINARY(optix_coop_vec_step, optixCoopVecStep)
+#undef WP_DEFINE_OPTIX_COOP_BINARY
+
+template <typename Vec>
+inline CUDA_CALLABLE_DEVICE void optix_coop_vec_ffma(const Vec& a, const Vec& b, const Vec& c, Vec& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec);
+    output = optix_coop_from_native<Vec>(optixCoopVecFFMA(
+        optix_coop_to_native(a), optix_coop_to_native(b), optix_coop_to_native(c)));
+}
+
+template <OptixCoopVecElemType MatrixType, OptixCoopVecElemType InputType, typename VecIn, typename VecOut>
+inline CUDA_CALLABLE_DEVICE void optix_coop_vec_matmul_impl(const VecIn& input, uint64 matrix,
+    uint32 matrix_offset, uint32 stride, VecOut& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(VecIn);
+    using IT = optix_coop_vec_traits<VecIn>;
+    using OT = optix_coop_vec_traits<VecOut>;
+    using NI = typename IT::optix_type;
+    using NO = typename OT::optix_type;
+    output = optix_coop_from_native<VecOut>(optixCoopVecMatMul<NO, NI, InputType,
+        OPTIX_COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL, false, OT::size, IT::size, MatrixType>(
+            optix_coop_to_native(input), static_cast<CUdeviceptr>(matrix), matrix_offset, stride));
+}
+
+template <OptixCoopVecElemType MatrixType, OptixCoopVecElemType InputType, typename VecIn, typename VecOut>
+inline CUDA_CALLABLE_DEVICE void optix_coop_vec_matmul_bias_impl(const VecIn& input, uint64 matrix,
+    uint32 matrix_offset, uint64 bias, uint32 bias_offset, uint32 stride, VecOut& output)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(VecIn);
+    using IT = optix_coop_vec_traits<VecIn>;
+    using OT = optix_coop_vec_traits<VecOut>;
+    using NI = typename IT::optix_type;
+    using NO = typename OT::optix_type;
+    constexpr OptixCoopVecElemType BiasType = optix_coop_elem_type<typename OT::scalar_type>::value;
+    output = optix_coop_from_native<VecOut>(optixCoopVecMatMul<NO, NI, InputType,
+        OPTIX_COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL, false, OT::size, IT::size, MatrixType, BiasType>(
+            optix_coop_to_native(input), static_cast<CUdeviceptr>(matrix), matrix_offset,
+            static_cast<CUdeviceptr>(bias), bias_offset, stride));
+}
+
+#define WP_DEFINE_OPTIX_COOP_MATMUL(SUFFIX, TYPE) \
+    template <typename VI, typename VO> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_matmul_##SUFFIX( \
+        const VI& input, uint64 matrix, uint32 offset, uint32 stride, VO& output) \
+    { optix_coop_vec_matmul_impl<TYPE, TYPE>(input, matrix, offset, stride, output); } \
+    template <typename VI, typename VO> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_matmul_bias_##SUFFIX( \
+        const VI& input, uint64 matrix, uint32 offset, uint64 bias, uint32 bias_offset, uint32 stride, VO& output) \
+    { optix_coop_vec_matmul_bias_impl<TYPE, TYPE>(input, matrix, offset, bias, bias_offset, stride, output); }
+WP_DEFINE_OPTIX_COOP_MATMUL(fp16, OPTIX_COOP_VEC_ELEM_TYPE_FLOAT16)
+WP_DEFINE_OPTIX_COOP_MATMUL(fp8_e4m3, OPTIX_COOP_VEC_ELEM_TYPE_FLOAT8_E4M3)
+WP_DEFINE_OPTIX_COOP_MATMUL(fp8_e5m2, OPTIX_COOP_VEC_ELEM_TYPE_FLOAT8_E5M2)
+WP_DEFINE_OPTIX_COOP_MATMUL(int8, OPTIX_COOP_VEC_ELEM_TYPE_INT8)
+WP_DEFINE_OPTIX_COOP_MATMUL(uint8, OPTIX_COOP_VEC_ELEM_TYPE_UINT8)
+#undef WP_DEFINE_OPTIX_COOP_MATMUL
+
+#define WP_DEFINE_OPTIX_COOP_MATRIX_SIZE(SUFFIX, TYPE) \
+    template <typename VI, typename VO> inline CUDA_CALLABLE_DEVICE uint32 optix_coop_vec_matrix_size_##SUFFIX( \
+        const VI&, const VO&) \
+    { return optixCoopVecGetMatrixSize<optix_coop_vec_traits<VO>::size, optix_coop_vec_traits<VI>::size, \
+        TYPE, OPTIX_COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL, 0>(); }
+WP_DEFINE_OPTIX_COOP_MATRIX_SIZE(fp16, OPTIX_COOP_VEC_ELEM_TYPE_FLOAT16)
+WP_DEFINE_OPTIX_COOP_MATRIX_SIZE(fp8_e4m3, OPTIX_COOP_VEC_ELEM_TYPE_FLOAT8_E4M3)
+WP_DEFINE_OPTIX_COOP_MATRIX_SIZE(fp8_e5m2, OPTIX_COOP_VEC_ELEM_TYPE_FLOAT8_E5M2)
+WP_DEFINE_OPTIX_COOP_MATRIX_SIZE(int8, OPTIX_COOP_VEC_ELEM_TYPE_INT8)
+WP_DEFINE_OPTIX_COOP_MATRIX_SIZE(uint8, OPTIX_COOP_VEC_ELEM_TYPE_UINT8)
+#undef WP_DEFINE_OPTIX_COOP_MATRIX_SIZE
+
+template <typename Vec> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_reduce_sum_accumulate(
+    const Vec& input, uint64 output, uint32 offset)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(Vec);
+    using Scalar = typename optix_coop_vec_traits<Vec>::scalar_type;
+    static_assert(optix_coop_is_same<Scalar, half>::value || optix_coop_is_same<Scalar, float>::value,
+        "optix_coop_vec_reduce_sum_accumulate requires a float16 or float32 vector");
+    optixCoopVecReduceSumAccumulate(optix_coop_to_native(input), static_cast<CUdeviceptr>(output), offset);
+}
+
+template <typename VecA, typename VecB> inline CUDA_CALLABLE_DEVICE void optix_coop_vec_outer_product_accumulate(
+    const VecA& a, const VecB& b, uint64 output, uint32 offset)
+{
+    WP_OPTIX_COOP_REQUIRE_PROGRAM(VecA);
+    using ScalarA = typename optix_coop_vec_traits<VecA>::scalar_type;
+    using ScalarB = typename optix_coop_vec_traits<VecB>::scalar_type;
+    static_assert(optix_coop_is_same<ScalarA, half>::value && optix_coop_is_same<ScalarB, half>::value,
+        "optix_coop_vec_outer_product_accumulate requires two float16 vectors");
+    optixCoopVecOuterProductAccumulate<typename optix_coop_vec_traits<VecA>::optix_type,
+        typename optix_coop_vec_traits<VecB>::optix_type, OPTIX_COOP_VEC_MATRIX_LAYOUT_TRAINING_OPTIMAL>(
+            optix_coop_to_native(a), optix_coop_to_native(b), static_cast<CUdeviceptr>(output), offset, 0);
+}
+
+#undef WP_OPTIX_COOP_REQUIRE_PROGRAM
 
 }  // namespace wp

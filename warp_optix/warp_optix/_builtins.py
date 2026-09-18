@@ -367,3 +367,103 @@ def register_addon_builtins() -> None:
             input_types={"value": uint32},
             value_type=None,
         )
+
+    coop_doc = (
+        "OptiX cooperative-vector device operation. This builtin is valid only "
+        "inside a @warp_optix.optix_kernel program; output is an explicit Warp "
+        "vector argument because Warp's public addon API has no generic return type. "
+        "Named matrix operations use the matching input interpretation, inference-"
+        "optimal layout, and a non-transposed matrix; offsets must satisfy OptiX's "
+        "alignment requirements."
+    )
+    add_builtin(
+        "optix_coop_vec_load",
+        input_types={"address": uint64, "output": Any},
+        value_type=None,
+        doc=coop_doc,
+    )
+
+    for _name in ("exp2", "log2", "tanh"):
+        add_builtin(
+            f"optix_coop_vec_{_name}",
+            input_types={"input": Any, "output": Any},
+            value_type=None,
+            doc=coop_doc,
+        )
+
+    add_builtin(
+        "optix_coop_vec_cvt",
+        input_types={"input": Any, "output": Any},
+        value_type=None,
+        doc=coop_doc,
+    )
+
+    for _name in ("min", "max", "mul", "add", "sub", "step"):
+        add_builtin(
+            f"optix_coop_vec_{_name}",
+            input_types={"a": Any, "b": Any, "output": Any},
+            value_type=None,
+            doc=coop_doc,
+        )
+
+    for _name in ("min", "max"):
+        add_builtin(
+            f"optix_coop_vec_{_name}_scalar",
+            input_types={"a": Any, "b": Any, "output": Any},
+            value_type=None,
+            doc=coop_doc,
+        )
+
+    add_builtin(
+        "optix_coop_vec_ffma",
+        input_types={"a": Any, "b": Any, "c": Any, "output": Any},
+        value_type=None,
+        doc=coop_doc,
+    )
+
+    for _matrix_type in ("fp16", "fp8_e4m3", "fp8_e5m2", "int8", "uint8"):
+        add_builtin(
+            f"optix_coop_vec_matmul_{_matrix_type}",
+            input_types={
+                "input": Any,
+                "matrix": uint64,
+                "matrix_offset": uint32,
+                "row_column_stride": uint32,
+                "output": Any,
+            },
+            value_type=None,
+            doc=coop_doc,
+        )
+        add_builtin(
+            f"optix_coop_vec_matmul_bias_{_matrix_type}",
+            input_types={
+                "input": Any,
+                "matrix": uint64,
+                "matrix_offset": uint32,
+                "bias": uint64,
+                "bias_offset": uint32,
+                "row_column_stride": uint32,
+                "output": Any,
+            },
+            value_type=None,
+            doc=coop_doc,
+        )
+
+        add_builtin(
+            f"optix_coop_vec_matrix_size_{_matrix_type}",
+            input_types={"input_shape": Any, "output_shape": Any},
+            value_type=uint32,
+            doc=coop_doc,
+        )
+    add_builtin(
+        "optix_coop_vec_reduce_sum_accumulate",
+        input_types={"input": Any, "output": uint64, "offset": uint32},
+        value_type=None,
+        doc=coop_doc,
+    )
+    add_builtin(
+        "optix_coop_vec_outer_product_accumulate",
+        input_types={"a": Any, "b": Any, "output": uint64, "offset": uint32},
+        value_type=None,
+        doc=coop_doc,
+    )

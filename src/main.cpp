@@ -1229,6 +1229,9 @@ py::object deviceContextGetProperty(
         case OPTIX_DEVICE_PROPERTY_LIMIT_MAX_INSTANCE_ID:
         case OPTIX_DEVICE_PROPERTY_LIMIT_NUM_BITS_INSTANCE_VISIBILITY_MASK: case OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_RECORDS_PER_GAS:
         case OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_OFFSET:
+#if OPTIX_VERSION >= 90000
+        case OPTIX_DEVICE_PROPERTY_COOP_VEC:
+#endif
         {
             uint32_t value = 0u;
             PYOPTIX_CHECK(
@@ -1250,6 +1253,104 @@ py::object deviceContextGetProperty(
         }
     }
 }
+
+#if OPTIX_VERSION >= 90000
+size_t coopVecMatrixComputeSize(
+    pyoptix::DeviceContext context,
+    unsigned int N,
+    unsigned int K,
+    OptixCoopVecElemType elementType,
+    OptixCoopVecMatrixLayout layout,
+    size_t rowColumnStrideInBytes
+    )
+{
+    if( N == 0 || K == 0 )
+        throw py::value_error( "Cooperative-vector matrix dimensions must be non-zero" );
+
+    size_t sizeInBytes = 0;
+    PYOPTIX_CHECK(
+        optixCoopVecMatrixComputeSize(
+            context.deviceContext,
+            N,
+            K,
+            elementType,
+            layout,
+            rowColumnStrideInBytes,
+            &sizeInBytes
+        )
+    );
+    return sizeInBytes;
+}
+
+void coopVecMatrixConvert(
+    pyoptix::DeviceContext context,
+    uintptr_t stream,
+    const std::vector<OptixCoopVecMatrixDescription>& inputLayers,
+    uintptr_t inputNetworks,
+    const std::vector<OptixCoopVecMatrixDescription>& outputLayers,
+    uintptr_t outputNetworks,
+    size_t inputNetworkStrideInBytes,
+    size_t outputNetworkStrideInBytes,
+    unsigned int numNetworks
+    )
+{
+    if( numNetworks == 0 )
+        throw py::value_error( "numNetworks must be non-zero" );
+    if( inputLayers.empty() )
+        throw py::value_error( "inputLayers must contain at least one matrix description" );
+    if( inputLayers.size() != outputLayers.size() )
+        throw py::value_error( "inputLayers and outputLayers must have the same length" );
+    if( inputNetworks == 0 || outputNetworks == 0 )
+        throw py::value_error( "inputNetworks and outputNetworks must be non-zero CUDA device pointers" );
+    if( numNetworks > 1 && ( inputNetworkStrideInBytes == 0 || outputNetworkStrideInBytes == 0 ) )
+        throw py::value_error( "network strides must be non-zero when numNetworks is greater than one" );
+    if( inputNetworkStrideInBytes % 64 != 0 || outputNetworkStrideInBytes % 64 != 0 )
+        throw py::value_error( "cooperative-vector network strides must be multiples of 64 bytes" );
+
+    for( size_t i = 0; i < inputLayers.size(); ++i )
+    {
+        const OptixCoopVecMatrixDescription& input = inputLayers[i];
+        const OptixCoopVecMatrixDescription& output = outputLayers[i];
+        if( input.N == 0 || input.K == 0 || output.N == 0 || output.K == 0 )
+            throw py::value_error( "cooperative-vector matrix dimensions must be non-zero" );
+        if( input.N != output.N || input.K != output.K )
+            throw py::value_error( "input and output matrix dimensions must match" );
+        if( input.sizeInBytes == 0 || output.sizeInBytes == 0 )
+            throw py::value_error( "cooperative-vector matrix sizes must be non-zero" );
+        if( ( inputNetworks % 64 + input.offsetInBytes % 64 ) % 64 != 0 )
+            throw py::value_error( "each input matrix address must be 64-byte aligned" );
+        if( ( outputNetworks % 64 + output.offsetInBytes % 64 ) % 64 != 0 )
+            throw py::value_error( "each output matrix address must be 64-byte aligned" );
+    }
+
+    OptixNetworkDescription inputDescription{
+        const_cast<OptixCoopVecMatrixDescription*>( inputLayers.data() ),
+        static_cast<unsigned int>( inputLayers.size() )
+    };
+    OptixNetworkDescription outputDescription{
+        const_cast<OptixCoopVecMatrixDescription*>( outputLayers.data() ),
+        static_cast<unsigned int>( outputLayers.size() )
+    };
+
+    OptixResult result;
+    {
+        py::gil_scoped_release release;
+        result = optixCoopVecMatrixConvert(
+            context.deviceContext,
+            reinterpret_cast<CUstream>( stream ),
+            numNetworks,
+            &inputDescription,
+            static_cast<CUdeviceptr>( inputNetworks ),
+            inputNetworkStrideInBytes,
+            &outputDescription,
+            static_cast<CUdeviceptr>( outputNetworks ),
+            outputNetworkStrideInBytes
+        );
+    }
+    if( result != OPTIX_SUCCESS )
+        throw std::runtime_error( optixGetErrorString( result ) );
+}
+#endif
 
 void deviceContextSetLogCallback(
        pyoptix::DeviceContext context,
@@ -2814,7 +2915,36 @@ PYBIND11_MODULE( _optix, m )
         .value( "DEVICE_PROPERTY_LIMIT_NUM_BITS_INSTANCE_VISIBILITY_MASK", OPTIX_DEVICE_PROPERTY_LIMIT_NUM_BITS_INSTANCE_VISIBILITY_MASK )
         .value( "DEVICE_PROPERTY_LIMIT_MAX_SBT_RECORDS_PER_GAS", OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_RECORDS_PER_GAS )
         .value( "DEVICE_PROPERTY_LIMIT_MAX_SBT_OFFSET", OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_OFFSET )
+#if OPTIX_VERSION >= 90000
+        .value( "DEVICE_PROPERTY_COOP_VEC", OPTIX_DEVICE_PROPERTY_COOP_VEC )
+#endif
         .export_values();
+
+#if OPTIX_VERSION >= 90000
+    py::enum_<OptixDevicePropertyCoopVecFlags>(m, "DevicePropertyCoopVecFlags", py::arithmetic())
+        .value( "DEVICE_PROPERTY_COOP_VEC_FLAG_NONE", OPTIX_DEVICE_PROPERTY_COOP_VEC_FLAG_NONE )
+        .value( "DEVICE_PROPERTY_COOP_VEC_FLAG_STANDARD", OPTIX_DEVICE_PROPERTY_COOP_VEC_FLAG_STANDARD )
+        .export_values();
+
+    py::enum_<OptixCoopVecElemType>(m, "CoopVecElemType", py::arithmetic())
+        .value( "COOP_VEC_ELEM_TYPE_UNKNOWN", OPTIX_COOP_VEC_ELEM_TYPE_UNKNOWN )
+        .value( "COOP_VEC_ELEM_TYPE_FLOAT16", OPTIX_COOP_VEC_ELEM_TYPE_FLOAT16 )
+        .value( "COOP_VEC_ELEM_TYPE_FLOAT32", OPTIX_COOP_VEC_ELEM_TYPE_FLOAT32 )
+        .value( "COOP_VEC_ELEM_TYPE_UINT8", OPTIX_COOP_VEC_ELEM_TYPE_UINT8 )
+        .value( "COOP_VEC_ELEM_TYPE_INT8", OPTIX_COOP_VEC_ELEM_TYPE_INT8 )
+        .value( "COOP_VEC_ELEM_TYPE_UINT32", OPTIX_COOP_VEC_ELEM_TYPE_UINT32 )
+        .value( "COOP_VEC_ELEM_TYPE_INT32", OPTIX_COOP_VEC_ELEM_TYPE_INT32 )
+        .value( "COOP_VEC_ELEM_TYPE_FLOAT8_E4M3", OPTIX_COOP_VEC_ELEM_TYPE_FLOAT8_E4M3 )
+        .value( "COOP_VEC_ELEM_TYPE_FLOAT8_E5M2", OPTIX_COOP_VEC_ELEM_TYPE_FLOAT8_E5M2 )
+        .export_values();
+
+    py::enum_<OptixCoopVecMatrixLayout>(m, "CoopVecMatrixLayout", py::arithmetic())
+        .value( "COOP_VEC_MATRIX_LAYOUT_ROW_MAJOR", OPTIX_COOP_VEC_MATRIX_LAYOUT_ROW_MAJOR )
+        .value( "COOP_VEC_MATRIX_LAYOUT_COLUMN_MAJOR", OPTIX_COOP_VEC_MATRIX_LAYOUT_COLUMN_MAJOR )
+        .value( "COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL", OPTIX_COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL )
+        .value( "COOP_VEC_MATRIX_LAYOUT_TRAINING_OPTIMAL", OPTIX_COOP_VEC_MATRIX_LAYOUT_TRAINING_OPTIMAL )
+        .export_values();
+#endif
 
 #if OPTIX_VERSION >= 70200
     py::enum_<OptixDeviceContextValidationMode>(m, "DeviceContextValidationMode", py::arithmetic())
@@ -3138,6 +3268,34 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
         .def( "getCacheEnabled", &pyoptix::deviceContextGetCacheEnabled )
         .def( "getCacheLocation", &pyoptix::deviceContextGetCacheLocation )
         .def( "getCacheDatabaseSizes", &pyoptix::deviceContextGetCacheDatabaseSizes )
+#if OPTIX_VERSION >= 90000
+        .def(
+            "coopVecMatrixComputeSize",
+            &pyoptix::coopVecMatrixComputeSize,
+            py::arg( "N" ), py::arg( "K" ), py::arg( "elementType" ), py::arg( "layout" ),
+            py::arg( "rowColumnStrideInBytes" ) = 0u
+        )
+        .def(
+            "coopVecMatrixConvert",
+            &pyoptix::coopVecMatrixConvert,
+            R"pbdoc(
+Convert cooperative-vector matrices between element types or layouts asynchronously.
+
+The input and output allocations must remain alive until the supplied CUDA stream
+completes. Pointers and the stream must belong to the CUDA context associated with
+this OptiX device context. Matrix addresses and network strides must be 64-byte
+aligned. This method does not synchronize the stream.
+)pbdoc",
+            py::arg( "stream" ),
+            py::arg( "inputLayers" ),
+            py::arg( "inputNetworks" ),
+            py::arg( "outputLayers" ),
+            py::arg( "outputNetworks" ),
+            py::arg( "inputNetworkStrideInBytes" ) = 0u,
+            py::arg( "outputNetworkStrideInBytes" ) = 0u,
+            py::arg( "numNetworks" ) = 1u
+        )
+#endif
         .def( "pipelineCreate", &pyoptix::pipelineCreate )
 #if OPTIX_VERSION < 70700
         .def( "moduleCreateFromPTX", &pyoptix::moduleCreate )
@@ -3996,6 +4154,19 @@ py::enum_<OptixExceptionCodes>(m, "ExceptionCodes", py::arithmetic())
         .def_readwrite( "maxHeight", &pyoptix::DlssRRSupportedSizes::maxHeight )
         .def_readwrite( "optimalWidth", &pyoptix::DlssRRSupportedSizes::optimalWidth )
         .def_readwrite( "optimalHeight", &pyoptix::DlssRRSupportedSizes::optimalHeight )
+        ;
+#endif
+
+#if OPTIX_VERSION >= 90000
+    py::class_<OptixCoopVecMatrixDescription>(m, "CoopVecMatrixDescription")
+        .def( py::init([]() { return std::unique_ptr<OptixCoopVecMatrixDescription>(new OptixCoopVecMatrixDescription{}); } ) )
+        .def_readwrite( "N", &OptixCoopVecMatrixDescription::N )
+        .def_readwrite( "K", &OptixCoopVecMatrixDescription::K )
+        .def_readwrite( "offsetInBytes", &OptixCoopVecMatrixDescription::offsetInBytes )
+        .def_readwrite( "elementType", &OptixCoopVecMatrixDescription::elementType )
+        .def_readwrite( "layout", &OptixCoopVecMatrixDescription::layout )
+        .def_readwrite( "rowColumnStrideInBytes", &OptixCoopVecMatrixDescription::rowColumnStrideInBytes )
+        .def_readwrite( "sizeInBytes", &OptixCoopVecMatrixDescription::sizeInBytes )
         ;
 #endif
 
