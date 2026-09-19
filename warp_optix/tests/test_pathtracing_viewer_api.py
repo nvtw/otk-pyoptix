@@ -955,7 +955,8 @@ def test_cuda_instance_batches_reuse_materials_after_count_changes():
     if not wp.is_cuda_available():
         pytest.skip("CUDA device unavailable")
     api = _FakePathTracerAPI()
-    api.set_instance_material_arrays = lambda *args: None
+    material_updates = []
+    api.set_instance_material_arrays = lambda *args: material_updates.append(args)
     viewer = PathTracingViewerBackend(device="cuda", headless=True, api=api)
     points, indices = _triangle()
     viewer.log_mesh("triangle", points, indices)
@@ -964,6 +965,9 @@ def test_cuda_instance_batches_reuse_materials_after_count_changes():
     xforms = np.tile((0, 0, 0, 0, 0, 0, 1), (3, 1)).astype(np.float32)
     viewer.log_instances("batch", "triangle", xforms, None, colors, materials)
     viewer._flush_scene()
+    assert len(material_updates) == 1
+    viewer.log_instances("batch", "triangle", xforms, None, None, None)
+    assert len(material_updates) == 1
     material_count = len(api.materials)
     for count in (2, 1, 3):
         viewer.log_instances(

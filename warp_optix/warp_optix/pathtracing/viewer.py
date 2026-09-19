@@ -911,14 +911,11 @@ class PathTracingViewerBackend:
             self._scene_dirty = True
         instances_added = len(batch.instance_ids) != previous_count
 
+        appearance_update_requested = colors is not None or materials is not None
         device_appearance = (
-            isinstance(colors, wp.array)
-            and colors.device.is_cuda
-            or isinstance(materials, wp.array)
-            and materials.device.is_cuda
-            or name in self._device_material_batches
-            and colors is None
-            and materials is None
+            (isinstance(colors, wp.array) and colors.device.is_cuda)
+            or (isinstance(materials, wp.array) and materials.device.is_cuda)
+            or (name in self._device_material_batches and colors is None and materials is None)
         )
         appearance_changed = False
         texture_id = self._mesh_texture_ids.get(mesh)
@@ -1019,7 +1016,7 @@ class PathTracingViewerBackend:
             # New instances also create materials, while the compact CUDA table
             # is rebuilt only by build_scene(). The dirty-scene flush reapplies
             # every cached batch after that table has the required capacity.
-            if not self._scene_dirty:
+            if not self._scene_dirty and appearance_update_requested:
                 self._api.set_instance_material_arrays(material_ids, colors, materials)
 
         if not device_appearance and (appearance_changed or instances_added):
