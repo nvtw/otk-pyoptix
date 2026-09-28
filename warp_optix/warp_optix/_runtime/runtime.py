@@ -127,7 +127,9 @@ def create_launch_params_buffer(
     )
 
 
-def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> None:
+def write_launch_params(
+    buffer: LaunchParamsBuffer, params_struct_instance, stream=None
+) -> None:
     if not isinstance(buffer, LaunchParamsBuffer):
         raise TypeError(
             "buffer must be a LaunchParamsBuffer created by create_launch_params_buffer()"
@@ -145,6 +147,7 @@ def write_launch_params(buffer: LaunchParamsBuffer, params_struct_instance) -> N
         inputs=[params_struct_instance],
         outputs=[buffer.bytes],
         device=buffer.device,
+        stream=stream,
     )
 
 

@@ -1483,7 +1483,9 @@ class PathTracingViewer:
         p.specular_output = self._specular_buffer
         p.spec_hit_dist_output = self._spec_hit_dist_buffer
 
-        woptix.write_launch_params(self._launch_params_buffer, p)
+        woptix.write_launch_params(
+            self._launch_params_buffer, p, stream=self._render_stream
+        )
 
     def _update_temporal_state(
         self,
@@ -1508,6 +1510,7 @@ class PathTracingViewer:
                     dim=(self._render_width, self._render_height),
                     inputs=[self._accum_buffer],
                     device="cuda",
+                    stream=self._render_stream,
                 )
                 self.frame_index = 0
             return bool(reset_temporal)
@@ -1518,6 +1521,7 @@ class PathTracingViewer:
             dim=(self._render_width, self._render_height),
             inputs=[self._accum_buffer],
             device="cuda",
+            stream=self._render_stream,
         )
         return bool(reset_temporal)
 
@@ -1583,6 +1587,7 @@ class PathTracingViewer:
                     dim=(self._render_width, self._render_height),
                     inputs=[self._color_buffer, self._accum_buffer, accum_sample_index],
                     device="cuda",
+                    stream=self._render_stream,
                 )
 
                 if use_external_accum:

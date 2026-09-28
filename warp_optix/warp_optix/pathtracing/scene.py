@@ -796,6 +796,10 @@ class Scene:
         self._tlas_output_capacity = 0
         self._tlas_output_size = 0
         self._tlas_instance_count = 0
+        # Repeated UPDATE operations can make a moving scene's TLAS expensive
+        # to traverse. Rebuild occasionally to restore its hierarchy quality.
+        self._max_tlas_updates = 16
+        self._tlas_updates_since_build = 0
 
         # Keepalive references
         self._keepalive = {}
@@ -1682,6 +1686,7 @@ class Scene:
         self._tlas_output_capacity = 0
         self._tlas_output_size = 0
         self._tlas_instance_count = 0
+        self._tlas_updates_since_build = 0
         self._keepalive.clear()
         self.materials.clear()
         self._instance_material_ids = None
@@ -2092,6 +2097,7 @@ class Scene:
             and self._tlas_instance_count == count
             and self._ias_buffer is not None
             and self._tlas_output_size == required_output
+            and self._tlas_updates_since_build < self._max_tlas_updates
         )
 
         # Reuse TLAS scratch/output buffers across rebuilds.
@@ -2140,6 +2146,7 @@ class Scene:
 
         self._tlas_output_size = required_output
         self._tlas_instance_count = count
+        self._tlas_updates_since_build = self._tlas_updates_since_build + 1 if can_update else 0
         self._keepalive["ias_temp"] = self._tlas_temp_buffer
 
     def _build_scene_buffers(self):

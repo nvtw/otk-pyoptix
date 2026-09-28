@@ -145,3 +145,27 @@ def test_scene_rebuild_after_adding_instances_resizes_motion_buffers():
             assert np.isfinite(api.get_frame()).all()
     finally:
         api.close()
+
+
+def test_tlas_updates_periodically_rebuild_for_traversal_quality():
+    """Repeated refits must eventually rebuild the TLAS."""
+    api = _new_gpu_api()
+    try:
+        material = api.create_emissive_material((1.0, 1.0, 1.0), intensity=1.0)
+        vertices = np.asarray(
+            ((-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (0.0, 0.5, 0.0)),
+            dtype=np.float32,
+        )
+        geometry = api.create_mesh(
+            vertices, np.asarray(((0, 1, 2),), dtype=np.uint32), material_id=material
+        )
+        api.create_instance(geometry)
+        api.build_scene()
+        scene = api.scene
+        for _ in range(scene._max_tlas_updates):
+            api.rebuild_tlas()
+        assert scene._tlas_updates_since_build == scene._max_tlas_updates
+        api.rebuild_tlas()
+        assert scene._tlas_updates_since_build == 0
+    finally:
+        api.close()
