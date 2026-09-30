@@ -21,7 +21,9 @@ def raygen_program():
 
 ## Install
 
-From the otk-pyoptix repo root:
+The base `warp_optix` install requires only `warp-lang`. Install PyOptiX when
+you need to create OptiX contexts or launch OptiX programs. From the
+otk-pyoptix repo root:
 
 ```bash
 pip install -e . -e warp_optix/

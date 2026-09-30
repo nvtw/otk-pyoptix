@@ -33,6 +33,7 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
+#include <utility>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -179,8 +180,20 @@ struct DlssRRContext
 {
     bool initialized = false;
     NVSDK_NGX_Parameter* ngxParams = nullptr;
+    unsigned int activeDenoisers = 0;
     unsigned int minDriverVersionMajor = 0;
     unsigned int minDriverVersionMinor = 0;
+
+    DlssRRContext() = default;
+    DlssRRContext( const DlssRRContext& ) = delete;
+    DlssRRContext& operator=( const DlssRRContext& ) = delete;
+    ~DlssRRContext()
+    {
+        if( ngxParams )
+            NVSDK_NGX_CUDA_DestroyParameters( ngxParams );
+        if( initialized )
+            NVSDK_NGX_CUDA_Shutdown();
+    }
 };
 bool operator==( const DlssRRContext& a, const DlssRRContext& b) { return a.ngxParams == b.ngxParams; }
 
@@ -188,12 +201,38 @@ struct DlssRRDenoiser
 {
     NVSDK_NGX_Handle* handle = nullptr;
     NVSDK_NGX_Parameter* ngxParams = nullptr;
+    DlssRRContext* context = nullptr;
     std::array<CUtexObject, RESOURCE_NUM> textureResources{};
     CUsurfObject outputSurface = 0;
     unsigned int inputWidth = 0;
     unsigned int inputHeight = 0;
     unsigned int outputWidth = 0;
     unsigned int outputHeight = 0;
+
+    DlssRRDenoiser() = default;
+    DlssRRDenoiser( const DlssRRDenoiser& ) = delete;
+    DlssRRDenoiser& operator=( const DlssRRDenoiser& ) = delete;
+    DlssRRDenoiser( DlssRRDenoiser&& other ) noexcept
+        : handle( std::exchange( other.handle, nullptr ) )
+        , ngxParams( std::exchange( other.ngxParams, nullptr ) )
+        , context( std::exchange( other.context, nullptr ) )
+        , textureResources( std::move( other.textureResources ) )
+        , outputSurface( other.outputSurface )
+        , inputWidth( other.inputWidth )
+        , inputHeight( other.inputHeight )
+        , outputWidth( other.outputWidth )
+        , outputHeight( other.outputHeight )
+    {
+    }
+    ~DlssRRDenoiser()
+    {
+        if( handle )
+        {
+            NVSDK_NGX_CUDA_ReleaseFeature( handle );
+            if( context )
+                --context->activeDenoisers;
+        }
+    }
 };
 bool operator==( const DlssRRDenoiser& a, const DlssRRDenoiser& b) { return a.handle == b.handle; }
 
@@ -2283,7 +2322,7 @@ void denoiserInvokeTiled(
 #ifdef PYOPTIX_ENABLE_DLSS
 static std::wstring toWideString( const std::string& value )
 {
-    return std::wstring( value.begin(), value.end() );
+    return std::filesystem::u8path( value ).wstring();
 }
 
 static void NVSDK_CONV dlssLogCallback( const char* message, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature )
@@ -2329,12 +2368,23 @@ void dlssRRContextInit(
             featureInfoPtr
         )
     );
-    PYDLSS_CHECK( NVSDK_NGX_CUDA_GetCapabilityParameters( &context.ngxParams ) );
+    try
+    {
+        PYDLSS_CHECK( NVSDK_NGX_CUDA_GetCapabilityParameters( &context.ngxParams ) );
+    }
+    catch( ... )
+    {
+        context.ngxParams = nullptr;
+        NVSDK_NGX_CUDA_Shutdown();
+        throw;
+    }
     context.initialized = true;
 }
 
 void dlssRRContextDeinit( pyoptix::DlssRRContext& context )
 {
+    if( context.activeDenoisers != 0 )
+        throw std::runtime_error( "Deinitialize all DLSS RR denoisers before the context." );
     if( context.ngxParams )
     {
         NVSDK_NGX_CUDA_DestroyParameters( context.ngxParams );
@@ -2476,6 +2526,8 @@ pyoptix::DlssRRDenoiser dlssRRCreate(
     cudaParams.InCUContext = cuContext;
     cudaParams.InCUStream = reinterpret_cast<CUstream>( stream );
     PYDLSS_CHECK( NGX_CUDA_CREATE_DLSSD_EXT( &denoiser.handle, context.ngxParams, &cudaParams ) );
+    denoiser.context = &context;
+    ++context.activeDenoisers;
     return denoiser;
 }
 
@@ -2485,6 +2537,9 @@ void dlssRRDestroy( pyoptix::DlssRRDenoiser& denoiser )
     {
         PYDLSS_CHECK( NVSDK_NGX_CUDA_ReleaseFeature( denoiser.handle ) );
         denoiser.handle = nullptr;
+        --denoiser.context->activeDenoisers;
+        denoiser.context = nullptr;
+        denoiser.ngxParams = nullptr;
     }
 }
 
@@ -3373,7 +3428,8 @@ aligned. This method does not synchronize the stream.
         .def( "querySupportedDlssInputSizes", &pyoptix::dlssRRQuerySupportedDlssInputSizes,
               py::arg( "outputWidth" ), py::arg( "outputHeight" ),
               py::arg( "quality" ) = NVSDK_NGX_PerfQuality_Value_MaxQuality )
-        .def( "initDlssRR", &pyoptix::dlssRRCreate, py::arg( "initInfo" ), py::arg( "stream" ) = 0u )
+        .def( "initDlssRR", &pyoptix::dlssRRCreate, py::arg( "initInfo" ), py::arg( "stream" ) = 0u,
+              py::keep_alive<0, 1>() )
         .def(py::self == py::self)
         ;
 

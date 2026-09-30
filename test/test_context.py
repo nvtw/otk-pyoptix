@@ -2,6 +2,9 @@
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
 
+import os
+from pathlib import Path
+
 import cupy as cp
 import optix as ox
 import pytest 
@@ -232,15 +235,15 @@ class TestContext:
         assert ctx.getCacheDatabaseSizes() == db_sizes 
         ctx.destroy()
         
-    def test_set_get_cache( self ):
+    def test_set_get_cache( self, tmp_path ):
         ctx = ox.deviceContextCreate(0, ox.DeviceContextOptions())
 
         v = ctx.getCacheLocation() 
         assert type(v) is str
 
-        loc =  "/dev/null"
-        with pytest.raises( RuntimeError ):
-            ctx.setCacheLocation( loc ) # not valid dir
+        ctx.setCacheLocation( str( tmp_path ) )
+        expected = v if os.environ.get( "OPTIX_CACHE_PATH" ) else str( tmp_path )
+        assert Path( ctx.getCacheLocation() ).resolve() == Path( expected ).resolve()
         ctx.destroy()
 
 

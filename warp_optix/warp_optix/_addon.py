@@ -89,8 +89,8 @@ def register_with_warp() -> None:
     global _REGISTERED
     if _REGISTERED:
         return
-    _REGISTERED = True
 
     from warp_optix._builtins import register_addon_builtins
 
     register_addon_builtins()
+    _REGISTERED = True

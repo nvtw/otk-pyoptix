@@ -11,10 +11,14 @@ set(PYOPTIX_DLSS_URL
   "https://github.com/NVIDIA/DLSS/archive/refs/tags/v${PYOPTIX_DLSS_VERSION}.tar.gz"
   CACHE STRING "DLSS SDK archive URL."
 )
-set(PYOPTIX_DLSS_URL_HASH
-  "81b17f2f34bbd6b18b50df4c2a5632956b7feaba301567f29fcc5fbdd5c4ee06"
-  CACHE STRING "SHA256 for DLSS SDK archive."
-)
+if (NOT DEFINED PYOPTIX_DLSS_URL_HASH)
+  if (PYOPTIX_DLSS_VERSION STREQUAL "310.9.1")
+    set(PYOPTIX_DLSS_URL_HASH
+      "81b17f2f34bbd6b18b50df4c2a5632956b7feaba301567f29fcc5fbdd5c4ee06"
+      CACHE STRING "SHA256 for DLSS SDK archive."
+    )
+  endif()
+endif()
 set(PYOPTIX_DLSS_DIR
   "${CMAKE_SOURCE_DIR}/third_party/dlss-${PYOPTIX_DLSS_VERSION}"
   CACHE PATH "Directory used to store downloaded DLSS SDK."
@@ -26,6 +30,12 @@ if (NOT _dlss_root)
 endif()
 
 if (NOT EXISTS "${_dlss_root}/include/nvsdk_ngx.h" AND PYOPTIX_AUTO_DOWNLOAD_DLSS)
+  if (NOT PYOPTIX_DLSS_URL_HASH)
+    message(FATAL_ERROR
+      "Set PYOPTIX_DLSS_URL_HASH to the SHA256 of DLSS SDK v${PYOPTIX_DLSS_VERSION}, "
+      "or set DLSS_ROOT to a local SDK."
+    )
+  endif()
   set(_dlss_archive_dir "${PYOPTIX_DLSS_DIR}/_download")
   set(_dlss_archive_path "${_dlss_archive_dir}/dlss-${PYOPTIX_DLSS_VERSION}.tar.gz")
   set(_dlss_extract_dir "${_dlss_archive_dir}/src")
@@ -86,6 +96,9 @@ if (NOT EXISTS "${_dlss_root}/include/nvsdk_ngx.h" AND PYOPTIX_AUTO_DOWNLOAD_DLS
 endif()
 
 set(DLSS_INCLUDE_DIR "${_dlss_root}/include")
+if (NOT EXISTS "${DLSS_INCLUDE_DIR}/nvsdk_ngx.h")
+  set(DLSS_INCLUDE_DIR "DLSS_INCLUDE_DIR-NOTFOUND")
+endif()
 
 if (WIN32)
   set(_dlss_crt_flavor "d")
@@ -111,6 +124,10 @@ else()
   if (_dlss_rel_so)
     list(GET _dlss_rel_so 0 DLSS_RUNTIME_LIBRARY_RELEASE)
   endif()
+endif()
+
+if (NOT EXISTS "${DLSS_LIBRARY_RELEASE}")
+  set(DLSS_LIBRARY_RELEASE "DLSS_LIBRARY_RELEASE-NOTFOUND")
 endif()
 
 include(FindPackageHandleStandardArgs)

@@ -9,7 +9,7 @@ import sys
 import sysconfig
 from pathlib import Path
 
-__version__ = "0.1.0"
+__version__ = "9.1.0"
 __author__ = "Keith Morley"
 __license__ = "BSD-3-Clause"
 
@@ -58,7 +58,37 @@ def get_optix_include_dir():
 _add_dll_directories()
 
 # Import everything from the native module.
+from . import _optix as _native
 from ._optix import *  # noqa: E402,F403
+
+
+def dlss_support_available():
+    """Return whether this wheel was compiled with DLSS Ray Reconstruction."""
+    return hasattr(_native, "DlssRRContext")
+
+
+def dlss_rr_available():
+    """Return whether DLSS Ray Reconstruction can run on this system."""
+    if not dlss_support_available():
+        return False
+    context = DlssRRContext()
+    try:
+        context.init(featureSearchPath=str(Path(__file__).resolve().parent))
+        return context.isDlssRRAvailable()
+    except RuntimeError:
+        return False
+    finally:
+        context.deinit()
+
+
+if not dlss_support_available():
+    from . import _dlss_stub as _stub
+
+    for _name in _stub.__all__:
+        globals()[_name] = getattr(_stub, _name)
+    for _enum in (_stub.DlssPerfQuality, _stub.RayReconstructionHintRenderPreset, _stub.DlssRRResource):
+        for _member in _enum:
+            globals()[_member.name] = _member
 
 # Export all public symbols from _optix
 __all__ = [name for name in dir() if not name.startswith('_')]

@@ -31,9 +31,10 @@ Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) version 10.0
 **Note**: OptiX headers are automatically fetched during build. You do NOT need to install the OptiX SDK separately to build the `optix` Python module.  However, the SDK will need to be installed to run the examples.
 
 #### DLSS SDK (Ray Reconstruction)
-By default, the build also downloads DLSS SDK version `310.9.1` into
-`third_party/dlss-310.9.1` and enables CUDA/OptiX DLSS RR bindings.
-No Vulkan integration is used or exposed by these bindings.
+The standard build enables DLSS Ray Reconstruction and downloads SDK version
+`310.9.1` into `third_party/dlss-310.9.1`. Set `PYOPTIX_ENABLE_DLSS=OFF` to
+build a smaller wheel without DLSS bindings or runtime libraries. No Vulkan
+integration is used or exposed by these bindings.
 
 #### Build system requirements:
 * [cmake](https://cmake.org/)
@@ -49,19 +50,39 @@ cd otk-pyoptix
 pip install .
 ```
 
+To produce both wheel variants, build into separate directories. These are
+alternative `pyoptix` wheels with the same package name and version; install
+only one variant at a time. For example, in PowerShell:
+
+```powershell
+$env:CMAKE_ARGS = "-DPYOPTIX_ENABLE_DLSS=ON"
+python -m pip wheel . --no-deps -w dist/dlss
+$env:CMAKE_ARGS = "-DPYOPTIX_ENABLE_DLSS=OFF"
+python -m pip wheel . --no-deps -w dist/no-dlss
+Remove-Item Env:CMAKE_ARGS
+```
+
+Both wheels expose `optix.dlss_support_available()` to query whether DLSS was
+compiled in, and `optix.dlss_rr_available()` to query whether it can run on the
+current system. The DLSS-free wheel returns `False` from both functions and
+keeps `DlssRRContext` and `DlssRRDenoiser` calls harmless, so applications can
+use the same Python API with either variant.
+
 **Advanced options:** Additional CMake arguments can be passed through the
 `CMAKE_ARGS` environment variable. The following DLSS settings can also be set
 directly as environment variables:
 
 - `DLSS_ROOT`: use a local DLSS SDK instead of downloading it
-- `PYOPTIX_DLSS_VERSION`: override the DLSS SDK version (default `310.9.1`)
-- `PYOPTIX_AUTO_DOWNLOAD_DLSS`: set to `OFF` to disable automatic download
+- `PYOPTIX_DLSS_VERSION`: override the DLSS SDK version (default `310.9.1`);
+  automatic downloads of another version also require a matching
+  `PYOPTIX_DLSS_URL_HASH` SHA256 value
+- `PYOPTIX_AUTO_DOWNLOAD_DLSS`: set to `OFF` to disable automatic SDK download
 - `PYOPTIX_ENABLE_DLSS`: set to `OFF` to build without DLSS bindings
 
 After installation, `optix.get_optix_include_dir()` returns the packaged OptiX
 header directory for downstream compilation.
 
-On Windows with Python 3.8+, PyOptiX automatically registers the packaged DLSS
+On Windows with Python 3.8+, a DLSS-enabled build registers its packaged DLSS
 runtime and the CUDA directory from `CUDA_PATH`. Set `CUDA_BIN_DIR` if CUDA
 cannot be detected automatically.
 
