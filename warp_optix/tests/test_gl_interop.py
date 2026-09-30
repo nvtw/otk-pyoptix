@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
 import warp as wp
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer
 
@@ -85,3 +86,30 @@ def test_render_stream_completes_before_gl_consumes_pbo():
         "draw",
         "flip",
     ]
+
+
+def test_render_callback_failure_unmaps_pbo():
+    events = []
+    viewer = OptixGLInteropViewer.__new__(OptixGLInteropViewer)
+    viewer.device = "cuda:0"
+    viewer.render_stream = object()
+    viewer.cuda_gl = SimpleNamespace(
+        map=lambda **_kwargs: events.append("map"),
+        unmap=lambda: events.append("unmap"),
+    )
+    viewer.width = viewer.height = 1
+    viewer.frame_index = 0
+    viewer.start_time = time.perf_counter()
+
+    def fail(*_args):
+        raise RuntimeError("render failed")
+
+    viewer._render_callback = fail
+    with (
+        mock.patch.object(wp, "ScopedDevice", side_effect=lambda _device: nullcontext()),
+        mock.patch.object(wp, "ScopedStream", side_effect=lambda _stream, **_kwargs: nullcontext()),
+        pytest.raises(RuntimeError, match="render failed"),
+    ):
+        viewer._render_frame()
+
+    assert events == ["map", "unmap"]

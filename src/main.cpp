@@ -192,9 +192,17 @@ struct DlssRRContext
         if( ngxParams )
             NVSDK_NGX_CUDA_DestroyParameters( ngxParams );
         if( initialized )
+            releaseSdk();
+    }
+
+    static unsigned int activeContexts;
+    static void releaseSdk()
+    {
+        if( --activeContexts == 0 )
             NVSDK_NGX_CUDA_Shutdown();
     }
 };
+unsigned int DlssRRContext::activeContexts = 0;
 bool operator==( const DlssRRContext& a, const DlssRRContext& b) { return a.ngxParams == b.ngxParams; }
 
 struct DlssRRDenoiser
@@ -2359,15 +2367,21 @@ void dlssRRContextInit(
     }
     const NVSDK_NGX_FeatureCommonInfo* featureInfoPtr =
         featurePath.empty() && !enableLogging ? nullptr : &featureInfo;
-    PYDLSS_CHECK(
-        NVSDK_NGX_CUDA_Init_with_ProjectID(
-            projectId.c_str(),
-            NVSDK_NGX_ENGINE_TYPE_CUSTOM,
-            engineVersion.c_str(),
-            appPath.c_str(),
-            featureInfoPtr
-        )
-    );
+    // NGX CUDA state is process-wide. Contexts share the first initialization
+    // and the last context shuts it down.
+    const bool startSdk = pyoptix::DlssRRContext::activeContexts == 0;
+    if( startSdk )
+    {
+        PYDLSS_CHECK(
+            NVSDK_NGX_CUDA_Init_with_ProjectID(
+                projectId.c_str(),
+                NVSDK_NGX_ENGINE_TYPE_CUSTOM,
+                engineVersion.c_str(),
+                appPath.c_str(),
+                featureInfoPtr
+            )
+        );
+    }
     try
     {
         PYDLSS_CHECK( NVSDK_NGX_CUDA_GetCapabilityParameters( &context.ngxParams ) );
@@ -2375,10 +2389,12 @@ void dlssRRContextInit(
     catch( ... )
     {
         context.ngxParams = nullptr;
-        NVSDK_NGX_CUDA_Shutdown();
+        if( startSdk )
+            NVSDK_NGX_CUDA_Shutdown();
         throw;
     }
     context.initialized = true;
+    ++pyoptix::DlssRRContext::activeContexts;
 }
 
 void dlssRRContextDeinit( pyoptix::DlssRRContext& context )
@@ -2392,7 +2408,7 @@ void dlssRRContextDeinit( pyoptix::DlssRRContext& context )
     }
     if( context.initialized )
     {
-        NVSDK_NGX_CUDA_Shutdown();
+        pyoptix::DlssRRContext::releaseSdk();
         context.initialized = false;
     }
 }
@@ -2519,7 +2535,8 @@ pyoptix::DlssRRDenoiser dlssRRCreate(
     context.ngxParams->Set( NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_UltraPerformance, initInfo.preset );
 
     CUcontext cuContext = nullptr;
-    cuCtxGetCurrent( &cuContext );
+    if( cuCtxGetCurrent( &cuContext ) != CUDA_SUCCESS || cuContext == nullptr )
+        throw std::runtime_error( "DLSS RR requires a current CUDA context." );
 
     NVSDK_NGX_CUDA_DLSSD_Create_Params cudaParams = {};
     cudaParams.Feature = dlssParams;
@@ -2545,6 +2562,8 @@ void dlssRRDestroy( pyoptix::DlssRRDenoiser& denoiser )
 
 void dlssRRSetResource( pyoptix::DlssRRDenoiser& denoiser, pyoptix::DlssRRResource resourceId, uint64_t resourceHandle )
 {
+    if( resourceId < 0 || resourceId >= pyoptix::RESOURCE_NUM )
+        throw std::invalid_argument( "Invalid DLSS RR resource." );
     if( resourceId == pyoptix::RESOURCE_COLOR_OUT )
         denoiser.outputSurface = static_cast<CUsurfObject>( resourceHandle );
     else
@@ -2553,6 +2572,8 @@ void dlssRRSetResource( pyoptix::DlssRRDenoiser& denoiser, pyoptix::DlssRRResour
 
 void dlssRRResetResource( pyoptix::DlssRRDenoiser& denoiser, pyoptix::DlssRRResource resourceId )
 {
+    if( resourceId < 0 || resourceId >= pyoptix::RESOURCE_NUM )
+        throw std::invalid_argument( "Invalid DLSS RR resource." );
     if( resourceId == pyoptix::RESOURCE_COLOR_OUT )
         denoiser.outputSurface = 0;
     else

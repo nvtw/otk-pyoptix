@@ -338,23 +338,25 @@ class GLLineOverlay:
                 vertices = self._vertex_cuda_gl.map(
                     dtype=LineVertex, shape=(2 * self.capacity,)
                 )
-                if per_line_colors:
-                    wp.launch(
-                        _write_line_vertices,
-                        dim=line_count,
-                        inputs=[starts, ends, colors],
-                        outputs=[vertices],
-                        device=self.device,
-                    )
-                else:
-                    wp.launch(
-                        _write_uniform_line_vertices,
-                        dim=line_count,
-                        inputs=[starts, ends, wp.vec3(*color)],
-                        outputs=[vertices],
-                        device=self.device,
-                    )
-                self._vertex_cuda_gl.unmap()
+                try:
+                    if per_line_colors:
+                        wp.launch(
+                            _write_line_vertices,
+                            dim=line_count,
+                            inputs=[starts, ends, colors],
+                            outputs=[vertices],
+                            device=self.device,
+                        )
+                    else:
+                        wp.launch(
+                            _write_uniform_line_vertices,
+                            dim=line_count,
+                            inputs=[starts, ends, wp.vec3(*color)],
+                            outputs=[vertices],
+                            device=self.device,
+                        )
+                finally:
+                    self._vertex_cuda_gl.unmap()
                 wp.synchronize_stream(self.stream)
 
     def update(
@@ -427,8 +429,10 @@ class GLLineOverlay:
                 mapped = self._depth_cuda_gl.map(
                     dtype=wp.float32, shape=(height * width,)
                 )
-                wp.copy(mapped, self.depth_buffer.flatten())
-                self._depth_cuda_gl.unmap()
+                try:
+                    wp.copy(mapped, self.depth_buffer.flatten())
+                finally:
+                    self._depth_cuda_gl.unmap()
                 wp.synchronize_stream(self.stream)
         gl = self.gl
         gl.glBindBuffer(gl.GL_PIXEL_UNPACK_BUFFER, self._depth_pbo)

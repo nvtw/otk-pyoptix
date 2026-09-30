@@ -530,7 +530,7 @@ def _compress_channels(
                     wp.capture_end(device=device)
                     raise
                 graph = wp.capture_end(device=device)
-                for _ in range(count - 1):
+                for _ in range(count - 2):
                     wp.capture_launch(graph)
             else:
                 for _ in range(count - 1):

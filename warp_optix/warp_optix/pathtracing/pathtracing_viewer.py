@@ -648,20 +648,6 @@ class PathTracingViewer:
         self._last_accum_proj = proj.copy()
 
     def _destroy_dlss_rr(self, *, restore_resolution: bool = True):
-        # Surface object lifetime is owned by the Texture2D instance.
-        # Clearing references lets texture cleanup release CUDA resources.
-        self._dlss_output_surface = 0
-
-        self._dlss_color_in_tex = None
-        self._dlss_normal_roughness_tex = None
-        self._dlss_motion_tex = None
-        self._dlss_depth_tex = None
-        self._dlss_diffuse_tex = None
-        self._dlss_specular_tex = None
-        self._dlss_spec_hit_dist_tex = None
-        self._dlss_color_out_tex = None
-        self._dlss_output_buffer = None
-
         if self._dlss_denoiser is not None:
             try:
                 self._dlss_denoiser.deinit()
@@ -675,6 +661,17 @@ class PathTracingViewer:
             except Exception as exc:
                 logger.warning("Failed to deinitialize DLSS context: %s", exc)
         self._dlss_context = None
+        # Release textures only after NGX has stopped using their CUDA handles.
+        self._dlss_output_surface = 0
+        self._dlss_color_in_tex = None
+        self._dlss_normal_roughness_tex = None
+        self._dlss_motion_tex = None
+        self._dlss_depth_tex = None
+        self._dlss_diffuse_tex = None
+        self._dlss_specular_tex = None
+        self._dlss_spec_hit_dist_tex = None
+        self._dlss_color_out_tex = None
+        self._dlss_output_buffer = None
         self._dlss_enabled = False
         self._dlss_status_reported = False
         # If DLSS gets disabled at runtime, restore full-resolution rendering.
@@ -692,15 +689,10 @@ class PathTracingViewer:
             self._set_render_resolution(self.width, self.height)
             return
 
-        required = (
-            "DlssRRContext",
-            "DlssRRInitInfo",
-            "DlssRRResource",
-            "DlssPerfQuality",
-        )
-        if not all(hasattr(self._optix, name) for name in required):
-            self._dlss_init_error = "bindings are not present in the optix module"
-            logger.info("DLSS RR bindings not present in optix module.")
+        support_query = getattr(self._optix, "dlss_support_available", None)
+        if support_query is None or not support_query():
+            self._dlss_init_error = "DLSS support is not compiled into this optix build"
+            logger.info("DLSS RR is not compiled into this optix build.")
             self._set_render_resolution(self.width, self.height)
             return
 

@@ -15,7 +15,7 @@
 
 """Minimal Warp-defined OptiX entry kernels.
 
-This example defines OptiX raygen/miss entry points with the new `kernel_type` API,
+This example defines OptiX raygen/miss entry points with `warp_optix.optix_kernel`,
 then emits PTX so the generated entry names can be inspected.
 """
 

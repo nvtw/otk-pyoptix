@@ -175,9 +175,11 @@ class OptixGLInteropViewer:
                 mapped = self.cuda_gl.map(
                     dtype=wp.uint32, shape=(self.width * self.height,)
                 )
-                elapsed = time.perf_counter() - self.start_time
-                self._render_callback(mapped, self.frame_index, elapsed)
-                self.cuda_gl.unmap()
+                try:
+                    elapsed = time.perf_counter() - self.start_time
+                    self._render_callback(mapped, self.frame_index, elapsed)
+                finally:
+                    self.cuda_gl.unmap()
                 # Unmapping is asynchronous. Drain only the render stream so
                 # CUDA releases PBO ownership before OpenGL consumes it below.
                 wp.synchronize_stream(self.render_stream)

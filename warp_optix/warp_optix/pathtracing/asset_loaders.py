@@ -149,7 +149,9 @@ def _read_accessor(root: dict, buffers: list[bytes], accessor_index: int) -> np.
     return arr.reshape(count, num_components)
 
 
-def _load_gltf_images(path: Path, root: dict, buffers: list[bytes]) -> list[np.ndarray]:
+def _load_gltf_images(
+    path: Path, root: dict, buffers: list[bytes]
+) -> list[np.ndarray | None]:
     import imageio.v3 as iio  # noqa: PLC0415
 
     images = root.get("images", [])
@@ -172,16 +174,21 @@ def _load_gltf_images(path: Path, root: dict, buffers: list[bytes]) -> list[np.n
 
         arr = iio.imread(io.BytesIO(raw))
         arr = np.asarray(arr)
+        opaque = (
+            np.iinfo(arr.dtype).max
+            if np.issubdtype(arr.dtype, np.integer)
+            else 1.0
+        )
         if arr.ndim == 2:
-            arr = np.stack([arr, arr, arr, np.full_like(arr, 255)], axis=-1)
+            arr = np.stack([arr, arr, arr, np.full_like(arr, opaque)], axis=-1)
         elif arr.shape[-1] == 3:
-            alpha = np.full((*arr.shape[:2], 1), 255, dtype=arr.dtype)
+            alpha = np.full((*arr.shape[:2], 1), opaque, dtype=arr.dtype)
             arr = np.concatenate([arr, alpha], axis=-1)
         elif arr.shape[-1] > 4:
             arr = arr[..., :4]
 
         if np.issubdtype(arr.dtype, np.integer):
-            arr = arr.astype(np.float32) * (1.0 / 255.0)
+            arr = arr.astype(np.float32) / float(np.iinfo(arr.dtype).max)
         else:
             arr = arr.astype(np.float32)
         # No vertical flip to keep texture orientation consistent with the reference.
@@ -197,17 +204,16 @@ def _load_gltf_images(path: Path, root: dict, buffers: list[bytes]) -> list[np.n
     workers = max(1, min(8, len(images)))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         decoded = list(ex.map(_decode_one, images))
-    loaded = [img for img in decoded if img is not None]
-    return loaded
+    return decoded
 
 
-def _build_texture_list(root: dict, images: list[np.ndarray]) -> list[np.ndarray]:
+def _build_texture_list(root: dict, images: list[np.ndarray | None]) -> list[np.ndarray]:
     textures = root.get("textures", [])
     out: list[np.ndarray] = []
     white = np.ones((1, 1, 4), dtype=np.float32)
     for tex in textures:
         src = int(tex.get("source", -1))
-        if 0 <= src < len(images):
+        if 0 <= src < len(images) and images[src] is not None:
             out.append(images[src])
         else:
             out.append(white)

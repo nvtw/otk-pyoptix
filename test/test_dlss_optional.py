@@ -24,3 +24,22 @@ def test_dlss_free_build_has_harmless_api():
     denoiser.denoise(0, 0, 0, 0, [], [])
     denoiser.deinit()
     context.deinit()
+
+
+def test_dlss_contexts_share_sdk_lifetime():
+    if not optix.dlss_support_available():
+        pytest.skip("DLSS bindings are not compiled into this wheel")
+
+    first = optix.DlssRRContext()
+    second = optix.DlssRRContext()
+    try:
+        try:
+            first.init()
+        except RuntimeError as error:
+            pytest.skip(f"DLSS runtime is unavailable: {error}")
+        second.init()
+        first.deinit()
+        assert isinstance(second.isDlssRRAvailable(), bool)
+    finally:
+        second.deinit()
+        first.deinit()

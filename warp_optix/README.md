@@ -13,9 +13,13 @@ import warp_optix as wo  # registers OptiX builtins, headers, and entry-point sp
 Once imported, you can decorate kernels with the OptiX entry-point kinds:
 
 ```python
+@wp.struct
+class LaunchParams:
+    value: wp.uint32
+
 @wo.optix_kernel(wo.OptixKernelType.RAYGEN)
-def raygen_program():
-    idx = wo.optix_get_launch_index()
+def raygen_program(params: LaunchParams):
+    idx = wp.optix_get_launch_index()
     ...
 ```
 

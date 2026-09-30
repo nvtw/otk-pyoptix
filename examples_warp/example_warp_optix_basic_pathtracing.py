@@ -183,8 +183,6 @@ def _resolve_scene_gltf(scene_gltf_arg: str | None) -> Path:
     candidates = [
         repo_root / "downloaded_resources" / "ABeautifulGame" / "glTF" / "ABeautifulGame.gltf",
         repo_root / "examples_warp" / "assets" / "ABeautifulGame" / "glTF" / "ABeautifulGame.gltf",
-        Path(r"C:\git\downloaded_resources\ABeautifulGame\glTF\ABeautifulGame.gltf"),
-        Path(r"C:\git\single-file-vulkan-pathtracing\assets\gltf\ABeautifulGame\ABeautifulGame.gltf"),
     ]
     for candidate in candidates:
         if candidate.is_file():

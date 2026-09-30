@@ -35,6 +35,13 @@ def test_mesh_without_uvs_uses_deterministic_fallback_tangents():
     )
 
 
+@pytest.mark.parametrize("indices", [[[-1, 1, 2]], [[0, 1, 3]], [[0.0, 1.0, 2.0]]])
+def test_mesh_rejects_invalid_indices_before_gpu_upload(indices):
+    vertices = np.zeros((3, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="indices"):
+        Mesh(vertices, np.asarray(indices))
+
+
 def test_generated_sphere_winding_matches_outward_normals():
     scene = Scene(None)
     vertices, indices, normals, _ = scene._create_sphere_geometry(

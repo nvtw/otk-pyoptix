@@ -409,19 +409,46 @@ class Mesh:
             material_id: Material index for this mesh
         """
         self.vertices = np.ascontiguousarray(vertices, dtype=np.float32)
-        self.indices = np.ascontiguousarray(indices, dtype=np.uint32)
+        raw_indices = np.asarray(indices)
+        if (
+            self.vertices.ndim != 2
+            or self.vertices.shape[1] != 3
+            or not np.all(np.isfinite(self.vertices))
+        ):
+            raise ValueError("vertices must be a finite (N, 3) array")
+        if (
+            raw_indices.ndim != 2
+            or raw_indices.shape[1] != 3
+            or not np.issubdtype(raw_indices.dtype, np.integer)
+            or np.any(raw_indices < 0)
+            or np.any(raw_indices >= len(self.vertices))
+        ):
+            raise ValueError("indices must be a (M, 3) integer array indexing vertices")
+        self.indices = np.ascontiguousarray(raw_indices, dtype=np.uint32)
 
         if normals is None:
             normals = self._compute_normals(self.vertices, self.indices)
         self.normals = np.ascontiguousarray(normals, dtype=np.float32)
+        if self.normals.shape != self.vertices.shape or not np.all(
+            np.isfinite(self.normals)
+        ):
+            raise ValueError("normals must be a finite (N, 3) array matching vertices")
 
         has_texcoords = texcoords is not None
         if texcoords is None:
             texcoords = np.zeros((len(vertices), 2), dtype=np.float32)
         self.texcoords = np.ascontiguousarray(texcoords, dtype=np.float32)
+        if self.texcoords.shape != (len(self.vertices), 2) or not np.all(
+            np.isfinite(self.texcoords)
+        ):
+            raise ValueError("texcoords must be a finite (N, 2) array matching vertices")
         if texcoords1 is None:
             texcoords1 = np.zeros((len(vertices), 2), dtype=np.float32)
         self.texcoords1 = np.ascontiguousarray(texcoords1, dtype=np.float32)
+        if self.texcoords1.shape != (len(self.vertices), 2) or not np.all(
+            np.isfinite(self.texcoords1)
+        ):
+            raise ValueError("texcoords1 must be a finite (N, 2) array matching vertices")
 
         self.material_id = material_id
         self.material_ids = _normalize_primitive_material_ids(

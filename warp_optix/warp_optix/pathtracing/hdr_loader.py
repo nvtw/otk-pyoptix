@@ -122,13 +122,15 @@ def _decrunch(reader: _Reader, width: int, scanline: bytearray) -> bool:
             code = reader.read_byte()
             if code > 128:
                 code &= 127
-                if reader.eof():
+                if code == 0 or j + code > width or reader.eof():
                     return False
                 val = reader.read_byte()
                 for _ in range(code):
                     scanline[j * 4 + c] = val
                     j += 1
             else:
+                if code == 0 or j + code > width:
+                    return False
                 for _ in range(code):
                     if reader.eof():
                         return False
@@ -168,6 +170,8 @@ def load_hdr(path: str | Path) -> tuple[np.ndarray, int, int]:
         raise ValueError("Invalid HDR: cannot parse resolution line (-Y H +X W)")
     height = int(m.group(1))
     width = int(m.group(2))
+    if width <= 0 or height <= 0:
+        raise ValueError("Invalid HDR: dimensions must be positive")
 
     # Pixel data starts after the resolution line
     data = raw[m.end() :]
@@ -181,7 +185,7 @@ def load_hdr(path: str | Path) -> tuple[np.ndarray, int, int]:
         scanline[:] = b"\x00" * (width * 4)
         ok = _decrunch(reader, width, scanline)
         if not ok:
-            break
+            raise ValueError("Invalid HDR: truncated or malformed pixel data")
         rgbe[y, :, :] = np.frombuffer(scanline, dtype=np.uint8, count=width * 4).reshape(width, 4)
 
     expo = rgbe[:, :, 3].astype(np.int16) - 128
