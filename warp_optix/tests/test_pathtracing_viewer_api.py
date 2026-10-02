@@ -391,7 +391,8 @@ def test_resize_releases_old_dlss_resources_before_native_reallocation(monkeypat
     )
     viewer._sync_prev_camera_matrices_to_current = lambda: events.append(("camera",))
     viewer._destroy_dlss_rr = lambda **kwargs: events.append(("destroy", kwargs))
-    viewer._init_dlss_rr = lambda: events.append(("init",))
+    viewer._destroy_optix_denoiser = lambda: events.append(("destroy_optix",))
+    viewer._init_denoiser = lambda: events.append(("init",))
     monkeypatch.setattr(
         viewer_module.wp, "synchronize_stream", lambda stream: events.append(("sync",))
     )
@@ -401,6 +402,7 @@ def test_resize_releases_old_dlss_resources_before_native_reallocation(monkeypat
     assert viewer.width == 3840
     assert viewer.height == 2160
     assert events[:2] == [("sync",), ("destroy", {"restore_resolution": False})]
+    assert events[2] == ("destroy_optix",)
     assert events[-2:] == [("init",), ("tonemap", 3840, 2160)]
 
 

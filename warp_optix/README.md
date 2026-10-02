@@ -254,6 +254,55 @@ pip install -e . -e "warp_optix[pathtracing]"
 Reconstruction. `PathTracingViewerBackend` exposes a renderer-facing `log_*`
 API without importing Newton or any other simulation framework.
 
+### Denoising and upscaling
+
+`PathTracerAPI`, `PathTracingViewer`, and the Newton `ViewerOptix` accept the
+same optional backend selector and support switching without rebuilding the scene:
+
+```python
+from warp_optix.pathtracing import PathTracerAPI
+
+api = PathTracerAPI(denoiser="dlss", dlss_quality="quality", optix_upscale=True)
+api.initialize()
+api.set_denoiser("optix")
+api.set_denoiser("dlss")  # Retains the DLSS quality setting.
+api.set_denoiser("optix", optix_upscale=False)  # Native-resolution denoising.
+```
+
+`denoiser="auto"` prefers DLSS RR, then OptiX, then raw rendering. Explicit
+`"dlss"` and `"optix"` selections require successful initialization;
+`"none"` disables denoising. Inspect `active_denoiser` and `denoiser_error`
+to see the selected backend and automatic fallback diagnostics. Omitting
+`denoiser` preserves the existing `enable_dlss_rr` behavior, including its
+raw-rendering fallback. An explicit selector takes precedence over that flag.
+
+DLSS queries NGX for input dimensions using the existing `dlss_quality` modes.
+OptiX uses temporal denoising at native resolution by default;
+`optix_upscale=True` selects its temporal 2x upscaling model. Odd output sizes
+use rounded-up input dimensions and crop the extra output row or column.
+Switches and resizes reset reconstruction history and affected CUDA graphs.
+Use `reset_temporal_history()` after a discontinuous scene change. OptiX
+respects `samples_per_frame`; DLSS continues to render one sample per frame.
+Both backends share the renderer's guide buffers and final tonemapping path.
+The rendering panel exposes backend selection and their quality settings.
+
+For custom Warp renderers, `warp_optix.pathtracing` also exports
+`DenoiserInputs` and `OptixDenoiser`. Pass float4 HDR color, float4 world-space
+normals, float4 albedo, and float2 current-to-previous motion in input pixels
+(without jitter). The wrapper manages scratch/state allocations, temporal
+history, and stream ordering:
+
+```python
+from warp_optix.pathtracing import DenoiserInputs, OptixDenoiser
+
+denoiser = OptixDenoiser(context, width, height, stream=stream, upscale=True)
+filtered = denoiser.apply(DenoiserInputs(color, normal, albedo, motion), reset=True)
+# Consume filtered on the same stream; it is borrowed until the next apply().
+denoiser.close()
+```
+
+Rebuild PyOptiX to obtain the temporal/upscaling models and guide-layer bindings.
+
 ### Newton integration
 
 An optional adapter implements Newton's complete viewer interface. Newton is
@@ -350,12 +399,12 @@ HDR textures can be enabled explicitly with
 `log_mesh` adapter currently maps vertex colors and PBR values but does not
 ingest its optional texture argument.
 
-`PathTracerAPI` enables CUDA graph replay for the stable OptiX launch by
-default when DLSS-RR is inactive. Launch parameters are written to a persistent device buffer before
-each replay, so camera motion, Halton jitter, frame indices, materials, and
-TLAS handles remain dynamic. With DLSS-RR active, frame-level capture is
-skipped because RTX/NGX resource event queries are forbidden during CUDA
-stream capture; USD transform/TLAS device updates remain graph-capturable.
+`PathTracerAPI` submits ray-tracing launches directly when DLSS RR or the
+temporal OptiX denoiser is active. DLSS resource event queries are forbidden
+during CUDA stream capture, and replaying a captured OptiX launch on the tested
+runtime snapshots camera/sample parameters, freezing temporal inputs.
+Raw rendering retains the CUDA graph option; USD transform/TLAS device updates
+remain independently graph-capturable.
 Pass `enable_cuda_graphs=False` to diagnose a driver or
 capture compatibility issue; `api.cuda_graph_active` reports successful
 capture after the first rendered sample.

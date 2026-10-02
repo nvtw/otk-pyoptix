@@ -19,6 +19,7 @@ python example_warp_optix_mixed_geometry.py
 
 python example_warp_optix_tiny_raytracer.py
 python example_warp_optix_basic_pathtracing.py
+python example_warp_optix_basic_pathtracing.py --denoiser optix --optix-upscale
 python example_warp_optix_pathtraced_hairball.py
 python example_warp_optix_pathtraced_arrowball.py
 python example_warp_optix_pathtraced_contact_lines.py
@@ -137,8 +138,9 @@ other geometry is present, but remain loaded and rendered. Both examples
 capture the stable OptiX launch as a CUDA graph by default while keeping
 per-frame camera/jitter parameters and DLSS evaluation dynamic; use
 `--no-cuda-graphs` only for diagnostics. Frame-level capture is automatically
-skipped while DLSS-RR is active because RTX/NGX resource event bookkeeping is
-not legal during CUDA stream capture; USD transform/TLAS device batches remain
+skipped while DLSS-RR or temporal OptiX denoising is active. DLSS resource event
+bookkeeping is not legal during CUDA stream capture, and captured OptiX launches
+can freeze camera/sample parameters on the tested runtime. USD transform/TLAS device batches remain
 independently graph-capturable.
 The loader triangulates authored polygons but does not tessellate subdivision
 surfaces or import camera animation, curves, or point instancers. Other USD

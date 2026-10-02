@@ -21,9 +21,9 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
 from warp_optix._runtime.gl_interop import OptixGLInteropViewer
 
+from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
 from .pathtracer_api import PathTracerAPI
 
 logger = logging.getLogger(__name__)
@@ -320,6 +320,8 @@ class PathTracingViewerBackend:
         default_clearcoat_roughness: float = 0.1,
         enable_texture_mipmaps: bool = False,
         backface_culling: bool = True,
+        denoiser: str | None = None,
+        optix_upscale: bool = False,
     ):
         try:
             super().__init__()
@@ -392,6 +394,8 @@ class PathTracingViewerBackend:
             width=self.width,
             height=self.height,
             enable_dlss_rr=enable_dlss_rr,
+            denoiser=denoiser,
+            optix_upscale=optix_upscale,
             enable_set=enable_set,
             dlss_quality=dlss_quality,
             samples_per_frame=samples_per_frame,
@@ -548,6 +552,57 @@ class PathTracingViewerBackend:
     def dlss_quality(self, value: str) -> None:
         """Select a DLSS quality mode."""
         self._api.set_dlss_quality(value)
+
+    @property
+    def denoiser(self) -> str:
+        return self._api.denoiser
+
+    @denoiser.setter
+    def denoiser(self, value: str) -> None:
+        self.set_denoiser(value)
+
+    @property
+    def active_denoiser(self) -> str:
+        return self._api.active_denoiser
+
+    @property
+    def denoiser_error(self) -> str | None:
+        return self._api.denoiser_error
+
+    @property
+    def optix_upscale(self) -> bool:
+        return self._api.optix_upscale
+
+    @optix_upscale.setter
+    def optix_upscale(self, value: bool) -> None:
+        self.set_denoiser(self.denoiser, optix_upscale=value)
+
+    def set_denoiser(self, denoiser: str, *, optix_upscale: bool | None = None):
+        self._api.set_denoiser(denoiser, optix_upscale=optix_upscale)
+
+    def _ui_denoiser_controls(self, imgui):
+        imgui.text(f"Denoiser: {self.active_denoiser}")
+        modes = ["auto", "dlss", "optix", "none"]
+        changed, selected = imgui.combo("Denoiser", modes.index(self.denoiser), modes)
+        if changed:
+            try:
+                self.set_denoiser(modes[selected])
+            except (RuntimeError, ValueError) as exc:
+                logger.warning("Could not switch denoiser: %s", exc)
+        if self.denoiser in ("dlss", "auto"):
+            quality_modes = list(self._api.viewer.DLSS_QUALITY_MODES)
+            changed, selected = imgui.combo(
+                "DLSS Quality", quality_modes.index(self.dlss_quality), quality_modes
+            )
+            if changed:
+                self.dlss_quality = quality_modes[selected]
+        if self.denoiser in ("optix", "auto"):
+            changed, upscale = imgui.checkbox("OptiX 2x Upscaling", self.optix_upscale)
+            if changed:
+                try:
+                    self.optix_upscale = upscale
+                except (RuntimeError, ValueError) as exc:
+                    logger.warning("Could not change OptiX upscaling: %s", exc)
 
     @property
     def max_bounces(self) -> int:
@@ -1618,9 +1673,7 @@ class PathTracingViewerBackend:
                     f"Instances: {sum(len(batch.instance_ids) for batch in self._batches.values())}"
                 )
                 imgui.text(f"Materials: {len(self._material_ids)}")
-                imgui.text(
-                    "DLSS RR: active" if self._api.dlss_enabled else "DLSS RR: inactive"
-                )
+                self._ui_denoiser_controls(imgui)
 
                 changed, paused = imgui.checkbox("Pause", self.paused)
                 if changed:

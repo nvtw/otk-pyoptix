@@ -28,8 +28,6 @@ import warp as wp
 
 from warp_optix._runtime.transform_utils import build_transform_matrix
 
-from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
-from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .arrows import (
     ArrowBatch,
     arrow_segment_indices,
@@ -39,6 +37,8 @@ from .arrows import (
     update_arrow_curves_device_count,
     update_arrow_curves_host_count,
 )
+from .defaults import DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH
+from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .ptx_compiler import get_optix_include_dir
 from .scene import Curve, Mesh
 
@@ -75,6 +75,8 @@ class PathTracerAPI:
         russian_roulette_start_bounce: int = 3,
         enable_texture_mipmaps: bool = False,
         backface_culling: bool = True,
+        denoiser: str | None = None,
+        optix_upscale: bool = False,
     ):
         self.width = int(width)
         self.height = int(height)
@@ -93,6 +95,8 @@ class PathTracerAPI:
             russian_roulette_start_bounce=russian_roulette_start_bounce,
             enable_texture_mipmaps=enable_texture_mipmaps,
             backface_culling=backface_culling,
+            denoiser=denoiser,
+            optix_upscale=optix_upscale,
         )
         self._built = False
         self._running = True
@@ -130,6 +134,30 @@ class PathTracerAPI:
     def dlss_enabled(self) -> bool:
         """Return whether DLSS Ray Reconstruction initialized successfully."""
         return bool(self._viewer._dlss_enabled)
+
+    @property
+    def denoiser(self) -> str:
+        """Requested backend: 'auto', 'dlss', 'optix', or 'none'."""
+        return self._viewer.denoiser
+
+    @property
+    def active_denoiser(self) -> str:
+        """Backend currently in use, or 'none' before initialization."""
+        return self._viewer.active_denoiser
+
+    @property
+    def denoiser_error(self) -> str | None:
+        """Initialization diagnostic when automatic selection falls back."""
+        return self._viewer.denoiser_error
+
+    @property
+    def optix_upscale(self) -> bool:
+        """Whether OptiX should denoise and upscale by 2x."""
+        return self._viewer.optix_upscale
+
+    def set_denoiser(self, denoiser: str, *, optix_upscale: bool | None = None):
+        """Switch backend while retaining each backend's quality settings."""
+        self._viewer.set_denoiser(denoiser, optix_upscale=optix_upscale)
 
     @property
     def texture_mipmaps_enabled(self) -> bool:
@@ -364,7 +392,7 @@ class PathTracerAPI:
         self._viewer.set_volume(volume, bounds_min, bounds_max, **kwargs)
 
     def reset_temporal_history(self):
-        """Discard DLSS reconstruction history before a discontinuous scene change."""
+        """Discard reconstruction history before a discontinuous scene change."""
         self._viewer._dlss_reset_history = True
 
     def rebuild_tlas(self):

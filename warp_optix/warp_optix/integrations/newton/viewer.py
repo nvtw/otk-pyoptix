@@ -204,6 +204,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         exposure: float = 0.68,
         contrast: float = 1.08,
         saturation: float = 1.1,
+        denoiser: str | None = None,
+        optix_upscale: bool = False,
         **kwargs: Any,
     ):
         """Initialize the OptiX path-tracing viewer.
@@ -219,6 +221,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             num_frames: Maximum number of rendered frames, or ``None`` to run
                 until the window closes.
             enable_dlss_rr: Enable DLSS Ray Reconstruction when available.
+            denoiser: Optional backend selector: ``"auto"``, ``"dlss"``,
+                ``"optix"``, or ``"none"``. Overrides ``enable_dlss_rr``.
+            optix_upscale: Enable temporal 2x upscaling for the OptiX denoiser.
             dlss_quality: DLSS input-resolution/quality mode. Supported values
                 are ``"performance"``, ``"balanced"``, ``"quality"``,
                 ``"ultra_performance"``, and ``"native"``.
@@ -320,6 +325,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             render_when_paused=True,
             num_frames=num_frames,
             enable_dlss_rr=enable_dlss_rr,
+            denoiser=denoiser,
+            optix_upscale=optix_upscale,
             dlss_quality=dlss_quality,
             samples_per_frame=samples_per_frame,
             max_bounces=max_bounces,
@@ -473,12 +480,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
 
     def _ui_populate_rendering_panel(self, imgui) -> None:
         """Render OptiX-specific controls inside the shared rendering panel."""
-        imgui.text("DLSS RR: active" if self._api.dlss_enabled else "DLSS RR: inactive")
-        quality_modes = list(self._api.viewer.DLSS_QUALITY_MODES)
-        quality_index = quality_modes.index(self.dlss_quality)
-        changed, quality_index = imgui.combo("DLSS Quality", quality_index, quality_modes)
-        if changed:
-            self.dlss_quality = quality_modes[quality_index]
+        self._ui_denoiser_controls(imgui)
         changed, max_bounces = imgui.slider_int("Max Bounces", self.max_bounces, 1, self._api.max_compiled_bounces)
         if changed:
             self.set_ray_budget(max_bounces=max_bounces)

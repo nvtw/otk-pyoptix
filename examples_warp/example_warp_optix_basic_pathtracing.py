@@ -95,6 +95,11 @@ def _parse_args():
     parser.add_argument("--contrast", type=float, default=1.08, help="Display contrast multiplier.")
     parser.add_argument("--saturation", type=float, default=1.1, help="Display saturation multiplier.")
     parser.add_argument("--no-dlss-rr", action="store_true", help="Disable DLSS Ray Reconstruction.")
+    parser.add_argument(
+        "--denoiser", choices=("auto", "dlss", "optix", "none"), default=None,
+        help="Select the denoiser backend (overrides --no-dlss-rr).",
+    )
+    parser.add_argument("--optix-upscale", action="store_true", help="Enable OptiX temporal 2x upscaling.")
     parser.add_argument("--no-cuda-graphs", action="store_true", help="Disable OptiX CUDA graph replay.")
     parser.add_argument("--no-set", action="store_true", help="Disable Shader Execution Reordering.")
     parser.add_argument(
@@ -325,6 +330,8 @@ def main():
         width=args.width,
         height=args.height,
         enable_dlss_rr=not args.no_dlss_rr,
+        denoiser=args.denoiser,
+        optix_upscale=args.optix_upscale,
         enable_set=not args.no_set,
         enable_cuda_graphs=not args.no_cuda_graphs,
         backface_culling=not args.no_backface_culling,
@@ -389,6 +396,11 @@ def main():
 
 
     print(f"[optix] loaded glTF scene: {scene_gltf}")
+    print(
+        f"[optix] denoiser: {api.active_denoiser}, "
+        f"render: {api.viewer._render_width}x{api.viewer._render_height}, "
+        f"output: {api.width}x{api.height}"
+    )
     viewer.run(_render, max_frames=args.max_frames)
     if args.screenshot is not None:
         from PIL import Image  # noqa: PLC0415

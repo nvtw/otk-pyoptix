@@ -35,23 +35,26 @@ from .defaults import (
     DEFAULT_VIEWER_SIZE,
     DEFAULT_VIEWER_WIDTH,
 )
+from .denoising import DenoiserInputs, OptixDenoiser
 from .materials import MaterialManager
 from .pathtracer_api import PathTracerAPI
 from .pathtracing_viewer import PathTracingViewer as PathTracingRenderer
 from .scene import Curve, Mesh, Scene
-from .usd_scene import USDScene, USDTransformHandle
 from .tonemap import Tonemapper
+from .usd_scene import USDScene, USDTransformHandle
 from .viewer import PathTracingViewer, PathTracingViewerBackend
 
 __all__ = [
-    "Camera",
-    "ArrowBatch",
-    "Curve",
     "DEFAULT_VIEWER_HEIGHT",
     "DEFAULT_VIEWER_SIZE",
     "DEFAULT_VIEWER_WIDTH",
+    "ArrowBatch",
+    "Camera",
+    "Curve",
+    "DenoiserInputs",
     "MaterialManager",
     "Mesh",
+    "OptixDenoiser",
     "PathTracerAPI",
     "PathTracingRenderer",
     "PathTracingViewer",

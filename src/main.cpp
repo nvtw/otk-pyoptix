@@ -3146,6 +3146,12 @@ PYBIND11_MODULE( _optix, m )
         .value( "PIXEL_FORMAT_HALF4", OPTIX_PIXEL_FORMAT_HALF4 )
         .value( "PIXEL_FORMAT_FLOAT3", OPTIX_PIXEL_FORMAT_FLOAT3 )
         .value( "PIXEL_FORMAT_FLOAT4", OPTIX_PIXEL_FORMAT_FLOAT4 )
+#if OPTIX_VERSION >= 70300
+        .value( "PIXEL_FORMAT_FLOAT2", OPTIX_PIXEL_FORMAT_FLOAT2 )
+#endif
+#if OPTIX_VERSION >= 70400
+        .value( "PIXEL_FORMAT_INTERNAL_GUIDE_LAYER", OPTIX_PIXEL_FORMAT_INTERNAL_GUIDE_LAYER )
+#endif
         .value( "PIXEL_FORMAT_UCHAR3", OPTIX_PIXEL_FORMAT_UCHAR3 )
         .value( "PIXEL_FORMAT_UCHAR4", OPTIX_PIXEL_FORMAT_UCHAR4 )
         .export_values();
@@ -3157,8 +3163,12 @@ PYBIND11_MODULE( _optix, m )
         .value( "DENOISER_MODEL_KIND_LDR", OPTIX_DENOISER_MODEL_KIND_LDR )
         .value( "DENOISER_MODEL_KIND_HDR", OPTIX_DENOISER_MODEL_KIND_HDR )
         .value( "DENOISER_MODEL_KIND_AOV", OPTIX_DENOISER_MODEL_KIND_AOV )
-        IF_OPTIX73( .value( "DENOISER_MODEL_KIND_TEMPORAL", OPTIX_DENOISER_MODEL_KIND_AOV ) )
-        IF_OPTIX74( .value( "DENOISER_MODEL_KIND_TEMPORAL_AOV", OPTIX_DENOISER_MODEL_KIND_AOV ) )
+        IF_OPTIX73( .value( "DENOISER_MODEL_KIND_TEMPORAL", OPTIX_DENOISER_MODEL_KIND_TEMPORAL ) )
+        IF_OPTIX74( .value( "DENOISER_MODEL_KIND_TEMPORAL_AOV", OPTIX_DENOISER_MODEL_KIND_TEMPORAL_AOV ) )
+#if OPTIX_VERSION >= 70500
+        .value( "DENOISER_MODEL_KIND_UPSCALE2X", OPTIX_DENOISER_MODEL_KIND_UPSCALE2X )
+        .value( "DENOISER_MODEL_KIND_TEMPORAL_UPSCALE2X", OPTIX_DENOISER_MODEL_KIND_TEMPORAL_UPSCALE2X )
+#endif
         .export_values();
 
 #ifdef PYOPTIX_ENABLE_DLSS
@@ -4176,6 +4186,10 @@ aligned. This method does not synchronize the stream.
         .def_readwrite( "albedo", &OptixDenoiserGuideLayer::albedo )
         .def_readwrite( "normal", &OptixDenoiserGuideLayer::normal )
         .def_readwrite( "flow",   &OptixDenoiserGuideLayer::flow )
+#if OPTIX_VERSION >= 70400
+        .def_readwrite( "previousOutputInternalGuideLayer", &OptixDenoiserGuideLayer::previousOutputInternalGuideLayer )
+        .def_readwrite( "outputInternalGuideLayer", &OptixDenoiserGuideLayer::outputInternalGuideLayer )
+#endif
         ;
 
 #elif OPTIX_VERSION <= 70200
@@ -4192,6 +4206,9 @@ aligned. This method does not synchronize the stream.
 #endif
         .def_readwrite( "hdrIntensity", &OptixDenoiserParams::hdrIntensity )
         .def_readwrite( "blendFactor", &OptixDenoiserParams::blendFactor )
+#if OPTIX_VERSION >= 70400
+        .def_readwrite( "temporalModeUsePreviousLayers", &OptixDenoiserParams::temporalModeUsePreviousLayers )
+#endif
         IF_OPTIX72(
         .def_readwrite( "hdrAverageColor", &OptixDenoiserParams::hdrAverageColor )
         )
@@ -4208,6 +4225,15 @@ aligned. This method does not synchronize the stream.
         .def_readwrite( "recommendedScratchSizeInBytes", &OptixDenoiserSizes::recommendedScratchSizeInBytes )
 #endif
         .def_readwrite( "overlapWindowSizeInPixels", &OptixDenoiserSizes::overlapWindowSizeInPixels )
+#if OPTIX_VERSION >= 70100
+        .def_readwrite( "computeIntensitySizeInBytes", &OptixDenoiserSizes::computeIntensitySizeInBytes )
+#endif
+#if OPTIX_VERSION >= 70200
+        .def_readwrite( "computeAverageColorSizeInBytes", &OptixDenoiserSizes::computeAverageColorSizeInBytes )
+#endif
+#if OPTIX_VERSION >= 70400
+        .def_readwrite( "internalGuideLayerPixelSizeInBytes", &OptixDenoiserSizes::internalGuideLayerPixelSizeInBytes )
+#endif
         ;
 
 #ifdef PYOPTIX_ENABLE_DLSS
