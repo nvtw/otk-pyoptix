@@ -2,10 +2,56 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import numpy as np
+import pytest
 import warp as wp
 
 from warp_optix.pathtracing import tonemap
 from warp_optix.pathtracing.tonemap import Tonemapper, _adapt_auto_exposure
+
+
+def test_tonemap_preserves_pixels_and_orientation_on_non_square_image():
+    wp.init()
+    if not wp.is_cuda_available():
+        pytest.skip("CUDA device unavailable")
+    # Distinct channels and corners catch transposition and missing pixels.
+    image = np.arange(9 * 17 * 4, dtype=np.float32).reshape(9, 17, 4) / 1000.0
+    mapper = Tonemapper(17, 9)
+    mapper.is_active = False
+    mapper.exposure = 2.0
+    mapper.process(wp.array(image, dtype=wp.vec4, device="cuda"))
+    expected = np.flipud(image).copy()
+    expected[..., :3] *= 2.0
+    expected[..., 3] = 1.0
+    np.testing.assert_array_equal(mapper.get_numpy(), expected)
+
+
+def test_debug_normals_preserve_orientation_when_upscaled():
+    wp.init()
+    if not wp.is_cuda_available():
+        pytest.skip("CUDA device unavailable")
+    image = np.arange(3 * 5 * 4, dtype=np.float32).reshape(3, 5, 4) / 100.0
+    normal = wp.array(image, dtype=wp.vec4, device="cuda")
+    scalar = wp.zeros((3, 5), dtype=wp.float32, device="cuda")
+    motion = wp.zeros((3, 5), dtype=wp.vec2, device="cuda")
+    mapper = Tonemapper(17, 9)
+    mapper.process_debug(
+        tonemap.OUTPUT_NORMAL,
+        normal,
+        scalar,
+        motion,
+        normal,
+        normal,
+        normal,
+        scalar,
+        5,
+        3,
+    )
+    sx = np.arange(17) * 5 // 17
+    sy = 2 - np.arange(9) * 3 // 9
+    expected = image[sy[:, None], sx[None, :]].copy()
+    expected[..., :3] = expected[..., :3] * 0.5 + 0.5
+    expected[..., 3] = 1.0
+    np.testing.assert_array_equal(mapper.get_numpy(), expected)
 
 
 def test_auto_exposure_defaults_to_brightening_only(monkeypatch):

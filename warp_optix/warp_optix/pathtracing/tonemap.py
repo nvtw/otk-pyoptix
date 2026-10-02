@@ -302,7 +302,8 @@ def tonemap_kernel(
         saturation: Saturation control (1.0 neutral)
         vignette: Vignette strength (0.0 disabled)
     """
-    x, y = wp.tid()
+    # The last launch dimension varies fastest, matching image[y, x].
+    y, x = wp.tid()
 
     # Read HDR color from vertically mirrored source row.
     # This compensates the camera-space Y flip applied in projection.
@@ -392,7 +393,7 @@ def debug_visualize_kernel(
     mode: int,
     max_depth: float,
 ):
-    x, y = wp.tid()
+    y, x = wp.tid()
 
     # Map output pixel to source buffer pixel (render vs display resolution).
     sx = int(float(x) * float(src_width) / float(output_width))
@@ -569,7 +570,7 @@ class Tonemapper:
             self._auto_exposure_initialized = True
         wp.launch(
             tonemap_kernel,
-            dim=(self.width, self.height),
+            dim=(self.height, self.width),
             inputs=[
                 hdr_input,
                 self._ldr_output,
@@ -605,7 +606,7 @@ class Tonemapper:
         """Debug visualization from DLSS input buffers."""
         wp.launch(
             debug_visualize_kernel,
-            dim=(self.width, self.height),
+            dim=(self.height, self.width),
             inputs=[
                 color_hdr,
                 depth,
