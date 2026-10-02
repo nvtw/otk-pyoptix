@@ -54,6 +54,31 @@ def test_debug_normals_preserve_orientation_when_upscaled():
     np.testing.assert_array_equal(mapper.get_numpy(), expected)
 
 
+@pytest.mark.parametrize("method", range(7))
+@pytest.mark.parametrize("auto_exposure", [False, True])
+def test_texture_input_matches_array_tonemapping(method, auto_exposure):
+    wp.init()
+    if not wp.is_cuda_available():
+        pytest.skip("CUDA device unavailable")
+    image = np.random.default_rng(7).uniform(0.0, 8.0, (9, 17, 4)).astype(np.float32)
+    array = wp.array(image, dtype=wp.vec4, device="cuda")
+    texture = wp.Texture2D(
+        image, filter_mode=wp.TextureFilterMode.CLOSEST, device="cuda"
+    )
+    outputs = []
+    for source in (array, texture):
+        mapper = Tonemapper(17, 9)
+        mapper.method = method
+        mapper.exposure = 0.68
+        mapper.contrast = 1.08
+        mapper.saturation = 1.1
+        mapper.vignette = 0.1
+        mapper.configure_auto_exposure(auto_exposure)
+        mapper.process(source)
+        outputs.append(mapper.get_numpy().copy())
+    np.testing.assert_allclose(outputs[0], outputs[1], rtol=1e-6, atol=1e-6)
+
+
 def test_auto_exposure_defaults_to_brightening_only(monkeypatch):
     """Keep the renderer-wide automatic exposure floor at baseline."""
     monkeypatch.setattr(tonemap.wp, "zeros", lambda *args, **kwargs: object())

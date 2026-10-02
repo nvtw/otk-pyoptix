@@ -18,6 +18,8 @@
 Matches the Vulkan tonemap shader behavior and defaults from the reference sample.
 """
 
+from typing import Any
+
 import warp as wp
 
 # Tonemap methods (match Vulkan reference tonemap shader behavior)
@@ -214,9 +216,25 @@ def _reset_auto_exposure_stats(stats: wp.array(dtype=wp.float32)):
     stats[1] = 0.0
 
 
+@wp.func
+def _read_hdr(
+    image: wp.array2d(dtype=wp.vec4), x: int, y: int, width: int, height: int
+) -> wp.vec4:
+    return image[y, x]
+
+
+@wp.func
+def _read_hdr(
+    image: wp.Texture2D, x: int, y: int, width: int, height: int
+) -> wp.vec4:
+    # DLSS output textures use point filtering and normalized coordinates.
+    uv = wp.vec2((float(x) + 0.5) / float(width), (float(y) + 0.5) / float(height))
+    return wp.texture_sample(image, uv, dtype=wp.vec4)
+
+
 @wp.kernel
 def _meter_auto_exposure(
-    hdr_input: wp.array2d(dtype=wp.vec4),
+    hdr_input: Any,
     stats: wp.array(dtype=wp.float32),
     width: int,
     height: int,
@@ -229,7 +247,7 @@ def _meter_auto_exposure(
     y = tile_y * 4 + 2
     if x >= width or y >= height:
         return
-    color = hdr_input[y, x]
+    color = _read_hdr(hdr_input, x, y, width, height)
     luminance = color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722
     min_luminance = wp.pow(2.0, min_luminance_ev)
     max_luminance = wp.pow(2.0, max_luminance_ev)
@@ -272,7 +290,7 @@ def _adapt_auto_exposure(
 
 @wp.kernel
 def tonemap_kernel(
-    hdr_input: wp.array2d(dtype=wp.vec4),
+    hdr_input: Any,
     ldr_output: wp.array2d(dtype=wp.vec4),
     width: int,
     height: int,
@@ -308,7 +326,7 @@ def tonemap_kernel(
     # Read HDR color from vertically mirrored source row.
     # This compensates the camera-space Y flip applied in projection.
     source_y = height - 1 - y
-    hdr = hdr_input[source_y, x]
+    hdr = _read_hdr(hdr_input, x, source_y, width, height)
     exposure_multiplier = exposure
     if auto_exposure_enabled == 1:
         exposure_multiplier *= wp.pow(2.0, auto_exposure_ev[0])
@@ -444,6 +462,11 @@ def debug_visualize_kernel(
     ldr_output[y, x] = wp.vec4(out[0], out[1], out[2], 1.0)
 
 
+# Explicit overloads avoid relying on generic texture argument inference.
+_tonemap_texture_kernel = wp.overload(tonemap_kernel, {"hdr_input": wp.Texture2D})
+_meter_texture_kernel = wp.overload(_meter_auto_exposure, {"hdr_input": wp.Texture2D})
+
+
 class Tonemapper:
     """
     HDR to LDR tonemapping processor.
@@ -523,14 +546,15 @@ class Tonemapper:
         if darken_speed is not None:
             self.auto_exposure_darken_speed = max(float(darken_speed), 0.0)
 
-    def process(self, hdr_input: wp.array, delta_time: float = 1.0 / 60.0):
+    def process(self, hdr_input: Any, delta_time: float = 1.0 / 60.0):
         """
         Apply tonemapping to HDR input.
 
         Args:
-            hdr_input: HDR input image (wp.array2d of vec4)
+            hdr_input: HDR vec4 array or point-filtered, normalized RGBA texture.
             delta_time: Elapsed display time used for eye adaptation.
         """
+        is_texture = isinstance(hdr_input, wp.Texture2D)
         if self.auto_exposure:
             wp.launch(
                 _reset_auto_exposure_stats,
@@ -539,7 +563,7 @@ class Tonemapper:
                 device="cuda",
             )
             wp.launch(
-                _meter_auto_exposure,
+                _meter_texture_kernel if is_texture else _meter_auto_exposure,
                 dim=((self.width + 3) // 4, (self.height + 3) // 4),
                 inputs=[
                     hdr_input,
@@ -569,7 +593,7 @@ class Tonemapper:
             )
             self._auto_exposure_initialized = True
         wp.launch(
-            tonemap_kernel,
+            _tonemap_texture_kernel if is_texture else tonemap_kernel,
             dim=(self.height, self.width),
             inputs=[
                 hdr_input,

@@ -270,7 +270,6 @@ class PathTracingViewer:
         self._diffuse_buffer = None
         self._specular_buffer = None
         self._spec_hit_dist_buffer = None
-        self._dlss_output_buffer = None
         self._instance_transforms_buffer = None
         self._prev_instance_transforms_buffer = None
         self._prev_instance_transforms_valid = False
@@ -781,7 +780,6 @@ class PathTracingViewer:
         for _, attribute, _, _ in DLSS_INPUTS:
             setattr(self, attribute, None)
         self._dlss_color_out_tex = None
-        self._dlss_output_buffer = None
         self._dlss_enabled = False
         self._dlss_status_reported = False
         # If DLSS gets disabled at runtime, restore full-resolution rendering.
@@ -891,9 +889,6 @@ class PathTracingViewer:
             self._dlss_color_out_tex = self._create_cuda_texture_2d(
                 self.height, self.width, 4, surface_access=True
             )
-            self._dlss_output_buffer = wp.zeros(
-                (self.height, self.width), dtype=wp.vec4, device="cuda"
-            )
             self._dlss_output_surface = self._dlss_color_out_tex.cuda_surface
 
             denoiser.setResource(
@@ -923,13 +918,6 @@ class PathTracingViewer:
         inputs = self._denoiser_inputs()
         for name, attribute, _, _ in DLSS_INPUTS:
             getattr(self, attribute).copy_from(getattr(inputs, name))
-
-    def _copy_dlss_output_to_color(self):
-        if not self._dlss_enabled:
-            return
-        if self._dlss_output_buffer is None:
-            return
-        self._dlss_color_out_tex.copy_to(self._dlss_output_buffer)
 
     def _run_dlss_rr(self, reset: bool):
         if not self._dlss_enabled or self._dlss_denoiser is None:
@@ -1806,15 +1794,9 @@ class PathTracingViewer:
             # stream ordering publishes every producer to its consumer.
             self._copy_linear_to_dlss_textures()
             if self._run_dlss_rr(reset_temporal):
-                self._copy_dlss_output_to_color()
-                if self._dlss_output_buffer is not None:
-                    self._process_output(
-                        self._dlss_output_buffer, resize_final_to_render=False
-                    )
-                else:
-                    self._process_output(
-                        self._color_buffer, resize_final_to_render=False
-                    )
+                self._process_output(
+                    self._dlss_color_out_tex, resize_final_to_render=False
+                )
             else:
                 self._process_output(self._color_buffer, resize_final_to_render=True)
         elif self._optix_denoiser is not None:
