@@ -230,6 +230,39 @@ def test_renderer_gpu_dlss_quality_survives_backend_switch():
         api.close()
 
 
+def test_dlss_gpu_frame_is_ordered_when_called_from_another_stream():
+    import optix
+
+    context, _logger = _gpu_context()
+    context.destroy()
+    if not optix.dlss_rr_available():
+        pytest.skip("DLSS RR unavailable")
+    def first_frame(caller):
+        api = PathTracerAPI(
+            width=384,
+            height=256,
+            denoiser="dlss",
+            enable_set=False,
+            enable_cuda_graphs=False,
+        )
+        try:
+            assert api.initialize()
+            api.scene.create_cornell_box()
+            api.build_scene()
+            with wp.ScopedStream(caller):
+                previous = wp.get_stream("cuda")
+                api.render_frame()
+                assert wp.get_stream("cuda") == previous
+            wp.synchronize_device()
+            return api.get_frame().copy()
+        finally:
+            api.close()
+
+    expected = first_frame(None)
+    actual = first_frame(wp.Stream("cuda"))
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.parametrize("cuda_graphs", [False, True])
 def test_optix_gpu_frames_and_camera_advance(cuda_graphs):
     context, _logger = _gpu_context()

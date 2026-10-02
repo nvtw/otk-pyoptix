@@ -1745,6 +1745,12 @@ class PathTracingViewer:
 
     def render(self):
         """Render a frame."""
+        # Texture transfers and tone mapping use Warp's current stream.
+        # Order them with OptiX/DLSS, including calls from another stream.
+        with wp.ScopedStream(self._render_stream):
+            self._render_frame()
+
+    def _render_frame(self):
         if self._pipeline is None:
             logger.error("Pipeline not built. Call build() first.")
             return
