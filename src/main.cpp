@@ -934,7 +934,6 @@ struct ModuleCompileOptions
 
     void sync()
     {
-        return;
 #if OPTIX_VERSION >= 70200
         boundValues.clear();
         for( auto& pybve : pyboundValues )
