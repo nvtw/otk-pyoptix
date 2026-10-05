@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import math
 import queue
@@ -117,17 +116,11 @@ def _system_pictures_dir() -> Path:
 
 
 def _ffmpeg_executable() -> str:
-    """Prefer system FFmpeg so distro-provided hardware encoders are visible."""
+    """Use system FFmpeg for recording."""
     executable = shutil.which("ffmpeg")
     if executable is not None:
         return executable
-    try:
-        imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
-    except ImportError as error:
-        raise RuntimeError(
-            "Recording requires FFmpeg; install warp_optix[recording]"
-        ) from error
-    return imageio_ffmpeg.get_ffmpeg_exe()
+    raise RuntimeError("Recording requires FFmpeg; install it and add it to PATH")
 
 
 def _supports_h264_nvenc(executable: str) -> bool:
@@ -697,14 +690,10 @@ class PathTracingViewerBackend:
 
         factory = self._picking_factory
         if factory is None:
-            try:
-                from newton._src.viewer.picking import Picking
-            except ImportError:
-                return
-            factory = Picking
+            return
 
         try:
-            # Match Newton viewers: excessive damping kicks moving bodies on mouse-down.
+            # Excessive damping kicks moving bodies on mouse-down.
             self._picking = factory(model, pick_stiffness=50.0, pick_damping=5.0)
             if hasattr(self._picking, "world_offsets"):
                 self._picking.world_offsets = getattr(self, "world_offsets", None)
@@ -713,7 +702,7 @@ class PathTracingViewerBackend:
                     self, "_visible_worlds_mask", None
                 )
         except (TypeError, ValueError) as error:
-            logger.warning("Newton picking is unavailable: %s", error)
+            logger.warning("Picking is unavailable: %s", error)
 
     def set_world_offsets(self, spacing):
         parent = getattr(super(), "set_world_offsets", None)
@@ -1125,7 +1114,7 @@ class PathTracingViewerBackend:
         del name, value, clear, smoothing
 
     def apply_forces(self, state):
-        """Apply the optional Newton picking force to a simulation state."""
+        """Apply the optional picking force to a simulation state."""
         self._last_state = state
         if self._picking is not None:
             self._picking._apply_picking_force(state)
@@ -1783,7 +1772,7 @@ class PathTracingViewerBackend:
             or self.recording_output_path
             or (
                 _system_videos_dir()
-                / "NewtonRecordings"
+                / "WarpOptixRecordings"
                 / time.strftime("pathtracing_recording_%Y%m%d_%H%M%S.mp4")
             )
         ).expanduser()
@@ -1878,7 +1867,7 @@ class PathTracingViewerBackend:
             or self.screenshot_output_path
             or (
                 _system_pictures_dir()
-                / "NewtonScreenshots"
+                / "WarpOptixScreenshots"
                 / time.strftime("pathtracing_%Y%m%d_%H%M%S.png")
             )
         ).expanduser()

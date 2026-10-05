@@ -252,12 +252,12 @@ pip install -e . -e "warp_optix[pathtracing]"
 
 `PathTracingViewer` is a standalone OptiX path-tracing viewer with DLSS Ray
 Reconstruction. `PathTracingViewerBackend` exposes a renderer-facing `log_*`
-API without importing Newton or any other simulation framework.
+API without importing a simulation framework.
 
 ### Denoising and upscaling
 
-`PathTracerAPI`, `PathTracingViewer`, and the Newton `ViewerOptix` accept the
-same optional backend selector and support switching without rebuilding the scene:
+`PathTracerAPI` and `PathTracingViewer` accept the same optional backend
+selector and support switching without rebuilding the scene:
 
 ```python
 from warp_optix.pathtracing import PathTracerAPI
@@ -303,49 +303,7 @@ denoiser.close()
 
 Rebuild PyOptiX to obtain the temporal/upscaling models and guide-layer bindings.
 
-### Newton integration
-
-An optional adapter implements Newton's complete viewer interface. Newton is
-not a base dependency and importing `warp_optix` does not import it. Install
-the adapter and interactive viewer dependencies explicitly:
-
-```bash
-pip install -e . -e "warp_optix[pathtracing,ui,recording,newton]"
-```
-
-Then construct the viewer in a Newton application:
-
-```python
-from warp_optix.integrations.newton import ViewerOptix
-
-viewer = ViewerOptix()
-viewer.set_model(model)
-
-while viewer.is_running():
-    viewer.begin_frame(sim_time)
-    viewer.log_state(state)
-    viewer.end_frame()
-```
-
-Pass the resulting object anywhere a Newton `ViewerBase` is expected. Newton
-does not discover viewers from other packages, so this repository also ships
-a launcher that injects the adapter without modifying Newton. Prefix an
-otherwise unchanged Newton example command with it:
-
-```bash
-./optix_newton_launcher.py uv run --extra examples python -m newton.examples basic_pendulum
-```
-
-The launcher replaces Newton's public `ViewerGL` binding only inside the
-started Python process. It also maps an explicit `--viewer ...` argument to
-Newton's `gl` code path, so the external `ViewerOptix` is used while the rest
-of the command remains unchanged. The Newton checkout is never edited.
-
-Outside a launched process, the integration does not add `ViewerOptix` to
-`newton.viewer`; applications that construct the viewer directly must
-continue importing it from `warp_optix`. The adapter uses Newton's internal
-viewer interfaces and is therefore constrained to Newton 1.6.x until
-compatibility with a newer series is verified.
+### Interactive viewer features
 
 The optional interactive features are installed separately:
 
@@ -357,13 +315,14 @@ The viewer follows the earlier hybrid viewer controls:
 
 - WASD or arrow keys move the camera; Q/E move along the model up axis.
 - Left drag looks around and the scroll wheel changes field of view.
-- Right click and drag picks Newton bodies when Newton is installed.
+- Right click and drag picks bodies when a `picking_factory` is supplied.
 - Space pauses, Escape closes, and 0-8 select path-tracing debug buffers.
 - R starts MP4 recording and T stops it. Recordings default to the system
-  Videos directory under `NewtonRecordings/pathtracing_recording_*.mp4`.
+  Videos directory under `WarpOptixRecordings/pathtracing_recording_*.mp4`.
 
-Recording packs RGB8 on the GPU, reads back asynchronously through pinned
-buffers, and encodes on a worker thread. The automatic encoder probes the
+Recording requires FFmpeg installed on `PATH`. It packs RGB8 on the GPU,
+reads back asynchronously through pinned buffers, and encodes on a worker
+thread. The automatic encoder probes the
 system FFmpeg with a real frame and prefers `h264_nvenc`; it falls back to
 `libx264` with its ultrafast low-latency preset. Set `recording_encoder` to
 `"h264_nvenc"` or `"libx264"` to override selection. FFmpeg vertically flips
@@ -371,12 +330,12 @@ the raw OptiX image into display orientation while encoding.
 
 `register_ui_callback()` adds application controls to the optional ImGui panel.
 The panel also exposes rendering statistics, DLSS state, visualization flags,
-camera state, debug buffers, picking, pause, and recording controls. Picking is
-loaded dynamically from Newton when `set_model()` is called, so importing and
-using the standalone viewer does not add a Newton dependency.
+camera state, debug buffers, picking, pause, and recording controls. Picking
+uses an optional `picking_factory` supplied by the application when constructing
+the viewer.
 
 The backend accepts Warp arrays for meshes, transforms, colors, and material
-parameters. It handles Newton's X/Y/Z up-axis conversion, mesh and instance
+parameters. It handles X/Y/Z up-axis conversion, mesh and instance
 caching, visibility updates, and roughness/metallic PBR materials. Its default
 physical-sky values and sRGB-to-linear color conversion intentionally match
 the earlier hybrid viewer, including the light ground, slight haze, and soft
@@ -553,7 +512,7 @@ graph-capture path.
 
 The old hybrid viewer's Vulkan-backed OpenGL transform VBO was specific to its
 C# bridge. Compatibility queries remain available, but return unavailable;
-dynamic Newton transforms instead use Warp arrays through `log_instances()`
+dynamic simulation transforms instead use Warp arrays through `log_instances()`
 or `update_instance_transforms()` and trigger an OptiX TLAS refit. Transform
 matrix construction is vectorized before the retained OptiX instance buffer is
 updated. Window presentation uses CUDA/OpenGL interop with Warp's copy fallback

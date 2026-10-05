@@ -18,9 +18,6 @@ dependencies = [
 optix = [
     "pyoptix>=9.1",
 ]
-newton = [
-    "newton>=1.6.0.dev0,<1.7",
-]
 training = [
     "warp-nn>=0.3.1",
 ]
@@ -35,7 +32,6 @@ usd = [
 ]
 recording = [
     "imageio>=2.31",
-    "imageio-ffmpeg>=0.5",
 ]
 ui = [
     "imgui-bundle>=1.92",

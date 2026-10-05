@@ -609,6 +609,19 @@ def test_recording_debug_and_bridge_transform_compatibility(tmp_path):
     assert not viewer.is_gpu_transform_available()
 
 
+def test_recording_uses_system_ffmpeg(monkeypatch):
+    monkeypatch.setattr(
+        recording_viewer_module.shutil, "which", lambda _name: "/usr/bin/ffmpeg"
+    )
+    assert recording_viewer_module._ffmpeg_executable() == "/usr/bin/ffmpeg"
+
+
+def test_recording_requires_system_ffmpeg(monkeypatch):
+    monkeypatch.setattr(recording_viewer_module.shutil, "which", lambda _name: None)
+    with pytest.raises(RuntimeError, match="install it and add it to PATH"):
+        recording_viewer_module._ffmpeg_executable()
+
+
 def test_recording_defaults_to_system_videos_directory(tmp_path, monkeypatch):
     monkeypatch.setattr(recording_viewer_module, "_system_videos_dir", lambda: tmp_path)
     writer = _FakeVideoWriter()
@@ -622,7 +635,7 @@ def test_recording_defaults_to_system_videos_directory(tmp_path, monkeypatch):
     path = viewer.start_recording()
     viewer.stop_recording()
 
-    assert path.startswith(str(tmp_path / "NewtonRecordings"))
+    assert path.startswith(str(tmp_path / "WarpOptixRecordings"))
     assert path.endswith(".mp4")
     assert writer.closed
 
