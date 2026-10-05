@@ -1,163 +1,113 @@
-# PyOptiX
+# warp-optix
 
-Python bindings for NVIDIA OptiX ray tracing SDK.
+Warp ray tracing with bundled OptiX 9.1 bindings and DLSS Ray Reconstruction.
+Write ray-generation, hit, miss, and callable programs as Warp kernels, or use
+the included path tracer. Applications import `warp_optix`; the native backend
+is bundled privately and requires no separate PyOptiX installation.
 
-PyOptiX provides high-performance Python bindings for NVIDIA OptiX, enabling GPU-accelerated ray tracing in Python applications. OptiX is a high-performance ray tracing API designed for optimal performance on NVIDIA GPUs.
+## Installation
 
----
-## Quick Installation
-
-Installation of the OptiX 9.1 Python bindings can be performed directly via [pip](https://pypi.org/project/pip/).
-
-```bash
-pip install pyoptix
-```
----
-## Source Installation
-
-For a local build and installation from source, including building against legacy OptiX releases, first clone this repository.  Then follow instructions below.
-```
-git clone https://github.com/NVIDIA/otk-pyoptix
-```
-
-### Dependencies
-
-#### Python
-Python versions 3.9+ are supported.
-
-#### CUDA Toolkit
-Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) version 10.0 or newer.
-
-**Note**: OptiX headers are automatically fetched during build. You do NOT need to install the OptiX SDK separately to build the `optix` Python module.  However, the SDK will need to be installed to run the examples.
-
-#### DLSS SDK (Ray Reconstruction)
-The standard build enables DLSS Ray Reconstruction and downloads SDK version
-`310.9.1` into `third_party/dlss-310.9.1`. Set `PYOPTIX_ENABLE_DLSS=OFF` to
-build a smaller wheel without DLSS bindings or runtime libraries. No Vulkan
-integration is used or exposed by these bindings.
-
-#### Build system requirements:
-* [cmake](https://cmake.org/)
-* [pip](https://pypi.org/project/pip/)
-
-
-### Building PyOptiX from source
-
-Once the otk-pyoptix repository has been cloned and all dependencies satisfied:
-
-```bash
-cd otk-pyoptix
-pip install .
-```
-
-To produce both wheel variants, build into separate directories. These are
-alternative `pyoptix` wheels with the same package name and version; install
-only one variant at a time. For example, in PowerShell:
+Build from the repository root with Python 3.10+, a CUDA Toolkit and a C++17
+compiler. GPU execution requires a compatible NVIDIA driver. OptiX headers and
+DLSS SDK 310.9.1 are fetched automatically.
 
 ```powershell
-$env:CMAKE_ARGS = "-DPYOPTIX_ENABLE_DLSS=ON"
-python -m pip wheel . --no-deps -w dist/dlss
-$env:CMAKE_ARGS = "-DPYOPTIX_ENABLE_DLSS=OFF"
-python -m pip wheel . --no-deps -w dist/no-dlss
-Remove-Item Env:CMAKE_ARGS
+pip install .
+# Editable development with viewer dependencies:
+pip install -e ".[pathtracing,ui,usd]"
 ```
 
-Both wheels expose `optix.dlss_support_available()` to query whether DLSS was
-compiled in, and `optix.dlss_rr_available()` to query whether it can run on the
-current system. The DLSS-free wheel returns `False` from both functions and
-keeps `DlssRRContext` and `DlssRRDenoiser` calls harmless, so applications can
-use the same Python API with either variant.
+This builds one platform wheel containing the Python package and native
+extension. Extras are `pathtracing`, `ui`, `usd`, `recording`, and `training`.
+The nested Python package is no longer an independent build entry point.
 
-**Advanced options:** Additional CMake arguments can be passed through the
-`CMAKE_ARGS` environment variable. The following DLSS settings can also be set
-directly as environment variables:
-
-- `DLSS_ROOT`: use a local DLSS SDK instead of downloading it
-- `PYOPTIX_DLSS_VERSION`: override the DLSS SDK version (default `310.9.1`);
-  automatic downloads of another version also require a matching
-  `PYOPTIX_DLSS_URL_HASH` SHA256 value
-- `PYOPTIX_AUTO_DOWNLOAD_DLSS`: set to `OFF` to disable automatic SDK download
-- `PYOPTIX_ENABLE_DLSS`: set to `OFF` to build without DLSS bindings
-
-After installation, `optix.get_optix_include_dir()` returns the packaged OptiX
-header directory for downstream compilation.
-
-On Windows with Python 3.8+, a DLSS-enabled build registers its packaged DLSS
-runtime and the CUDA directory from `CUDA_PATH`. Set `CUDA_BIN_DIR` if CUDA
-cannot be detected automatically.
-
-
-## Cooperative vectors (OptiX 9+)
-
-The Python bindings expose OptiX's host-side cooperative-vector support query,
-element/layout enums, matrix descriptor, size calculation, and asynchronous
-matrix conversion:
+## Public API
 
 ```python
-flags = context.getProperty(optix.DEVICE_PROPERTY_COOP_VEC)
-if flags & int(optix.DEVICE_PROPERTY_COOP_VEC_FLAG_STANDARD):
-    size = context.coopVecMatrixComputeSize(
-        32,
-        32,
-        optix.COOP_VEC_ELEM_TYPE_FLOAT8_E4M3,
-        optix.COOP_VEC_MATRIX_LAYOUT_INFERENCING_OPTIMAL,
+import warp as wp
+import warp_optix as wo
+from warp_optix.pathtracing import PathTracerAPI
+```
+
+For custom ray tracers, a context owns geometry and pipelines:
+
+```python
+# Geometry arrays, PTX, entry kernels, and launch parameters are application inputs.
+with wo.Context(device="cuda:0") as context:
+    geometry = context.create_triangle_gas(vertices, indices)
+    pipeline = context.create_pipeline(
+        ptx, raygen, miss, closest_hit,
+        num_payload_values=3, num_attribute_values=2,
     )
+    # Store geometry.handle in your Warp launch parameters.
+    pipeline.launch(params_buffer, width=640, height=480)
 ```
 
-Use `context.coopVecMatrixConvert(...)` to convert row- or column-major
-matrices into the device-specific optimal layout. Input/output pointers and
-network strides must be 64-byte aligned, and allocations must remain alive
-until the CUDA stream completes. Device intrinsics and the independent neural
-texture pipeline are documented in [warp_optix/README.md](warp_optix/README.md).
+The context retains geometry buffers, modules, SBTs, and pipelines. Closing
+it synchronizes the CUDA device and releases resources. Keep arrays referenced
+by launch parameters alive until GPU work completes. Launches are asynchronous
+on Warp's current stream, or on an explicitly supplied `wp.Stream`; geometry
+builds and refits are synchronous.
 
----
-## Examples programs
+See the [API guide](warp_optix/README.md), [migration notes](docs/migration-0.2.md),
+and runnable [examples](examples_warp/README.md).
 
-Several example programs are included in the github repository to allow testing of the API and a starting point for user applications.
+## DLSS builds
 
-### Dependencies
+DLSS is enabled by default and its runtime library is included in the wheel.
+Build alternative variants into separate directories:
 
-To run the PyOptiX examples or tests, the python modules specified in `otk-pyoptix/requirements.txt` must be installed:
-* pytest
-* cupy
-* numpy
-* Pillow
-* cuda-python (12.0 or newer recommended for OptiX 9.1)
-
-In addition, the [OptiX SDK](https://developer.nvidia.com/designworks/optix/download) must be installed to allow JIT compilation of the example shaders.
-
-### Virtual Environment
-In most cases, it makes sense to setup a python environment.  Below are examples of how to setup your environment with required example dependencies via either`Conda` or `venv`.
-
-#### `venv` Virtual Environment
-Create and activate a new virtual environment, then install pre-requisites:
-```
-python3 -m venv env
-source env/bin/activate
-pip install -r requirements.txt
+```powershell
+uv build --wheel --out-dir dist/dlss
+uv build --wheel --out-dir dist/no-dlss --config-setting cmake.define.PYOPTIX_ENABLE_DLSS=OFF --config-setting build-dir=build/no-dlss
 ```
 
-#### Conda Environment
-Create and activate an environment containing pre-requisites:
-```
-conda create -n pyoptix python pytest conda-forge::cupy numpy pillow cuda-python
-conda activate pyoptix
+Install only one variant at a time. The disabled variant retains harmless
+DLSS stubs. `DLSS_ROOT` selects a local SDK; `PYOPTIX_AUTO_DOWNLOAD_DLSS=OFF`
+disables downloading. Existing `CMAKE_ARGS` and DLSS version/hash overrides
+remain available. On Windows, `CUDA_PATH` or `CUDA_BIN_DIR` helps locate CUDA DLLs.
+
+## Advanced native interface
+
+```python
+from warp_optix import native
+print(native.dlss_support_available())
+print(native.dlss_rr_available())
 ```
 
-### Running the example programs
+`native` exposes the bundled binding API and follows its OptiX version. Native
+objects use explicit destruction; `Context.native_handle` and
+`Pipeline.native_handle` are borrowed and must not be destroyed by callers.
+Mixing standalone PyOptiX objects with these bindings, or loading both native
+extensions in one process, is unsupported. There is no production `optix` alias.
 
-Run the `hello` sample:
-```
-cd otk-pyoptix/examples
-python hello.py
-```
-If the example runs successfully, a green square will be rendered.
+The distribution version is 0.2.0; the binding version remains 9.1.0.
 
----
-## Running the Test Suite
+## Tests and upstream maintenance
 
-Test tests are using `pytest` and can be run from the test directory like this:
+Install feature extras, pytest, and the appropriate CuPy wheel. Run the suites
+in separate processes:
+
+```powershell
+python -m pytest warp_optix/tests
+python -m pytest test
 ```
-cd test
-python -m pytest
-```
+
+The second command runs upstream binding tests with a test-only import adapter.
+The backend derives from [NVIDIA/otk-pyoptix](https://github.com/NVIDIA/otk-pyoptix).
+Its source paths remain stable for upstream merges; see
+[maintenance instructions](docs/upstream.md). Binding sources retain their BSD
+license; Warp integration sources use Apache 2.0. OptiX and DLSS retain their
+NVIDIA license terms. License texts accompany the distribution.
+
+## CUDA graph limitation
+
+OptiX launch capture is currently unsupported. Tests on the RTX 3080 with
+driver 610.74 reproduced illegal memory access during graph replay and invalid
+resource events during context destruction. `Pipeline.launch` rejects an
+active capture before submitting native work. Capture ordinary Warp work in
+graphs and submit OptiX launches between those graphs on the same stream.
+
+The renderer retains its `enable_cuda_graphs` argument for caller compatibility,
+but requests for OptiX capture use direct asynchronous launches with a logged
+explanation. DLSS and ordinary stream ordering remain supported.

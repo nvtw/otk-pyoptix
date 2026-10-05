@@ -81,26 +81,16 @@ class _QualityEvaluator:
 
     def close(self):
         if self.context is not None:
-            # OptiX destroys child pipelines, groups and modules too, including
-            # objects created during an incomplete initialization.
-            with wp.ScopedDevice(self.device):
-                try:
-                    wp.synchronize_device(self.device)
-                finally:
-                    self.context.destroy()
-                    self.context = None
+            self.context.close()
+            self.context = None
 
     def _initialize(self, image, pixels):
         device = self.device
         with wp.ScopedDevice(device):
-            self.optix = wo.require_optix()
-            cuda_device = wp.get_device(device)
-            context = cuda_device.context
-            handle = context.value if hasattr(context, "value") else int(context)
-            self.context, self.callback = wo.create_context(
-                self.optix, handle, log_level=1
-            )
-            flags = self.context.getProperty(self.optix.DEVICE_PROPERTY_COOP_VEC)
+            from warp_optix._backend import get_backend
+            self.optix = get_backend()
+            self.context = wo.Context(device, log_level=1)
+            flags = self.context.native_handle.getProperty(self.optix.DEVICE_PROPERTY_COOP_VEC)
             if not flags & int(self.optix.DEVICE_PROPERTY_COOP_VEC_FLAG_STANDARD):
                 raise RuntimeError(
                     "the selected OptiX device does not support cooperative vectors"
@@ -126,22 +116,19 @@ class _QualityEvaluator:
                 __file__,
                 device=device,
             )
-            self.pipeline, self.sbt, self.resources = wo.create_pipeline_and_sbt(
-                self.optix,
-                self.context,
+            self.pipeline = self.context.create_pipeline(
                 ptx,
                 _score_texels,
                 _miss,
                 None,
                 num_payload_values=0,
                 num_attribute_values=0,
-                device=device,
             )
             self.params_buffer = wo.create_launch_params_buffer(_Params, device)
 
     def mse(self, asset):
         with wp.ScopedDevice(self.device):
-            runtime = upload_asset(asset, self.context, self.optix, device=self.device)
+            runtime = upload_asset(asset, self.context)
             params = _Params()
             params.texture = runtime.device_view()
             params.target = self.target
@@ -152,15 +139,7 @@ class _QualityEvaluator:
             wo.write_launch_params(self.params_buffer, params)
             self.sums.zero_()
             stream = wp.get_stream(self.device)
-            wo.launch(
-                self.optix,
-                self.pipeline,
-                self.sbt,
-                self.count,
-                1,
-                self.params_buffer,
-                stream.cuda_stream,
-            )
+            self.pipeline.launch(self.params_buffer, width=self.count, stream=stream)
             wp.launch_tiled(
                 _sum_errors,
                 dim=(self.stride // 256, self.channels),

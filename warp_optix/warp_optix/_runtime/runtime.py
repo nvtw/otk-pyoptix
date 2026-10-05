@@ -30,10 +30,11 @@ from warp_optix._compat import compile_module_to_ptx, has_public_addon_hooks
 
 def require_optix():
     try:
-        import optix  # noqa: PLC0415
+        from warp_optix._backend import get_backend
+        optix = get_backend()
     except ImportError as e:
         raise RuntimeError(
-            "Install otk-pyoptix first: https://github.com/NVIDIA/otk-pyoptix"
+            "Install the bundled warp-optix package: pip install ."
         ) from e
     return optix
 

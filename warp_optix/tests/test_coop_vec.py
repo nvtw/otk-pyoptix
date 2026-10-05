@@ -9,10 +9,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
 
 import warp as wp  # noqa: E402
-import warp_optix as woptix  # noqa: E402
+import warp_optix as woptix
+from warp_optix._runtime import runtime as _runtime
+from warp_optix._runtime.hit_kernels import HitKernel as _NativeHitKernel  # noqa: E402
 
 Vec16h = wp.types.vector(length=16, dtype=wp.float16)
 
@@ -62,7 +63,7 @@ def coop_vec_miss(params: CoopVecParams):
 
 def _require_coop_vec():
     try:
-        optix = woptix.require_optix()
+        optix = _runtime.require_optix()
         wp.init()
     except Exception as error:
         pytest.skip(f"OptiX/Warp unavailable: {error}")
@@ -74,7 +75,7 @@ def _require_coop_vec():
         if hasattr(device.context, "value")
         else int(device.context)
     )
-    context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+    context, _ = _runtime.create_optix_context(optix, int(cuda_context), log_level=1)
     try:
         flags = context.getProperty(optix.DEVICE_PROPERTY_COOP_VEC)
     except Exception as error:
@@ -92,7 +93,7 @@ def test_coop_vec_elementwise_executes_in_optix(tmp_path, monkeypatch):
         ptx = woptix.compile_warp_module_to_ptx(
             wp.get_module(__name__), "", "test_coop_vec", __file__, device=device_name
         )
-        pipeline, sbt, resources = woptix.create_pipeline_and_sbt(
+        pipeline, sbt, resources = _runtime.create_pipeline_and_sbt(
             optix,
             context,
             ptx,
@@ -109,7 +110,7 @@ def test_coop_vec_elementwise_executes_in_optix(tmp_path, monkeypatch):
         params_buffer = woptix.create_launch_params_buffer(CoopVecParams, device_name)
         params.matrix = wp.uint64(0)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         np.testing.assert_array_equal(output.numpy(), [3.0, 5.0, 7.0, 9.0])
 
@@ -169,7 +170,7 @@ def test_coop_vec_fp16_matmul_executes_in_optix(tmp_path, monkeypatch):
             __file__,
             device=device_name,
         )
-        pipeline, sbt, resources = woptix.create_pipeline_and_sbt(
+        pipeline, sbt, resources = _runtime.create_pipeline_and_sbt(
             optix,
             context,
             ptx,
@@ -186,7 +187,7 @@ def test_coop_vec_fp16_matmul_executes_in_optix(tmp_path, monkeypatch):
         params.matrix = wp.uint64(packed.ptr)
         params_buffer = woptix.create_launch_params_buffer(CoopVecParams, device_name)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         np.testing.assert_array_equal(output.numpy(), np.ones(n, dtype=np.float32))
         assert resources and packed
@@ -251,7 +252,7 @@ def test_coop_vec_fp8_matmul_executes_in_optix(tmp_path, monkeypatch):
             __file__,
             device=device_name,
         )
-        pipeline, sbt, resources = woptix.create_pipeline_and_sbt(
+        pipeline, sbt, resources = _runtime.create_pipeline_and_sbt(
             optix,
             context,
             ptx,
@@ -268,7 +269,7 @@ def test_coop_vec_fp8_matmul_executes_in_optix(tmp_path, monkeypatch):
         params.matrix = wp.uint64(packed.ptr)
         params_buffer = woptix.create_launch_params_buffer(CoopVecParams, device_name)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         np.testing.assert_array_equal(output.numpy(), np.ones(n, dtype=np.float32))
         assert resources and packed

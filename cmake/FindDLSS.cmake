@@ -87,6 +87,7 @@ if (NOT EXISTS "${_dlss_root}/include/nvsdk_ngx.h" AND PYOPTIX_AUTO_DOWNLOAD_DLS
 
   file(MAKE_DIRECTORY "${PYOPTIX_DLSS_DIR}")
   file(COPY "${_dlss_source_root}/include" DESTINATION "${PYOPTIX_DLSS_DIR}")
+  file(COPY "${_dlss_source_root}/LICENSE.txt" DESTINATION "${PYOPTIX_DLSS_DIR}")
   if (EXISTS "${_dlss_source_root}/lib")
     file(COPY "${_dlss_source_root}/lib" DESTINATION "${PYOPTIX_DLSS_DIR}")
   endif()
@@ -95,6 +96,14 @@ if (NOT EXISTS "${_dlss_root}/include/nvsdk_ngx.h" AND PYOPTIX_AUTO_DOWNLOAD_DLS
   message(STATUS "Downloaded DLSS SDK to ${PYOPTIX_DLSS_DIR}")
 endif()
 
+set(DLSS_LICENSE_FILE "${_dlss_root}/LICENSE.txt")
+# SDKs fetched before license packaging was added retain the archive contents.
+if (NOT EXISTS "${DLSS_LICENSE_FILE}")
+  file(GLOB _dlss_licenses "${_dlss_root}/_download/src/*/LICENSE.txt")
+  if (_dlss_licenses)
+    list(GET _dlss_licenses 0 DLSS_LICENSE_FILE)
+  endif()
+endif()
 set(DLSS_INCLUDE_DIR "${_dlss_root}/include")
 if (NOT EXISTS "${DLSS_INCLUDE_DIR}/nvsdk_ngx.h")
   set(DLSS_INCLUDE_DIR "DLSS_INCLUDE_DIR-NOTFOUND")

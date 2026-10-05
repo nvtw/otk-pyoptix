@@ -33,7 +33,7 @@ import warp as wp
 
 import warp_optix as woptix
 from warp_optix._runtime.hit_kernels import HitKernel
-from warp_optix._runtime.runtime import _set_pipeline_stack_size, create_optix_context
+from warp_optix._runtime.runtime import _set_pipeline_stack_size, launch as _launch
 from warp_optix._runtime.sbt import SbtKernelManager
 
 from . import pathtracing_warp_kernels as pwk
@@ -48,7 +48,8 @@ from .tonemap import Tonemapper
 from .volume_composite import VolumeParams, composite_volume
 
 try:
-    import optix
+    from warp_optix._backend import get_backend
+    optix = get_backend()
 except ImportError:
     optix = None
 
@@ -248,6 +249,7 @@ class PathTracingViewer:
 
         # OptiX state (initialized in build())
         self._optix = None
+        self._context_owner = None
         self._ctx = None
         self._pipeline = None
         self._sbt = None
@@ -465,7 +467,7 @@ class PathTracingViewer:
                     (self.height + scale - 1) // scale,
                 )
                 self._optix_denoiser = OptixDenoiser(
-                    self._ctx,
+                    self._context_owner,
                     self._render_width,
                     self._render_height,
                     upscale=self.optix_upscale,
@@ -657,57 +659,57 @@ class PathTracingViewer:
 
         if optix is None:
             logger.error(
-                "Could not import optix module. Ensure warp.pyoptix and OptiX SDK are installed."
+                "Could not load the bundled bindings. Reinstall warp-optix."
             )
             return False
 
         self._optix = optix
 
-        # Create OptiX context
-        wp_device = wp.get_device("cuda")
-        cu_context = (
-            wp_device.context.value
-            if hasattr(wp_device.context, "value")
-            else int(wp_device.context)
-        )
-        self._ctx, self._optix_logger = create_optix_context(
-            optix, int(cu_context), log_level=2
-        )
+        # The renderer's custom two-ray-type pipeline uses the private tracker.
+        if self._context_owner is not None:
+            self.close()
+        self._context_owner = woptix.Context("cuda", log_level=2)
+        self._ctx = self._context_owner._native_context
+        self._optix_logger = self._context_owner._logger
 
-        # Build PTX directly from Warp OptiX kernels.
-        module = wp.get_module(pwk.__name__)
-        self._ptx = woptix.compile_warp_module_to_ptx(
-            module=module,
-            launch_preamble="",
-            module_tag="pathtracing_warp",
-            script_dir=str(Path(__file__).parent),
-            device="cuda",
-        )
-        self._set_active = False
+        try:
+            # Build PTX directly from Warp OptiX kernels.
+            module = wp.get_module(pwk.__name__)
+            self._ptx = woptix.compile_warp_module_to_ptx(
+                module=module,
+                launch_preamble="",
+                module_tag="pathtracing_warp",
+                script_dir=str(Path(__file__).parent),
+                device="cuda",
+            )
+            self._set_active = False
 
-        # Create scene
-        self._scene = Scene(
-            self._ctx, enable_texture_mipmaps=self.enable_texture_mipmaps
-        )
-        if self._scene_setup is not None:
-            self._scene_setup(self._scene)
-        else:
-            self._scene.create_cornell_box()
-        self._scene.build(optix)
+            # Create scene
+            self._scene = Scene(
+                self._ctx, enable_texture_mipmaps=self.enable_texture_mipmaps
+            )
+            if self._scene_setup is not None:
+                self._scene_setup(self._scene)
+            else:
+                self._scene.create_cornell_box()
+            self._scene.build(optix)
 
-        # Create output buffers
-        self._create_buffers()
-        self._launch_params = pwk.PathtraceLaunchParams()
-        self._launch_params_buffer = woptix.create_launch_params_buffer(
-            pwk.PathtraceLaunchParams, device="cuda"
-        )
-        self._init_denoiser()
+            # Create output buffers
+            self._create_buffers()
+            self._launch_params = pwk.PathtraceLaunchParams()
+            self._launch_params_buffer = woptix.create_launch_params_buffer(
+                pwk.PathtraceLaunchParams, device="cuda"
+            )
+            self._init_denoiser()
 
-        self._create_pipeline()
-        self._create_sbt()
+            self._create_pipeline()
+            self._create_sbt()
 
-        logger.info("OptiX path tracing viewer build complete.")
-        return True
+            logger.info("OptiX path tracing viewer build complete.")
+            return True
+        except BaseException:
+            self.close()
+            raise
 
     @staticmethod
     def _create_cuda_texture_2d(
@@ -1644,62 +1646,17 @@ class PathTracingViewer:
                     self.frame_index += 1
 
     def _launch_optix(self):
-        """Launch OptiX through a reusable CUDA graph when capture is supported.
-
-        The launch-parameter writer remains outside the graph, so camera,
-        jitter, frame index, TLAS, and material state can change every launch
-        while the graph retains the stable OptiX submission topology.
-        """
-
-        def launch():
-            woptix.launch(
-                self._optix,
-                self._pipeline,
-                self._sbt,
-                self._render_width,
-                self._render_height,
-                self._launch_params_buffer,
-                stream=int(self._render_stream.cuda_stream),
+        """Submit directly; OptiX graph replay and teardown are not reliable."""
+        if self.enable_cuda_graphs and self._cuda_graph_error is None:
+            self._cuda_graph_error = (
+                "OptiX graph capture is unsupported; using direct asynchronous launches"
             )
-
-        # NGX/DLSS and OptiX share this stream. RTX resource-event bookkeeping
-        # used by NGX is not legal while the stream is being captured and can
-        # invalidate it with CUDA 900/901, producing a black presentation.
-        # The captured launch also snapshots parameters on the tested OptiX
-        # runtime: writing the launch-parameter buffer between replays leaves
-        # camera and RNG state frozen. Temporal OptiX denoising needs fresh
-        # samples and motion vectors, so submit its launches directly too.
-        if (
-            self._dlss_enabled
-            or self._optix_denoiser is not None
-            or not self.enable_cuda_graphs
-            or self._cuda_graph_error is not None
-        ):
-            launch()
-            return
-        # OptiX/RTX records resource-use events the first time a scene and its
-        # output buffers are launched. CUDA forbids those event queries during
-        # stream capture (errors 900/901), so prime them with one ordinary
-        # launch before attempting to capture the stable submission.
-        if not self._optix_graph_warmed:
-            launch()
-            self._optix_graph_warmed = True
-            return
-        if self._optix_launch_graph is None:
-            try:
-                with wp.ScopedCapture(stream=self._render_stream) as capture:
-                    launch()
-                self._optix_launch_graph = capture.graph
-            except Exception as exc:
-                self._cuda_graph_error = str(exc)
-                # A failed CUDA stream capture can poison subsequent work on
-                # the stream. Surface the failure instead of silently showing
-                # a black frame after an unsafe direct-launch fallback.
-                raise RuntimeError(
-                    "OptiX CUDA graph capture failed after warm-up; rerun with "
-                    "enable_cuda_graphs=False / --no-cuda-graphs"
-                ) from exc
-        wp.capture_launch(self._optix_launch_graph, stream=self._render_stream)
+            logger.warning(self._cuda_graph_error)
+        _launch(
+            self._optix, self._pipeline, self._sbt,
+            self._render_width, self._render_height, self._launch_params_buffer,
+            stream=int(self._render_stream.cuda_stream),
+        )
 
     def _process_debug_output(self):
         self._tonemapper.resize(self.width, self.height)
@@ -1835,10 +1792,19 @@ class PathTracingViewer:
     def close(self):
         """Wait for rendering and release reconstruction resources."""
         wp.synchronize_stream(self._render_stream)
-        self._optix_launch_graph = None
         self._optix_graph_warmed = False
         self._destroy_dlss_rr(restore_resolution=False)
         self._destroy_optix_denoiser()
+        if self._context_owner is not None:
+            self._context_owner.close()
+            self._context_owner = None
+        self._optix_launch_graph = None
+        self._ctx = None
+        self._pipeline = None
+        self._module = None
+        self._sbt = None
+        self._sbt_manager = None
+        self._scene = None
 
     def __del__(self):
         try:

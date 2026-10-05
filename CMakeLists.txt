@@ -93,17 +93,26 @@ if(MSVC)
 endif()
 
 target_compile_definitions(_optix PRIVATE
-    VERSION_INFO=${PROJECT_VERSION}
+    VERSION_INFO=9.1.0
 )
 
-install(TARGETS _optix DESTINATION ${SKBUILD_PLATLIB_DIR}/optix)
+# Preserve upstream source paths; only the installed namespace changes.
+set(PYOPTIX_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}/warp_optix/_bindings")
+install(TARGETS _optix DESTINATION ${PYOPTIX_INSTALL_DIR})
+install(FILES src/optix/__init__.py src/optix/_dlss_stub.py
+        DESTINATION ${PYOPTIX_INSTALL_DIR})
 install(DIRECTORY "${optix_headers_SOURCE_DIR}/include/"
-        DESTINATION ${SKBUILD_PLATLIB_DIR}/optix/include)
+        DESTINATION ${PYOPTIX_INSTALL_DIR}/include)
 
 if(PYOPTIX_ENABLE_DLSS AND (DLSS_RUNTIME_LIBRARY_DEBUG OR DLSS_RUNTIME_LIBRARY_RELEASE))
+  if(NOT EXISTS "${DLSS_LICENSE_FILE}")
+    message(FATAL_ERROR "DLSS runtime packaging requires the SDK LICENSE.txt in DLSS_ROOT")
+  endif()
+  install(FILES "${DLSS_LICENSE_FILE}" DESTINATION ${PYOPTIX_INSTALL_DIR}
+          RENAME DLSS_LICENSE.txt)
   install(FILES
     "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,${DLSS_RUNTIME_LIBRARY_DEBUG},${DLSS_RUNTIME_LIBRARY_RELEASE}>"
-    DESTINATION ${SKBUILD_PLATLIB_DIR}/optix
+    DESTINATION ${PYOPTIX_INSTALL_DIR}
     RENAME "$<IF:$<PLATFORM_ID:Windows>,nvngx_dlssd.dll,libnvidia-ngx-dlssd.so>"
   )
 endif()

@@ -119,11 +119,17 @@ def curve_closest_hit(params: LaunchParams):
     )
     center = p0 * (1.0 - u) + p1 * u
     world_center = wp.optix_transform_point_from_object_to_world_space(center)
-    hit = wp.optix_get_world_ray_origin() + wp.optix_get_ray_tmax() * wp.optix_get_world_ray_direction()
+    hit = (
+        wp.optix_get_world_ray_origin()
+        + wp.optix_get_ray_tmax() * wp.optix_get_world_ray_direction()
+    )
     normal = wp.normalize(hit - world_center)
 
     along_curve = (float(primitive) + u) / float(params.num_segments)
-    albedo = wp.vec3(0.15, 0.75, 0.95) * (1.0 - along_curve) + wp.vec3(0.95, 0.20, 0.55) * along_curve
+    albedo = (
+        wp.vec3(0.15, 0.75, 0.95) * (1.0 - along_curve)
+        + wp.vec3(0.95, 0.20, 0.55) * along_curve
+    )
     light = wp.normalize(wp.vec3(-0.4, 0.8, 0.6))
     intensity = 0.18 + 0.82 * wp.max(wp.dot(normal, light), 0.0)
     _store_color(albedo * intensity)
@@ -133,29 +139,36 @@ def _save_bmp(path: Path, pixels: np.ndarray, width: int, height: int) -> None:
     import struct  # noqa: PLC0415
 
     rgba = pixels.reshape(height, width)
-    bgr = np.stack(((rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF, rgba & 0xFF), axis=-1).astype(np.uint8)
+    bgr = np.stack(
+        ((rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF, rgba & 0xFF), axis=-1
+    ).astype(np.uint8)
     row_stride = (width * 3 + 3) & ~3
     pixel_data_size = row_stride * height
     padding = b"\x00" * (row_stride - width * 3)
     with path.open("wb") as output:
         output.write(struct.pack("<2sIHHI", b"BM", 54 + pixel_data_size, 0, 0, 54))
-        output.write(struct.pack("<IiiHHIIiiII", 40, width, height, 1, 24, 0, pixel_data_size, 0, 0, 0, 0))
+        output.write(
+            struct.pack(
+                "<IiiHHIIiiII", 40, width, height, 1, 24, 0, pixel_data_size, 0, 0, 0, 0
+            )
+        )
         for row in bgr:
             output.write(row.tobytes())
             output.write(padding)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=360)
     parser.add_argument("--output", type=Path, default=Path("curves.bmp"))
     args = parser.parse_args()
 
-    optix = woptix.require_optix()
     wp.init()
-    with wp.ScopedDevice(args.device):
+    with wp.ScopedDevice(args.device), woptix.Context(args.device) as context:
         device = wp.get_device(args.device)
         if not device.is_cuda:
             raise RuntimeError("This example requires a CUDA device")
@@ -163,34 +176,25 @@ def main() -> None:
         ptx = woptix.compile_warp_module_to_ptx(
             wp.get_module(__name__), "", "curves", __file__, device=args.device
         )
-        cuda_context = device.context.value if hasattr(device.context, "value") else int(device.context)
-        context, logger = woptix.create_context(optix, int(cuda_context))
 
         x = np.linspace(-1.65, 1.65, 49, dtype=np.float32)
         vertices = np.stack((x, 0.62 * np.sin(2.4 * x), 0.16 * np.cos(1.8 * x)), axis=1)
         widths = (0.075 + 0.035 * (0.5 + 0.5 * np.sin(4.0 * x))).astype(np.float32)
         segment_indices = np.arange(x.size - 1, dtype=np.uint32)
-        curve_type = optix.PRIMITIVE_TYPE_ROUND_LINEAR
-        gas, gas_buffers = woptix.create_curve_gas(
-            optix,
-            context,
-            vertices,
-            widths,
-            segment_indices,
-            args.device,
-            curve_type=curve_type,
+        curve_type = woptix.PrimitiveType.ROUND_LINEAR
+        gas_resource = context.create_curve_gas(
+            vertices, widths, segment_indices, curve_type=curve_type
         )
+        gas = gas_resource.handle
+        gas_buffers = gas_resource.buffers
 
-        pipeline, sbt, pipeline_buffers = woptix.create_pipeline_and_sbt(
-            optix,
-            context,
+        pipeline = context.create_pipeline(
             ptx,
             raygen,
             miss,
             None,
             num_payload_values=3,
             num_attribute_values=1,
-            device=args.device,
             hit_groups=[
                 woptix.HitKernel(
                     closest_hit=curve_closest_hit,
@@ -210,14 +214,15 @@ def main() -> None:
         params.traversable = wp.uint64(gas)
         params_buffer = woptix.create_launch_params_buffer(LaunchParams, args.device)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, pipeline, sbt, args.width, args.height, params_buffer)
+        pipeline.launch(params_buffer, width=args.width, height=args.height)
         wp.synchronize_device(args.device)
 
         pixels = image.numpy()
         _save_bmp(args.output, pixels, args.width, args.height)
-        _keepalive = (gas_buffers, pipeline_buffers)
-        print(f"Wrote {args.output} (checksum {int(np.bitwise_xor.reduce(pixels)):#010x})")
-        print(f"OptiX log messages: {logger.num_messages}")
+        print(
+            f"Wrote {args.output} (checksum {int(np.bitwise_xor.reduce(pixels)):#010x})"
+        )
+        print(f"OptiX log messages: {context.log_message_count}")
 
 
 if __name__ == "__main__":

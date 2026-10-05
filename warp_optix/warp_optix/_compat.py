@@ -256,7 +256,8 @@ def _compile_cuda_source_to_ptx(
         str(Path(__file__).resolve().parent / "_native" / "include"),
     ]
     try:
-        import optix
+        from warp_optix._backend import get_backend
+        optix = get_backend()
 
         include_dirs.append(optix.get_optix_include_dir())
     except (ImportError, AttributeError) as error:

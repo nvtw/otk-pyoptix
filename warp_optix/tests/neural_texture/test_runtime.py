@@ -9,10 +9,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[2]))
 
 import warp as wp  # noqa: E402
-import warp_optix as woptix  # noqa: E402
+import warp_optix as woptix
+from warp_optix._runtime import runtime as _runtime
+from warp_optix._runtime.hit_kernels import HitKernel as _NativeHitKernel  # noqa: E402
 from warp_optix.neural_texture import (  # noqa: E402
     NetworkLayer,
     NeuralTextureAsset,
@@ -22,6 +23,7 @@ from warp_optix.neural_texture import (  # noqa: E402
     pack_latents,
     upload_asset,
 )
+from warp_optix.neural_texture.runtime import _upload_asset as upload_asset
 
 
 def _asset():
@@ -47,7 +49,7 @@ def _asset():
 
 def _context():
     try:
-        optix = woptix.require_optix()
+        optix = _runtime.require_optix()
         wp.init()
     except Exception as error:
         pytest.skip(f"OptiX/Warp unavailable: {error}")
@@ -59,7 +61,7 @@ def _context():
         if hasattr(device.context, "value")
         else int(device.context)
     )
-    context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+    context, _ = _runtime.create_optix_context(optix, int(cuda_context), log_level=1)
     try:
         flags = context.getProperty(optix.DEVICE_PROPERTY_COOP_VEC)
     except Exception as error:

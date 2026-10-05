@@ -16,7 +16,8 @@ def _addon_include_dirs() -> list[str]:
     here = Path(__file__).resolve().parent
     include_dirs = [str(here / "_native" / "include")]
     try:
-        import optix
+        from warp_optix._backend import get_backend
+        optix = get_backend()
 
         optix_include_dir = optix.get_optix_include_dir()
     except (ImportError, AttributeError, OSError):

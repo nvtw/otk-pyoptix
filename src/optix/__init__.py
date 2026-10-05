@@ -43,7 +43,7 @@ def get_optix_include_dir():
     # generated/fetched package data in the environment's platform library.
     # Check that location as well so get_optix_include_dir() behaves identically
     # for editable and wheel installs.
-    platlib_include = Path(sysconfig.get_path("platlib")) / "optix" / "include"
+    platlib_include = Path(sysconfig.get_path("platlib")).joinpath(*__name__.split("."), "include")
     if platlib_include != package_include:
         include_dirs.append(platlib_include)
 

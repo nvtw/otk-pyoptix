@@ -9,10 +9,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
 
 import warp as wp  # noqa: E402
-import warp_optix as woptix  # noqa: E402
+import warp_optix as woptix
+from warp_optix._runtime import runtime as _runtime
+from warp_optix._runtime.hit_kernels import HitKernel as _NativeHitKernel  # noqa: E402
 
 
 @wp.struct
@@ -372,7 +373,7 @@ def test_optix_kernel_uses_full_kernel_name():
 
 def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
     try:
-        optix = woptix.require_optix()
+        optix = _runtime.require_optix()
         wp.init()
     except Exception as error:
         pytest.skip(f"OptiX/Warp unavailable: {error}")
@@ -388,7 +389,7 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
             if hasattr(device.context, "value")
             else int(device.context)
         )
-        context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+        context, _ = _runtime.create_optix_context(optix, int(cuda_context), log_level=1)
         ptx = woptix.compile_warp_module_to_ptx(
             wp.get_module(__name__),
             "",
@@ -401,12 +402,12 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
             [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32
         )
         indices = np.array([[0, 1, 2]], dtype=np.uint32)
-        gas, gas_buffers = woptix.create_triangle_gas(
+        gas, gas_buffers = _runtime.create_triangle_gas(
             optix, context, vertices, indices, device_name, compact=True
         )
         assert gas_buffers.build_flags & int(optix.BUILD_FLAG_ALLOW_COMPACTION)
         assert gas_buffers.output_size_in_bytes <= gas_buffers.uncompacted_size_in_bytes
-        pipeline, sbt, pipeline_buffers = woptix.create_pipeline_and_sbt(
+        pipeline, sbt, pipeline_buffers = _runtime.create_pipeline_and_sbt(
             optix,
             context,
             ptx,
@@ -424,7 +425,7 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         instance = optix.Instance(
             transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, gas
         )
-        ias, ias_buffers = woptix.create_instance_acceleration_structure(
+        ias, ias_buffers = _runtime.create_instance_acceleration_structure(
             optix, context, [instance], device_name
         )
 
@@ -434,7 +435,7 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         params.traversable = wp.uint64(ias)
         params_buffer = woptix.create_launch_params_buffer(QueryParams, device_name)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         result = output.numpy()
 
@@ -452,7 +453,7 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         assert result[11] == 0
 
         reorder_pipeline, reorder_sbt, reorder_resources = (
-            woptix.create_pipeline_and_sbt(
+            _runtime.create_pipeline_and_sbt(
                 optix,
                 context,
                 ptx,
@@ -473,14 +474,14 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
             transform, 77, reorder_hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, gas
         )
         reorder_ias, reorder_ias_buffers = (
-            woptix.create_instance_acceleration_structure(
+            _runtime.create_instance_acceleration_structure(
                 optix, context, [reorder_instance], device_name
             )
         )
         output.zero_()
         params.traversable = wp.uint64(reorder_ias)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, reorder_pipeline, reorder_sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, reorder_pipeline, reorder_sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         reorder_result = output.numpy()
         assert tuple(reorder_result[:5]) == tuple(result[:5])
@@ -490,14 +491,14 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         dynamic_flags = int(
             optix.BUILD_FLAG_ALLOW_UPDATE | optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS
         )
-        dynamic_gas, dynamic_buffers = woptix.create_triangle_gas(
+        dynamic_gas, dynamic_buffers = _runtime.create_triangle_gas(
             optix, context, vertices, indices, device_name, build_flags=dynamic_flags
         )
         dynamic_instance = optix.Instance(
             transform, 77, hit_offset, 0xFF, optix.INSTANCE_FLAG_NONE, dynamic_gas
         )
         dynamic_ias, dynamic_ias_buffers = (
-            woptix.create_instance_acceleration_structure(
+            _runtime.create_instance_acceleration_structure(
                 optix, context, [dynamic_instance], device_name
             )
         )
@@ -507,11 +508,11 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
         moved_vertices = vertices + np.array([10.0, 0.0, 0.0], dtype=np.float32)
         dynamic_buffers["d_vertices"].assign(moved_vertices)
         assert (
-            woptix.refit_acceleration_structure(optix, context, dynamic_buffers)
+            _runtime.refit_acceleration_structure(optix, context, dynamic_buffers)
             == dynamic_gas
         )
         output.zero_()
-        woptix.launch(optix, pipeline, sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, pipeline, sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         assert output.numpy()[0] == np.uint32(0xFFFFFFFF)
 
@@ -529,7 +530,7 @@ def test_common_device_queries_on_gpu(tmp_path, monkeypatch):
 
 def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
     try:
-        optix = woptix.require_optix()
+        optix = _runtime.require_optix()
         wp.init()
     except Exception as error:
         pytest.skip(f"OptiX/Warp unavailable: {error}")
@@ -545,7 +546,7 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
             if hasattr(device.context, "value")
             else int(device.context)
         )
-        context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+        context, _ = _runtime.create_optix_context(optix, int(cuda_context), log_level=1)
         ptx = woptix.compile_warp_module_to_ptx(
             wp.get_module(__name__),
             "",
@@ -555,7 +556,7 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
         )
 
         callable_pipeline, callable_sbt, callable_resources = (
-            woptix.create_pipeline_and_sbt(
+            _runtime.create_pipeline_and_sbt(
                 optix,
                 context,
                 ptx,
@@ -584,12 +585,12 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
         )
         params_buffer = woptix.create_launch_params_buffer(QueryParams, device_name)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, callable_pipeline, callable_sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, callable_pipeline, callable_sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         assert tuple(output.numpy()[:2]) == (42, 84)
 
         exception_pipeline, exception_sbt, exception_resources = (
-            woptix.create_pipeline_and_sbt(
+            _runtime.create_pipeline_and_sbt(
                 optix,
                 context,
                 ptx,
@@ -603,7 +604,7 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
             )
         )
         output.zero_()
-        woptix.launch(optix, exception_pipeline, exception_sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, exception_pipeline, exception_sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         assert tuple(output.numpy()[:3]) == (1234, 77, 88)
 
@@ -612,7 +613,7 @@ def test_callables_and_exception_programs_on_gpu(tmp_path, monkeypatch):
 
 def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
     try:
-        optix = woptix.require_optix()
+        optix = _runtime.require_optix()
         wp.init()
     except Exception as error:
         pytest.skip(f"OptiX/Warp unavailable: {error}")
@@ -628,7 +629,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             if hasattr(device.context, "value")
             else int(device.context)
         )
-        context, _ = woptix.create_context(optix, int(cuda_context), log_level=1)
+        context, _ = _runtime.create_optix_context(optix, int(cuda_context), log_level=1)
         ptx = woptix.compile_warp_module_to_ptx(
             wp.get_module(__name__),
             "",
@@ -644,7 +645,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             (vertices, vertices + np.array([0.0, 0.0, -0.5], dtype=np.float32))
         )
         indices = np.array([[0, 1, 2]], dtype=np.uint32)
-        motion_gas, motion_buffers = woptix.create_triangle_gas(
+        motion_gas, motion_buffers = _runtime.create_triangle_gas(
             optix,
             context,
             vertex_keys,
@@ -653,7 +654,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             motion_time_range=(0.0, 1.0),
         )
         motion_pipeline, motion_sbt, motion_pipeline_buffers = (
-            woptix.create_pipeline_and_sbt(
+            _runtime.create_pipeline_and_sbt(
                 optix,
                 context,
                 ptx,
@@ -673,13 +674,13 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
         params.traversable = wp.uint64(motion_gas)
         params_buffer = woptix.create_launch_params_buffer(QueryParams, device_name)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, motion_pipeline, motion_sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, motion_pipeline, motion_sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         assert output.numpy()[0] == np.float32(0.25).view(np.uint32)
 
         curve_vertices = np.array([[0.0, -1.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32)
         curve_widths = np.array([0.25, 0.25], dtype=np.float32)
-        curve_gas, curve_buffers = woptix.create_curve_gas(
+        curve_gas, curve_buffers = _runtime.create_curve_gas(
             optix,
             context,
             curve_vertices,
@@ -688,7 +689,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             device_name,
         )
         curve_pipeline, curve_sbt, curve_pipeline_buffers = (
-            woptix.create_pipeline_and_sbt(
+            _runtime.create_pipeline_and_sbt(
                 optix,
                 context,
                 ptx,
@@ -699,7 +700,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
                 num_attribute_values=1,
                 device=device_name,
                 hit_groups=[
-                    woptix.HitKernel(
+                    _NativeHitKernel(
                         closest_hit=curve_closest_hit,
                         builtin_intersection_type=optix.PRIMITIVE_TYPE_ROUND_LINEAR,
                     )
@@ -709,7 +710,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
         output.zero_()
         params.traversable = wp.uint64(curve_gas)
         woptix.write_launch_params(params_buffer, params)
-        woptix.launch(optix, curve_pipeline, curve_sbt, 1, 1, params_buffer)
+        _runtime.launch(optix, curve_pipeline, curve_sbt, 1, 1, params_buffer)
         wp.synchronize_device(device_name)
         result = output.numpy()
         assert result[0] == 1
@@ -746,7 +747,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             ),
         )
         for curve_type, control_points in curve_cases:
-            higher_order_gas, higher_order_buffers = woptix.create_curve_gas(
+            higher_order_gas, higher_order_buffers = _runtime.create_curve_gas(
                 optix,
                 context,
                 control_points,
@@ -756,7 +757,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
                 curve_type=curve_type,
             )
             higher_order_pipeline, higher_order_sbt, higher_order_pipeline_buffers = (
-                woptix.create_pipeline_and_sbt(
+                _runtime.create_pipeline_and_sbt(
                     optix,
                     context,
                     ptx,
@@ -767,7 +768,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
                     num_attribute_values=1,
                     device=device_name,
                     hit_groups=[
-                        woptix.HitKernel(
+                        _NativeHitKernel(
                             closest_hit=higher_order_curve_closest_hit,
                             builtin_intersection_type=curve_type,
                         )
@@ -777,7 +778,7 @@ def test_motion_blur_and_round_curves_on_gpu(tmp_path, monkeypatch):
             output.zero_()
             params.traversable = wp.uint64(higher_order_gas)
             woptix.write_launch_params(params_buffer, params)
-            woptix.launch(
+            _runtime.launch(
                 optix,
                 higher_order_pipeline,
                 higher_order_sbt,

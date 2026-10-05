@@ -11,7 +11,6 @@ import pytest
 
 pytest.importorskip("warp_nn", reason="offline compression is an optional extra")
 
-sys.path.insert(0, str(Path(__file__).parents[2]))
 
 from warp_optix.neural_texture import (  # noqa: E402
     compress_texture,

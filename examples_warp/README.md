@@ -5,7 +5,7 @@ These examples were moved from `warp/examples/core/pyoptix/` into this directory
 Prerequisites:
 
 ```bash
-pip install -e .. -e ../warp_optix/
+pip install -e ..
 ```
 
 Then run individual examples, e.g.
@@ -105,7 +105,7 @@ renderer's glTF-style PBR materials. Install OpenUSD alongside the existing
 path-tracing image dependencies:
 
 ```bash
-pip install -e .. -e "../warp_optix[pathtracing,usd]"
+pip install -e "..[pathtracing,usd]"
 python example_warp_optix_usd_pathtracing.py \
   "D:\Sample_Scenes_NVD@10013\Samples\Marbles\Marbles_Assets.usd"
 ```

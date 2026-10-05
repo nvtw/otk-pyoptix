@@ -11,7 +11,6 @@ from types import ModuleType, SimpleNamespace
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[1]))
 
 import warp as wp  # noqa: E402
 from warp_optix._runtime import runtime  # noqa: E402

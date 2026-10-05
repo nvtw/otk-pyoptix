@@ -23,6 +23,7 @@ def _renderer(monkeypatch, mode, *, dlss_available=False):
     renderer.optix_upscale = False
     renderer._denoiser_explicit = True
     renderer._ctx = object()
+    renderer._context_owner = object()
     renderer._optix = object()
     renderer._render_stream = object()
     renderer._optix_denoiser = None
@@ -112,19 +113,11 @@ def test_failed_switch_restores_previous_backend(monkeypatch):
 
 
 def _gpu_context():
-    from warp_optix._runtime.runtime import create_optix_context
-
-    import optix
-
+    from warp_optix import Context
     wp.init()
     if not wp.is_cuda_available():
-        pytest.skip("CUDA device unavailable")
-    if not hasattr(optix, "DENOISER_MODEL_KIND_TEMPORAL_UPSCALE2X"):
-        pytest.skip("Rebuild PyOptiX with temporal/upscaling denoiser bindings")
-    return create_optix_context(
-        optix, wp.get_device("cuda").context, enable_validation=True
-    )
-
+        pytest.skip("CUDA unavailable")
+    return Context("cuda", log_level=1), None
 
 @pytest.mark.parametrize("upscale", [False, True])
 def test_optix_gpu_denoises_and_resets_history(upscale):
@@ -155,12 +148,12 @@ def test_optix_gpu_denoises_and_resets_history(upscale):
         np.testing.assert_allclose(reset, first, rtol=1e-5, atol=1e-5)
     finally:
         denoiser.close()
-        context.destroy()
+        context.close()
 
 
 def test_renderer_gpu_switch_resize_and_history():
     context, _logger = _gpu_context()
-    context.destroy()
+    context.close()
     api = PathTracerAPI(
         width=64, height=48, denoiser="optix", optix_upscale=True, enable_set=False
     )
@@ -194,10 +187,10 @@ def test_renderer_gpu_switch_resize_and_history():
 
 
 def test_renderer_gpu_dlss_quality_survives_backend_switch():
-    import optix
+    from warp_optix import native as optix
 
     context, _logger = _gpu_context()
-    context.destroy()
+    context.close()
     if not optix.dlss_rr_available():
         pytest.skip("DLSS RR unavailable")
     api = PathTracerAPI(
@@ -231,10 +224,10 @@ def test_renderer_gpu_dlss_quality_survives_backend_switch():
 
 
 def test_dlss_gpu_frame_is_ordered_when_called_from_another_stream():
-    import optix
+    from warp_optix import native as optix
 
     context, _logger = _gpu_context()
-    context.destroy()
+    context.close()
     if not optix.dlss_rr_available():
         pytest.skip("DLSS RR unavailable")
     def first_frame(caller):
@@ -266,7 +259,7 @@ def test_dlss_gpu_frame_is_ordered_when_called_from_another_stream():
 @pytest.mark.parametrize("cuda_graphs", [False, True])
 def test_optix_gpu_frames_and_camera_advance(cuda_graphs):
     context, _logger = _gpu_context()
-    context.destroy()
+    context.close()
     api = PathTracerAPI(
         width=96,
         height=64,

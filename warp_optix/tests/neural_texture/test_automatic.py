@@ -158,7 +158,7 @@ def test_evaluator_destroys_context_even_on_initialization_failure(monkeypatch, 
     destroyed = []
 
     class Context:
-        def destroy(self):
+        def close(self):
             destroyed.append(True)
 
     def initialize(self, image, pixels):

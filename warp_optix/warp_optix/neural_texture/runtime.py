@@ -81,6 +81,25 @@ def _description(optix, n, k, element_type, layout, offset, size):
 def upload_asset(
     asset: NeuralTextureAsset,
     context,
+    *,
+    stream: wp.Stream | None = None,
+    matrix_element_type: str = "fp8_e4m3",
+) -> NeuralTextureRuntime:
+    """Upload using an owned warp_optix.Context and an optional Warp stream."""
+    from warp_optix._api import Context
+
+    if not isinstance(context, Context):
+        raise TypeError("context must be a warp_optix.Context")
+    stream = context._stream(stream)
+    with wp.ScopedDevice(context.device):
+        return _upload_asset(asset, context.native_handle, context._backend,
+                             device=context.device, stream=stream.cuda_stream,
+                             matrix_element_type=matrix_element_type)
+
+
+def _upload_asset(
+    asset: NeuralTextureAsset,
+    context,
     optix,
     *,
     device: str = "cuda:0",

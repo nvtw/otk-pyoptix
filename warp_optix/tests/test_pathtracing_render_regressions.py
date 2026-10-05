@@ -6,6 +6,8 @@ import pytest
 import warp as wp
 
 import warp_optix as woptix
+from warp_optix._runtime import runtime as _runtime
+from warp_optix._runtime.hit_kernels import HitKernel as _NativeHitKernel
 from warp_optix.pathtracing import PathTracerAPI
 
 
@@ -14,7 +16,7 @@ def _new_gpu_api(width=64, height=48):
         wp.init()
         if not wp.is_cuda_available():
             pytest.skip("CUDA device unavailable")
-        woptix.require_optix()
+        _runtime.require_optix()
     except Exception as error:
         pytest.skip(f"OptiX/Warp unavailable: {error}")
 

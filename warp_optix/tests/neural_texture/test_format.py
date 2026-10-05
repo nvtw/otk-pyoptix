@@ -12,7 +12,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[2]))
 
 from warp_optix.neural_texture import (  # noqa: E402
     NetworkLayer,
@@ -138,7 +137,7 @@ def test_asset_rejects_extra_layers_before_payload_reads(tmp_path, monkeypatch):
         load_asset(path)
 
 
-def test_runtime_package_has_no_warp_nn_dependency():
+def test_runtime_package_has_no_warp_nn_dependency(tmp_path):
     code = """
 import importlib.abc, sys
 class BlockWarpNN(importlib.abc.MetaPathFinder):
@@ -151,7 +150,7 @@ import warp_optix.neural_texture
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=Path(__file__).parents[2],
+        cwd=tmp_path,
         text=True,
         capture_output=True,
         check=False,

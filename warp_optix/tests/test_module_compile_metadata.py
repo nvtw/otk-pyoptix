@@ -37,7 +37,7 @@ PARAMS_PTX = """
 
 
 def _context():
-    import optix
+    from warp_optix import native as optix
 
     wp.init()
     if not wp.is_cuda_available():
