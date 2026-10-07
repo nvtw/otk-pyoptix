@@ -1,0 +1,49 @@
+# Maintaining the PyOptiX dependency
+
+`pyproject.toml` pins `pyoptix==9.1.0`. PyOptiX owns the standard native types,
+contexts, geometry, pipelines, launches, and denoisers. We no longer build or
+merge a complete copy of its bindings.
+
+CMake reads that exact pin to select the OptiX header tag and checks the actual
+`OPTIX_VERSION` in `optix.h` before compiling, including when a local SDK is
+supplied through `FETCHCONTENT_SOURCE_DIR_OPTIX_HEADERS`. A compiler assertion
+also protects the 9.1.0 wrapper bridge against unexpected include paths or a
+pin change without updating the bridge. At import, the versions compiled into
+PyOptiX (`optix.version()`) and our extension (`_ext.optix_version()`) must both
+be 9.1.0. Mismatches raise `ImportError` before upstream types are modified.
+An isolated build does not inspect the user's installed PyOptiX binary; the
+import check catches dependency binaries built with different headers.
+
+`src/extension.cpp` registers only additional cooperative-vector and DLSS types
+and operations. `_backend.py` composes these with the dependency and repairs
+two upstream 9.1.0 bugs: ignored module compile metadata and a missing module
+in continuation-only callable descriptors. Temporal denoiser properties are
+added to the existing upstream types, so upstream functions accept them.
+Importing this package leaves `sys.modules["optix"]` pointing to real PyOptiX.
+
+The dependency does not expose native handles or a C interface. Until upstream
+provides one, `src/pyoptix_compat.h` retains four upstream wrapper definitions
+for cross-module pybind11 casts. These are private ABI, not a general plugin
+interface. The package checks the dependency version and the extension checks
+registered type identities and sizes before accessing objects. Different
+pybind11 major versions or incompatible C++ ABIs fail with an import error.
+Current source builds use pybind11 3.x. A public borrowed-handle/capsule API
+upstream would allow the private wrapper bridge to be removed.
+
+When updating PyOptiX:
+
+1. Compare those four wrapper definitions with the released dependency and
+   align the pinned version, OptiX headers, and supported build ABI.
+2. Remove supplemental operations or repairs that upstream now provides.
+3. Run `python -m pytest warp_optix/tests`, build both DLSS variants, and test
+   clean wheel and editable installs.
+4. Verify both import orders, upstream type identity, module metadata,
+   continuation callables, temporal denoising, cooperative-vector conversion,
+   and a DLSS frame on a supported GPU.
+5. Inspect wheels: `warp_optix/_ext` is expected; `warp_optix/_bindings`,
+   `optix/_optix`, and a top-level replacement `optix` package are not.
+
+The inherited PyOptiX example and test trees have been removed. Runnable samples
+live in `examples_warp/`; dependency and supplemental-binding regressions live
+in `warp_optix/tests`. Licenses for extracted binding code and packaged SDK
+headers are retained.

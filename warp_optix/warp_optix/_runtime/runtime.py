@@ -34,7 +34,7 @@ def require_optix():
         optix = get_backend()
     except ImportError as e:
         raise RuntimeError(
-            "Install the bundled warp-optix package: pip install ."
+            "Install warp-optix and its PyOptiX dependency: pip install ."
         ) from e
     return optix
 

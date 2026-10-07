@@ -1,4 +1,7 @@
-import optix
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from warp_optix import native as optix
 import pytest
 
 

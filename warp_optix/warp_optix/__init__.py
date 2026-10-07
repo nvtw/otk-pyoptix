@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Warp ray tracing with a privately bundled OptiX backend."""
+"""Warp ray tracing using PyOptiX and supplemental native bindings."""
 
 from ._addon import register_with_warp as _register_with_warp
 

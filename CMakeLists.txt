@@ -25,15 +25,27 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 #------------------------------------------------------------------------------
 
 include(FetchContent)
+include(CheckOptixVersion)
+
+# Use the dependency pin as the SDK version for fetching and validation.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" _project_metadata)
+string(REGEX MATCH "\"pyoptix==([0-9]+\\.[0-9]+\\.[0-9]+)\""
+       _pyoptix_requirement "${_project_metadata}")
+if(NOT _pyoptix_requirement)
+  message(FATAL_ERROR "warp-optix requires an exact pyoptix SDK version pin in pyproject.toml")
+endif()
+set(WARP_OPTIX_OPTIX_VERSION "${CMAKE_MATCH_1}")
 
 message(STATUS "Fetching OptiX headers from NVIDIA/optix-dev...")
 FetchContent_Declare(
     optix_headers
     GIT_REPOSITORY https://github.com/NVIDIA/optix-dev
-    GIT_TAG        v9.1.0
+    GIT_TAG        v${WARP_OPTIX_OPTIX_VERSION}
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(optix_headers)
+warp_optix_check_optix_version("${optix_headers_SOURCE_DIR}/include/optix.h"
+                              "${WARP_OPTIX_OPTIX_VERSION}")
 
 # Create OptiX::OptiX interface target using fetched headers
 add_library(OptiX::OptiX INTERFACE IMPORTED)
@@ -68,9 +80,13 @@ endif()
 # Main build
 #------------------------------------------------------------------------------
 
-python_add_library(_optix MODULE src/main.cpp WITH_SOABI)
+python_add_library(_ext MODULE src/extension.cpp WITH_SOABI)
+set_target_properties(_ext PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON
+)
 
-target_link_libraries(_optix PRIVATE
+target_link_libraries(_ext PRIVATE
     OptiX::OptiX
     CUDA::cuda_driver
     CUDA::cudart
@@ -78,41 +94,29 @@ target_link_libraries(_optix PRIVATE
 )
 
 if(PYOPTIX_ENABLE_DLSS)
-  target_compile_definitions(_optix PRIVATE PYOPTIX_ENABLE_DLSS=1)
-  target_link_libraries(_optix PRIVATE DLSS::DLSS)
-  dlss_setup_runtime_dependencies(_optix)
+  target_compile_definitions(_ext PRIVATE PYOPTIX_ENABLE_DLSS=1)
+  target_link_libraries(_ext PRIVATE DLSS::DLSS)
+  dlss_setup_runtime_dependencies(_ext)
 endif()
 
-target_compile_features(_optix PRIVATE cxx_std_17)
+target_compile_features(_ext PRIVATE cxx_std_17)
 
-# src/main.cpp contains the complete pybind11 binding surface in one
-# translation unit. Recent pybind11/MSVC combinations can exceed COFF's
-# default section count, especially for Python 3.13 builds.
-if(MSVC)
-  target_compile_options(_optix PRIVATE /bigobj)
-endif()
-
-target_compile_definitions(_optix PRIVATE
-    VERSION_INFO=9.1.0
-)
-
-# Preserve upstream source paths; only the installed namespace changes.
-set(PYOPTIX_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}/warp_optix/_bindings")
-install(TARGETS _optix DESTINATION ${PYOPTIX_INSTALL_DIR})
-install(FILES src/optix/__init__.py src/optix/_dlss_stub.py
-        DESTINATION ${PYOPTIX_INSTALL_DIR})
+# The dependency owns optix._optix. Install only our supplemental extension,
+# shader headers, and optional DLSS runtime under warp_optix.
+set(WARP_OPTIX_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}/warp_optix")
+install(TARGETS _ext DESTINATION ${WARP_OPTIX_INSTALL_DIR})
 install(DIRECTORY "${optix_headers_SOURCE_DIR}/include/"
-        DESTINATION ${PYOPTIX_INSTALL_DIR}/include)
+        DESTINATION ${WARP_OPTIX_INSTALL_DIR}/include)
 
 if(PYOPTIX_ENABLE_DLSS AND (DLSS_RUNTIME_LIBRARY_DEBUG OR DLSS_RUNTIME_LIBRARY_RELEASE))
   if(NOT EXISTS "${DLSS_LICENSE_FILE}")
     message(FATAL_ERROR "DLSS runtime packaging requires the SDK LICENSE.txt in DLSS_ROOT")
   endif()
-  install(FILES "${DLSS_LICENSE_FILE}" DESTINATION ${PYOPTIX_INSTALL_DIR}
+  install(FILES "${DLSS_LICENSE_FILE}" DESTINATION ${WARP_OPTIX_INSTALL_DIR}
           RENAME DLSS_LICENSE.txt)
   install(FILES
     "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,${DLSS_RUNTIME_LIBRARY_DEBUG},${DLSS_RUNTIME_LIBRARY_RELEASE}>"
-    DESTINATION ${PYOPTIX_INSTALL_DIR}
+    DESTINATION ${WARP_OPTIX_INSTALL_DIR}
     RENAME "$<IF:$<PLATFORM_ID:Windows>,nvngx_dlssd.dll,libnvidia-ngx-dlssd.so>"
   )
 endif()

@@ -1,6 +1,6 @@
 # warp_optix
 
-Warp ray tracing with a privately bundled OptiX backend.
+Warp ray tracing using PyOptiX and a small supplemental native extension.
 
 This package replaces the `warp.optix` Python module that used to live inside
 the `warp` source tree. It registers itself with warp on import:
@@ -25,7 +25,7 @@ def raygen_program(params: LaunchParams):
 
 ## Install
 
-Install the unified package from the repository root:
+Install from the repository root; PyOptiX is installed as a dependency:
 
 ```bash
 pip install -e .
@@ -301,7 +301,8 @@ filtered = denoiser.apply(DenoiserInputs(color, normal, albedo, motion), reset=T
 denoiser.close()
 ```
 
-These models and guide-layer bindings are included in the unified wheel.
+The supplemental extension adds the temporal models and guide-layer fields
+to the PyOptiX dependency's denoiser bindings.
 The denoiser takes an owned `warp_optix.Context`.
 
 ### Interactive viewer features

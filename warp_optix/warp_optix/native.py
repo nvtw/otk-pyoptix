@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Advanced, version-coupled access to the bundled OptiX binding API.
+"""Advanced access to PyOptiX plus warp-optix's supplemental bindings.
 
 Native objects use the binding API's explicit destroy/deinit conventions.
 Handles borrowed from the owned API must not be destroyed by the caller.

@@ -1,5 +1,0 @@
-pytest
-cupy
-numpy
-Pillow
-cuda-python
