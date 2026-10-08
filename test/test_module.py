@@ -147,7 +147,7 @@ class TestModule:
             ctx = optix.deviceContextCreate(0, optix.DeviceContextOptions())
             module_opts   = optix.ModuleCompileOptions()
             pipeline_opts = optix.PipelineCompileOptions()
-            pipeline_opts.numPayloadValues = 3
+            pipeline_opts.numPayloadValues = 0
 
             payload_sem = ( 
                 optix.PAYLOAD_SEMANTICS_TRACE_CALLER_READ_WRITE | 
