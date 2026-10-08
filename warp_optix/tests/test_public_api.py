@@ -57,7 +57,8 @@ def test_import_boundary_in_fresh_process(tmp_path):
 import importlib.util, sys
 import warp_optix as wo
 import warp as wp
-assert 'optix' not in sys.modules
+import optix
+assert wo.Context.__module__ == 'warp_optix._api'
 assert 'warp_nn' not in sys.modules
 assert 'pyglet' not in sys.modules
 assert 'imgui_bundle' not in sys.modules
@@ -67,6 +68,9 @@ assert not hasattr(wo, 'create_context')
 assert wo.__version__ == '0.2.0'
 from warp_optix import native
 assert native.version() == (9, 1, 0)
+assert native.DeviceContext is optix.DeviceContext
+assert native.Module is optix.Module
+assert 'warp_optix._bindings' not in sys.modules
 """,
         ],
         cwd=tmp_path,

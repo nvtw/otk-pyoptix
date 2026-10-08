@@ -41,8 +41,12 @@ completes.
 Path-tracing and viewer APIs are preserved. `OptixDenoiser` now accepts an
 owned Context. `native` is version-coupled advanced access; borrowed handles
 must not be destroyed, and native allocations require native lifetime management.
-Loading standalone PyOptiX's native extension alongside the bundled extension
-is unsupported.
+Standard native objects now come from the `pyoptix==9.1.0` dependency. A separate
+`warp_optix._ext` extension supplies DLSS and missing binding operations, without
+registering duplicate standard OptiX types. Importing `optix` and `warp_optix`
+together is supported. The previous `warp_optix._bindings` backend is removed.
+PyOptiX's wrapper types are augmented when `warp_optix` is imported; use
+`warp_optix.native` for the complete API, including supplemental enum values.
 
 ## CUDA graph limitation
 

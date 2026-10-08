@@ -1,10 +1,6 @@
 __pycache__/
-examples/my.png
 env/
 build/
 dist/
 *.egg-info/
 third_party/
-optix/build/
-optix/build-local/
-optix/optix/

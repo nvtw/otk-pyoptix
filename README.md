@@ -1,9 +1,10 @@
 # warp-optix
 
-Warp ray tracing with bundled OptiX 9.1 bindings and DLSS Ray Reconstruction.
+Warp ray tracing with PyOptiX 9.1 and DLSS Ray Reconstruction.
 Write ray-generation, hit, miss, and callable programs as Warp kernels, or use
-the included path tracer. Applications import `warp_optix`; the native backend
-is bundled privately and requires no separate PyOptiX installation.
+the included path tracer. Applications import `warp_optix`. Installation brings
+in `pyoptix==9.1.0` for the standard OptiX bindings and builds a small extension
+for DLSS, cooperative vectors, and missing binding fields and fixes.
 
 ## Installation
 
@@ -17,9 +18,17 @@ pip install .
 pip install -e ".[pathtracing,ui,usd]"
 ```
 
-This builds one platform wheel containing the Python package and native
-extension. Extras are `pathtracing`, `ui`, `usd`, `recording`, and `training`.
+This builds a platform wheel containing the Python package and supplemental
+extension. PyOptiX is a separate dependency, installed automatically. Extras
+are `pathtracing`, `ui`, `usd`, `recording`, and `training`.
 The nested Python package is no longer an independent build entry point.
+
+For a repository-local uv environment:
+
+```bash
+uv sync --python 3.12 --no-default-groups --extra pathtracing --extra ui
+uv run --no-sync python examples_warp/example_warp_optix_pathtraced_hairball.py
+```
 
 ## Public API
 
@@ -75,30 +84,43 @@ print(native.dlss_support_available())
 print(native.dlss_rr_available())
 ```
 
-`native` exposes the bundled binding API and follows its OptiX version. Native
+`native` exposes PyOptiX's API plus the supplemental bindings. Native
 objects use explicit destruction; `Context.native_handle` and
 `Pipeline.native_handle` are borrowed and must not be destroyed by callers.
-Mixing standalone PyOptiX objects with these bindings, or loading both native
-extensions in one process, is unsupported. There is no production `optix` alias.
+Standard objects are the dependency's actual `optix` types; both packages can
+be imported in either order. The supplement adds methods and fields to those
+types and repairs module-metadata and continuation-callable handling. Keep
+objects on their owning OptiX/CUDA context and obey their lifetimes. No second
+copy of the standard bindings or replacement `optix` module is installed.
+
+PyOptiX 9.1.0 has no public native-handle API. The extension therefore uses a
+small, version-pinned pybind11 bridge and checks shared type identities and
+sizes before accessing them. Builds reject OptiX headers that differ from the
+PyOptiX dependency pin; imports reject mismatched compiled SDK versions before
+attaching bindings. Both extensions must use a compatible pybind11
+major version and C++ ABI. If the import reports an ABI mismatch, rebuild both
+packages with pybind11 3.x. See [dependency maintenance](docs/pyoptix-dependency.md).
 
 The distribution version is 0.2.0; the binding version remains 9.1.0.
 
-## Tests and upstream maintenance
+## Tests and dependency maintenance
 
-Install feature extras, pytest, and the appropriate CuPy wheel. Run the suites
-in separate processes:
+Install feature extras and pytest, then run the test suite:
 
 ```powershell
 python -m pytest warp_optix/tests
-python -m pytest test
 ```
 
-The second command runs upstream binding tests with a test-only import adapter.
-The backend derives from [NVIDIA/otk-pyoptix](https://github.com/NVIDIA/otk-pyoptix).
-Its source paths remain stable for upstream merges; see
-[maintenance instructions](docs/upstream.md). Binding sources retain their BSD
-license; Warp integration sources use Apache 2.0. OptiX and DLSS retain their
+The suite includes regression coverage for the dependency and supplemental
+bindings. The dependency is maintained in
+[NVIDIA/otk-pyoptix](https://github.com/NVIDIA/otk-pyoptix); this project no longer
+builds a copy of its complete native backend. See
+[maintenance instructions](docs/pyoptix-dependency.md). Extracted binding additions
+retain their BSD license; Warp integration sources use Apache 2.0. OptiX and DLSS retain their
 NVIDIA license terms. License texts accompany the distribution.
+
+Runnable samples are in `examples_warp/`. The inherited PyOptiX examples,
+upstream test tree, and legacy requirements file have been removed.
 
 ## CUDA graph limitation
 

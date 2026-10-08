@@ -659,7 +659,7 @@ class PathTracingViewer:
 
         if optix is None:
             logger.error(
-                "Could not load the bundled bindings. Reinstall warp-optix."
+                "Could not load PyOptiX or the supplemental extension. Reinstall warp-optix."
             )
             return False
 
