@@ -58,13 +58,47 @@ approach. Local modifications translate shader operations to Python/Warp,
 replace Vulkan execution with OptiX/CUDA, and extend scene/material handling.
 The adaptation used AI assistance.
 
-Verified file-level correspondences under warp_optix/warp_optix/pathtracing:
+File-level source mapping under warp_optix/warp_optix/pathtracing:
   dlss_helper.py: dlss_rr/shaders/dlss_helper.glsl (EnvironmentTerm_Rtg).
   ray_common.py: dlss_rr/shaders/ray_common.glsl (mirror matrix and reinhardMax).
+  pathtracing_warp_kernels.py: dlss_rr/shaders/primary.rgen, primary.rchit,
+    primary.rmiss, secondary.rahit, secondary.rchit, secondary.rmiss, and
+    get_hit.glsl (path tracing, hit processing, and DLSS guide buffers).
+  optix_programs.py: intermediate optix_programs.h; primary.rgen motion vectors.
+  viewer_rt_common.py: intermediate viewer_rt_common.h (matrix and environment
+    direction helpers).
+  tonemap.py: intermediate debug_visualize.h (debug buffer visualization).
 Original upstream notice text is in licenses/vk_denoise_dlssrr-NOTICE.txt.
-Comparison reference: f8113a84fa952278bb1286e7899f81b7afe8f41e.
-The original port revision and complete transitive-source attribution are
-unverified; author confirmation and nSpect/Code Insight review are pending.
+Sample comparison reference: f8113a84fa952278bb1286e7899f81b7afe8f41e.
+Intermediate CUDA/OptiX sources were located in Warp development history at
+commit 410d8d71b634e731533a807cb1757066ef2bebe6, under
+warp/examples/core/pyoptix/pathtracing/cpp. The Python adaptation was imported
+into this repository at aa1c11f0ea6cab9b2a34c428bbd7a1bebc4ad21d.
+These are comparison and import references; the original upstream revision
+used to start the port was not recorded.
+
+nvpro_core adaptations used by the path tracer
+---------------------------------------------
+https://github.com/nvpro-samples/nvpro_core
+License: Apache-2.0; full terms are in LICENSE-APACHE.txt.
+Original file-specific NVIDIA copyright and license notices are reproduced
+in licenses/nvpro_core-NOTICE.txt and identified in adapted source headers.
+Comparison reference: bc19d6ac3ef62938d0ea0e099735878457ce1b6e.
+Source paths below are relative to nvpro_core; local files are under
+warp_optix/warp_optix/pathtracing:
+  func_common.py: nvvkhl/shaders/func.h (vector, basis, and sampling helpers).
+  environment_map.py: nvvkhl/hdr_env.cpp (environment alias-table construction).
+  materials.py: nvvkhl/shaders/dh_scn_desc.h (glTF material/texture structures).
+  pathtracing_warp_kernels.py: nvvkhl/shaders/dh_sky.h; bsdf_functions.h;
+    bsdf_structs.h; ggx.h; pbr_mat_eval.h; pbr_mat_struct.h; random.h;
+    ray_util.h; hdr_env_sampling.h; dh_scn_desc.h; vertex_accessor.h; func.h.
+    These provide sky, BSDF, material, random sampling, and geometry helpers,
+    translated through the intermediate sky_common.h, pbr_common.h,
+    mat_eval_common.h, scene_common.h, and func_common.h.
+  tonemap.py: nvvkhl/shaders/dh_tonemap.h (color grading and sRGB conversion).
+    Highlight compression uses RGB / (1 + max(RGB)), followed by sRGB encoding.
+Modifications translate C++/GLSL operations to Python/Warp and adapt buffer
+layouts, GPU access, and scene/material handling.
 
 FFmpeg
 ------

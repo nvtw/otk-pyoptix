@@ -1,5 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION
+# SPDX-FileCopyrightText: Copyright (c) 2019-2025 NVIDIA CORPORATION
+# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION
+# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION
+# SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION
 # SPDX-License-Identifier: Apache-2.0
+#
+# Modified Python/Warp adaptation of vk_denoise_dlssrr ray-generation, hit,
+# miss, and DLSS guide-buffer shaders, through an intermediate CUDA/OptiX port:
+# https://github.com/nvpro-samples/vk_denoise_dlssrr/tree/f8113a84fa952278bb1286e7899f81b7afe8f41e/dlss_rr/shaders
+# Sky, BSDF, material evaluation, and sampling helpers derive from nvpro_core:
+# https://github.com/nvpro-samples/nvpro_core/blob/bc19d6ac3ef62938d0ea0e099735878457ce1b6e/nvvkhl/shaders
+# See the source-to-file mapping in THIRD_PARTY_NOTICES.txt.
+# Original notices: licenses/vk_denoise_dlssrr-NOTICE.txt and
+# licenses/nvpro_core-NOTICE.txt.
+
 
 from __future__ import annotations
 
