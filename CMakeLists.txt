@@ -59,13 +59,14 @@ if(NOT TARGET CUDA::cuda_driver)
   find_package(CUDAToolkit 10.0 REQUIRED)
 endif()
 
-# DLSS Ray Reconstruction is enabled by default. The environment-variable
-# fallbacks keep the previous setup.py interface working after the migration to
-# scikit-build-core; CMake cache arguments still take precedence.
+# DLSS Ray Reconstruction bindings and runtime are required package components.
 if(NOT DEFINED PYOPTIX_ENABLE_DLSS AND DEFINED ENV{PYOPTIX_ENABLE_DLSS})
   set(PYOPTIX_ENABLE_DLSS "$ENV{PYOPTIX_ENABLE_DLSS}")
 endif()
-option(PYOPTIX_ENABLE_DLSS "Enable DLSS Ray Reconstruction bindings" ON)
+if(DEFINED PYOPTIX_ENABLE_DLSS AND NOT PYOPTIX_ENABLE_DLSS)
+  message(FATAL_ERROR "warp-optix requires DLSS; set PYOPTIX_ENABLE_DLSS=ON or omit the setting")
+endif()
+set(PYOPTIX_ENABLE_DLSS ON)
 
 foreach(_dlss_setting DLSS_ROOT PYOPTIX_DLSS_VERSION PYOPTIX_AUTO_DOWNLOAD_DLSS)
   if(NOT DEFINED ${_dlss_setting} AND DEFINED ENV{${_dlss_setting}})
@@ -75,6 +76,9 @@ endforeach()
 
 if(PYOPTIX_ENABLE_DLSS)
   find_package(DLSS REQUIRED)
+  if(NOT EXISTS "${DLSS_RUNTIME_LIBRARY_RELEASE}")
+    message(FATAL_ERROR "warp-optix packaging requires the DLSS Release runtime in DLSS_ROOT")
+  endif()
   if(NOT EXISTS "${DLSS_LICENSE_FILE}")
     message(FATAL_ERROR "DLSS builds require the SDK LICENSE.txt")
   endif()
@@ -116,7 +120,7 @@ endif()
 target_compile_features(_ext PRIVATE cxx_std_17)
 
 # The dependency owns optix._optix. Install only our supplemental extension,
-# shader headers, and optional DLSS runtime under warp_optix.
+# shader headers, and DLSS runtime under warp_optix.
 set(WARP_OPTIX_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}/warp_optix")
 install(TARGETS _ext DESTINATION ${WARP_OPTIX_INSTALL_DIR})
 # Warp compiles OptiX kernels at runtime, so wheels need the unmodified SDK
@@ -133,7 +137,7 @@ if(PYOPTIX_ENABLE_DLSS AND (DLSS_RUNTIME_LIBRARY_DEBUG OR DLSS_RUNTIME_LIBRARY_R
   install(FILES "${DLSS_LICENSE_FILE}" DESTINATION ${WARP_OPTIX_INSTALL_DIR}
           RENAME DLSS_LICENSE.txt)
   install(FILES
-    "$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,${DLSS_RUNTIME_LIBRARY_DEBUG},${DLSS_RUNTIME_LIBRARY_RELEASE}>"
+    "${DLSS_RUNTIME_LIBRARY_RELEASE}"
     DESTINATION ${WARP_OPTIX_INSTALL_DIR}
     RENAME "$<IF:$<PLATFORM_ID:Windows>,nvngx_dlssd.dll,libnvidia-ngx-dlssd.so>"
   )

@@ -28,7 +28,6 @@ pip install -e ".[pathtracing,ui,usd]"
 This builds a platform wheel containing the Python package and supplemental
 extension. PyOptiX is a separate dependency, installed automatically. Extras
 are `pathtracing`, `ui`, `usd`, `recording`, and `training`.
-The nested Python package is no longer an independent build entry point.
 
 For a repository-local uv environment:
 
@@ -70,22 +69,21 @@ and runnable [examples](examples_warp/README.md).
 
 ## DLSS builds
 
-DLSS is enabled by default and its runtime library is included in the wheel.
+The package includes DLSS bindings and the Release runtime library.
+Applications can enable DLSS Ray Reconstruction on supported hardware.
 That runtime is covered by the NVIDIA RTX SDKs license in `DLSS_LICENSE.txt`,
 identified in package metadata as `LicenseRef-NVIDIA-RTX-SDK`. It is not
 licensed under Apache 2.0. Public distribution remains subject to the release
 review and written SDK-owner approval.
-Build alternative variants into separate directories:
+Build the package:
 
 ```powershell
-uv build --wheel --out-dir dist/dlss
-uv build --wheel --out-dir dist/no-dlss --config-setting cmake.define.PYOPTIX_ENABLE_DLSS=OFF --config-setting build-dir=build/no-dlss
+uv build --wheel
 ```
 
-Install only one variant at a time. The disabled variant retains harmless
-DLSS stubs. `DLSS_ROOT` selects a local SDK; `PYOPTIX_AUTO_DOWNLOAD_DLSS=OFF`
-disables downloading. Existing `CMAKE_ARGS` and DLSS version/hash overrides
-remain available. On Windows, `CUDA_PATH` or `CUDA_BIN_DIR` helps locate CUDA DLLs.
+`DLSS_ROOT` selects a local SDK; `PYOPTIX_AUTO_DOWNLOAD_DLSS=OFF`
+disables downloading. `CMAKE_ARGS` and DLSS version/hash overrides configure
+the build. On Windows, `CUDA_PATH` or `CUDA_BIN_DIR` helps locate CUDA DLLs.
 
 ## Advanced native interface
 
@@ -101,8 +99,7 @@ objects use explicit destruction; `Context.native_handle` and
 Standard objects are the dependency's actual `optix` types; both packages can
 be imported in either order. The supplement adds methods and fields to those
 types and repairs module-metadata and continuation-callable handling. Keep
-objects on their owning OptiX/CUDA context and obey their lifetimes. No second
-copy of the standard bindings or replacement `optix` module is installed.
+objects on their owning OptiX/CUDA context and obey their lifetimes.
 
 PyOptiX 9.1.0 has no public native-handle API. The extension therefore uses a
 small, version-pinned pybind11 bridge and checks shared type identities and
@@ -112,7 +109,7 @@ attaching bindings. Both extensions must use a compatible pybind11
 major version and C++ ABI. If the import reports an ABI mismatch, rebuild both
 packages with pybind11 3.x. See [dependency maintenance](docs/pyoptix-dependency.md).
 
-The distribution version is 0.2.0; the binding version remains 9.1.0.
+The distribution version is 0.2.0; the binding version is 9.1.0.
 
 ## Tests and dependency maintenance
 
@@ -124,20 +121,18 @@ python -m pytest warp_optix/tests
 
 The suite includes regression coverage for the dependency and supplemental
 bindings. The dependency is maintained in
-[NVIDIA/otk-pyoptix](https://github.com/NVIDIA/otk-pyoptix); this project no longer
-builds a copy of its complete native backend. See
+[NVIDIA/otk-pyoptix](https://github.com/NVIDIA/otk-pyoptix). See
 [maintenance instructions](docs/pyoptix-dependency.md). Extracted binding additions
 retain their BSD license; Warp integration sources use Apache 2.0. OptiX and DLSS retain their
 NVIDIA license terms. License texts accompany the distribution.
 
-Runnable samples are in `examples_warp/`. The inherited PyOptiX examples,
-upstream test tree, and legacy requirements file have been removed.
+Runnable samples are in `examples_warp/`.
 
 ## Licenses and contributions
 
 See [third-party notices](THIRD_PARTY_NOTICES.txt) for component licenses and
-source provenance. `src/extension.cpp`, `src/pyoptix_compat.h`, and the inherited
-`CMakeLists.txt` retain BSD-3-Clause; NVIDIA-authored Warp integration uses
+source provenance. `src/extension.cpp`, `src/pyoptix_compat.h`, and
+`CMakeLists.txt` use BSD-3-Clause; NVIDIA-authored Warp integration uses
 Apache-2.0. The aggregate package metadata also identifies the OptiX and DLSS SDK terms.
 
 This project is currently not accepting contributions.
@@ -155,6 +150,6 @@ resource events during context destruction. `Pipeline.launch` rejects an
 active capture before submitting native work. Capture ordinary Warp work in
 graphs and submit OptiX launches between those graphs on the same stream.
 
-The renderer retains its `enable_cuda_graphs` argument for caller compatibility,
-but requests for OptiX capture use direct asynchronous launches with a logged
-explanation. DLSS and ordinary stream ordering remain supported.
+When `enable_cuda_graphs` is requested for OptiX rendering, the renderer uses
+direct asynchronous launches and logs an explanation. DLSS and ordinary
+stream ordering are supported.

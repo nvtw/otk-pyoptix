@@ -522,7 +522,7 @@ when direct registration is unavailable.
 ## Layout
 
 - `warp_optix/__init__.py` — public re-exports of the runtime API.
-- `warp_optix/_runtime/` — pyoptix-side runtime helpers (formerly `warp/_src/render/optix_*.py`).
+- `warp_optix/_runtime/` — runtime helpers for OptiX integration.
 - `warp_optix/_builtins.py` — OptiX `add_builtin(...)` registrations.
 - `warp_optix/_codegen.py` — `OptixKernelType` enum and codegen entry-point specs.
 - `warp_optix/_compat.py` — vanilla Warp private-API fallback.
