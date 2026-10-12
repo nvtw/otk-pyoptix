@@ -138,7 +138,8 @@ source provenance. `src/extension.cpp`, `src/pyoptix_compat.h`, and the inherite
 Apache-2.0. The aggregate package metadata also identifies the DLSS SDK terms.
 
 This project is currently not accepting contributions.
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+We plan to accept outside contributions in the future. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for updates.
 
 Viewer recording invokes a user-installed FFmpeg executable. FFmpeg is not
 bundled; its applicable license depends on the user's FFmpeg build.
