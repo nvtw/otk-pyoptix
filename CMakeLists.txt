@@ -119,8 +119,12 @@ target_compile_features(_ext PRIVATE cxx_std_17)
 # shader headers, and optional DLSS runtime under warp_optix.
 set(WARP_OPTIX_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}/warp_optix")
 install(TARGETS _ext DESTINATION ${WARP_OPTIX_INSTALL_DIR})
-# OptiX SDK headers are build inputs only. Runtime shader compilation uses a
-# separately installed SDK selected with OPTIX_SDK_INCLUDE_DIR.
+# Warp compiles OptiX kernels at runtime, so wheels need the unmodified SDK
+# headers as well as the extension. These retain their separate SDK license.
+install(DIRECTORY "${optix_headers_SOURCE_DIR}/include/"
+        DESTINATION ${WARP_OPTIX_INSTALL_DIR}/include)
+install(FILES "${optix_headers_SOURCE_DIR}/LICENSE.txt"
+        DESTINATION ${WARP_OPTIX_INSTALL_DIR}/include RENAME OptiX_LICENSE.txt)
 
 if(PYOPTIX_ENABLE_DLSS AND (DLSS_RUNTIME_LIBRARY_DEBUG OR DLSS_RUNTIME_LIBRARY_RELEASE))
   if(NOT EXISTS "${DLSS_LICENSE_FILE}")

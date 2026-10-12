@@ -12,9 +12,12 @@ Build from the repository root with Python 3.10+, a CUDA Toolkit and a C++17
 compiler. GPU execution requires a compatible NVIDIA driver. OptiX headers and
 DLSS SDK 310.9.1 are fetched automatically.
 
-Runtime shader compilation also requires a separately installed OptiX SDK
-9.1.0. Set `OPTIX_SDK_INCLUDE_DIR` to that SDK's `include` directory (containing
-`optix.h` and `optix_device.h`). OptiX headers are not included in this wheel.
+The wheel includes unmodified OptiX SDK 9.1.0 headers under `warp_optix/include`
+for runtime kernel compilation, so a separate OptiX SDK installation is not
+required. The headers retain their NVIDIA SDK terms in `OptiX_LICENSE.txt`,
+identified in package metadata as `LicenseRef-NVIDIA-OptiX`. Public header
+redistribution remains subject to written confirmation from the OptiX owner
+and legal review.
 
 ```powershell
 pip install .
@@ -135,7 +138,7 @@ upstream test tree, and legacy requirements file have been removed.
 See [third-party notices](THIRD_PARTY_NOTICES.txt) for component licenses and
 source provenance. `src/extension.cpp`, `src/pyoptix_compat.h`, and the inherited
 `CMakeLists.txt` retain BSD-3-Clause; NVIDIA-authored Warp integration uses
-Apache-2.0. The aggregate package metadata also identifies the DLSS SDK terms.
+Apache-2.0. The aggregate package metadata also identifies the OptiX and DLSS SDK terms.
 
 This project is currently not accepting contributions.
 We plan to accept outside contributions in the future. See

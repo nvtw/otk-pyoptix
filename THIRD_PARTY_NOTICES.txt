@@ -7,10 +7,14 @@ Warp integration does not relicense SDK components or extracted BSD sources.
 OptiX
 -----
 NVIDIA OptiX SDK 9.1.0: https://github.com/NVIDIA/optix-dev/tree/v9.1.0
-Copyright NVIDIA Corporation. See OptiX_LICENSE.txt for the SDK terms.
-Headers are fetched as build inputs, but are not installed into the warp-optix
-wheel. Users install SDK headers separately for runtime shader compilation.
-The supplemental extension uses the SDK; retain the SDK license notice.
+Copyright NVIDIA Corporation. See OptiX_LICENSE.txt for the SDK terms,
+identified in package metadata as LicenseRef-NVIDIA-OptiX.
+Unmodified headers are fetched for building and bundled under warp_optix/include
+in both DLSS-enabled and DLSS-disabled wheels for runtime kernel compilation.
+Original header notices are preserved, with the upstream SDK license included
+alongside the headers. The headers remain under NVIDIA SDK terms, not Apache-2.0.
+Public redistribution of these source headers requires written confirmation
+from the OptiX owner and legal review; including notices is not that confirmation.
 
 DLSS
 ----

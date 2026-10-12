@@ -5,6 +5,7 @@
 
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
 from types import ModuleType
 
@@ -13,20 +14,37 @@ import pytest
 from warp_optix import _ext, native
 
 
-def test_optix_headers_require_separate_sdk(monkeypatch, tmp_path):
+def test_optix_headers_are_available_without_separate_sdk(monkeypatch):
     monkeypatch.delenv("OPTIX_SDK_INCLUDE_DIR", raising=False)
     monkeypatch.delenv("OPTIX_INCLUDE_DIR", raising=False)
-    with pytest.raises(FileNotFoundError, match="Install OptiX SDK 9.1.0 separately"):
+    include = Path(native.get_optix_include_dir())
+    assert (include / "optix.h").is_file()
+    assert (include / "optix_device.h").is_file()
+    assert (include / "OptiX_LICENSE.txt").is_file()
+    from warp_optix._addon import _addon_include_dirs
+    assert str(include) in _addon_include_dirs()
+
+
+def test_optix_headers_editable_install_fallback(monkeypatch, tmp_path):
+    backend = import_module("warp_optix._backend")
+    monkeypatch.setattr(backend, "_package_dir", tmp_path / "source")
+    monkeypatch.setattr(backend, "_get_package_dir", lambda: tmp_path / "installed")
+    include = tmp_path / "installed" / "include"
+    include.mkdir(parents=True)
+    (include / "optix.h").touch()
+    (include / "optix_device.h").touch()
+    assert Path(native.get_optix_include_dir()) == include
+
+
+def test_optix_headers_incomplete_package(monkeypatch, tmp_path):
+    backend = import_module("warp_optix._backend")
+    monkeypatch.setattr(backend, "_package_dir", tmp_path)
+    monkeypatch.setattr(backend, "_get_package_dir", lambda: tmp_path)
+    include = tmp_path / "include"
+    include.mkdir()
+    (include / "optix.h").touch()
+    with pytest.raises(FileNotFoundError, match="missing or incomplete; reinstall"):
         native.get_optix_include_dir()
-    monkeypatch.setenv("OPTIX_SDK_INCLUDE_DIR", str(tmp_path))
-    (tmp_path / "optix.h").touch()
-    with pytest.raises(FileNotFoundError, match="does not contain OptiX SDK headers"):
-        native.get_optix_include_dir()
-    (tmp_path / "optix_device.h").touch()
-    assert Path(native.get_optix_include_dir()) == tmp_path.resolve()
-    monkeypatch.delenv("OPTIX_SDK_INCLUDE_DIR")
-    monkeypatch.setenv("OPTIX_INCLUDE_DIR", str(tmp_path))
-    assert Path(native.get_optix_include_dir()) == tmp_path.resolve()
 
 
 @pytest.mark.parametrize("first", ["optix", "warp_optix"])

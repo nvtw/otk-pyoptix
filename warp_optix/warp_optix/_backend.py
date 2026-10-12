@@ -36,16 +36,13 @@ def _get_package_dir():
 
 
 def _get_optix_include_dir():
-    for name in ("OPTIX_SDK_INCLUDE_DIR", "OPTIX_INCLUDE_DIR"):
-        value = os.environ.get(name)
-        if value:
-            include = Path(value).expanduser().resolve()
-            if (include / "optix.h").is_file() and (include / "optix_device.h").is_file():
-                return str(include)
-            raise FileNotFoundError(f"{name} does not contain OptiX SDK headers: {include}")
+    # Editable installs keep SDK data alongside the installed native extension.
+    for root in (_package_dir, _get_package_dir()):
+        include = root / "include"
+        if (include / "optix.h").is_file() and (include / "optix_device.h").is_file():
+            return str(include)
     raise FileNotFoundError(
-        "Install OptiX SDK 9.1.0 separately and set OPTIX_SDK_INCLUDE_DIR to its include directory. "
-        "warp-optix does not distribute OptiX SDK headers."
+        "Packaged OptiX SDK headers are missing or incomplete; reinstall warp-optix."
     )
 
 
