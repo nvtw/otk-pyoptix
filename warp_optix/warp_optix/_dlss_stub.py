@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Harmless DLSS API surface for builds compiled without the DLSS SDK."""
 
 from dataclasses import dataclass

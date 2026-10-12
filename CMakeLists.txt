@@ -1,6 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
 # Use of this source code is governed by a BSD-style
-# license that can be found in the LICENSE file.
+# license that can be found in LICENSE.txt.
 
 cmake_minimum_required(VERSION 3.17...3.31)
 
@@ -74,6 +75,19 @@ endforeach()
 
 if(PYOPTIX_ENABLE_DLSS)
   find_package(DLSS REQUIRED)
+  if(NOT EXISTS "${DLSS_LICENSE_FILE}")
+    message(FATAL_ERROR "DLSS builds require the SDK LICENSE.txt")
+  endif()
+  # Keep the SDK used by the linker consistent with the terms in wheel metadata.
+  file(READ "${DLSS_LICENSE_FILE}" _dlss_sdk_license)
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/DLSS_LICENSE.txt" _dlss_packaged_license)
+  string(REPLACE "\r\n" "\n" _dlss_sdk_license "${_dlss_sdk_license}")
+  string(REPLACE "\r\n" "\n" _dlss_packaged_license "${_dlss_packaged_license}")
+  string(STRIP "${_dlss_sdk_license}" _dlss_sdk_license)
+  string(STRIP "${_dlss_packaged_license}" _dlss_packaged_license)
+  if(NOT _dlss_sdk_license STREQUAL _dlss_packaged_license)
+    message(FATAL_ERROR "DLSS SDK license differs from DLSS_LICENSE.txt; review and update the packaged terms")
+  endif()
 endif()
 
 #------------------------------------------------------------------------------
@@ -105,8 +119,8 @@ target_compile_features(_ext PRIVATE cxx_std_17)
 # shader headers, and optional DLSS runtime under warp_optix.
 set(WARP_OPTIX_INSTALL_DIR "${SKBUILD_PLATLIB_DIR}/warp_optix")
 install(TARGETS _ext DESTINATION ${WARP_OPTIX_INSTALL_DIR})
-install(DIRECTORY "${optix_headers_SOURCE_DIR}/include/"
-        DESTINATION ${WARP_OPTIX_INSTALL_DIR}/include)
+# OptiX SDK headers are build inputs only. Runtime shader compilation uses a
+# separately installed SDK selected with OPTIX_SDK_INCLUDE_DIR.
 
 if(PYOPTIX_ENABLE_DLSS AND (DLSS_RUNTIME_LIBRARY_DEBUG OR DLSS_RUNTIME_LIBRARY_RELEASE))
   if(NOT EXISTS "${DLSS_LICENSE_FILE}")

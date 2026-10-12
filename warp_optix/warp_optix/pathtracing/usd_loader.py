@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """OpenUSD scene loader for the path tracer.
 
 OpenUSD is imported lazily so USD remains an optional feature.  Geometry and

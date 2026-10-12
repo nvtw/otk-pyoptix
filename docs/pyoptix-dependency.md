@@ -45,5 +45,7 @@ When updating PyOptiX:
 
 The inherited PyOptiX example and test trees have been removed. Runnable samples
 live in `examples_warp/`; dependency and supplemental-binding regressions live
-in `warp_optix/tests`. Licenses for extracted binding code and packaged SDK
-headers are retained.
+in `warp_optix/tests`. Licenses for extracted binding code are retained.
+OptiX SDK headers are fetched for compilation but are not installed into our
+wheel. Runtime shader compilation requires a separate OptiX SDK 9.1.0 install
+and `OPTIX_SDK_INCLUDE_DIR` pointing to its `include` directory.

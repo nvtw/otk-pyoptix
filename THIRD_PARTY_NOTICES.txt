@@ -1,0 +1,71 @@
+warp-optix third-party notices
+=============================
+
+Licenses apply to their respective components. The Apache-2.0 license for
+Warp integration does not relicense SDK components or extracted BSD sources.
+
+OptiX
+-----
+NVIDIA OptiX SDK 9.1.0: https://github.com/NVIDIA/optix-dev/tree/v9.1.0
+Copyright NVIDIA Corporation. See OptiX_LICENSE.txt for the SDK terms.
+Headers are fetched as build inputs, but are not installed into the warp-optix
+wheel. Users install SDK headers separately for runtime shader compilation.
+The supplemental extension uses the SDK; retain the SDK license notice.
+
+DLSS
+----
+NVIDIA DLSS SDK 310.9.1: https://github.com/NVIDIA/DLSS/tree/v310.9.1
+Copyright NVIDIA Corporation. License: NVIDIA RTX SDKs LICENSE, identified
+here as LicenseRef-NVIDIA-RTX-SDK; full terms are in DLSS_LICENSE.txt.
+DLSS-enabled builds link NGX SDK code and bundle nvngx_dlssd.dll (Windows) or
+libnvidia-ngx-dlssd.so (Linux). DLSS-disabled builds do not bundle that runtime.
+This software contains source code provided by NVIDIA Corporation.
+The SDK terms apply to SDK material, not to independently licensed Python code.
+Including notices does not establish the requested approval for public pip
+redistribution; the SDK owner's written confirmation remains required.
+
+pybind11
+--------
+https://github.com/pybind/pybind11
+Build requirement: >=3.0,<4. License: BSD-3-Clause.
+Copyright (c) 2016 Wenzel Jakob <wenzel.jakob@epfl.ch>, All rights reserved.
+Header code is incorporated into the compiled extension. See the complete
+upstream license and additional notices in licenses/pybind11-LICENSE.txt
+(copied from v3.0.1; verify against the resolved version for each release).
+
+otk-pyoptix / PyOptiX
+--------------------
+https://github.com/NVIDIA/otk-pyoptix
+Runtime dependency: pyoptix==9.1.0. License: BSD-3-Clause.
+Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+The repository historically forked otk-pyoptix. The current package depends
+on the separately installed PyOptiX package for standard bindings.
+src/extension.cpp retains supplemental binding code from that fork;
+src/pyoptix_compat.h retains four upstream wrapper definitions for ABI access.
+These files and the inherited CMakeLists.txt retain BSD-3-Clause. Full terms
+are in LICENSE.txt. They have not been relicensed to Apache-2.0.
+
+vk_denoise_dlssrr adaptation
+---------------------------
+https://github.com/nvpro-samples/vk_denoise_dlssrr
+Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+License: Apache-2.0; full terms are in LICENSE-APACHE.txt.
+The Warp/OptiX path tracer adapts the sample's rendering and DLSS guide-buffer
+approach. Local modifications translate shader operations to Python/Warp,
+replace Vulkan execution with OptiX/CUDA, and extend scene/material handling.
+The release request describes an AI-assisted port; that is not a scan result.
+
+Verified file-level correspondences under warp_optix/warp_optix/pathtracing:
+  dlss_helper.py: dlss_rr/shaders/dlss_helper.glsl (EnvironmentTerm_Rtg).
+  ray_common.py: dlss_rr/shaders/ray_common.glsl (mirror matrix and reinhardMax).
+Original upstream notice text is in licenses/vk_denoise_dlssrr-NOTICE.txt.
+Reference inspected: f8113a84fa952278bb1286e7899f81b7afe8f41e.
+This is a comparison reference, not a claim that it was the original port base.
+The remaining port's exact source revision and transitive-source attribution
+need author confirmation and nSpect/Code Insight review before release.
+
+FFmpeg
+------
+https://ffmpeg.org/legal.html
+Viewer recording invokes a separately installed executable. No FFmpeg binary
+is bundled. The selected FFmpeg build determines its LGPL/GPL and other terms.

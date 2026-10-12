@@ -5,11 +5,28 @@
 
 import subprocess
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import optix
 import pytest
 from warp_optix import _ext, native
+
+
+def test_optix_headers_require_separate_sdk(monkeypatch, tmp_path):
+    monkeypatch.delenv("OPTIX_SDK_INCLUDE_DIR", raising=False)
+    monkeypatch.delenv("OPTIX_INCLUDE_DIR", raising=False)
+    with pytest.raises(FileNotFoundError, match="Install OptiX SDK 9.1.0 separately"):
+        native.get_optix_include_dir()
+    monkeypatch.setenv("OPTIX_SDK_INCLUDE_DIR", str(tmp_path))
+    (tmp_path / "optix.h").touch()
+    with pytest.raises(FileNotFoundError, match="does not contain OptiX SDK headers"):
+        native.get_optix_include_dir()
+    (tmp_path / "optix_device.h").touch()
+    assert Path(native.get_optix_include_dir()) == tmp_path.resolve()
+    monkeypatch.delenv("OPTIX_SDK_INCLUDE_DIR")
+    monkeypatch.setenv("OPTIX_INCLUDE_DIR", str(tmp_path))
+    assert Path(native.get_optix_include_dir()) == tmp_path.resolve()
 
 
 @pytest.mark.parametrize("first", ["optix", "warp_optix"])

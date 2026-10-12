@@ -12,6 +12,10 @@ Build from the repository root with Python 3.10+, a CUDA Toolkit and a C++17
 compiler. GPU execution requires a compatible NVIDIA driver. OptiX headers and
 DLSS SDK 310.9.1 are fetched automatically.
 
+Runtime shader compilation also requires a separately installed OptiX SDK
+9.1.0. Set `OPTIX_SDK_INCLUDE_DIR` to that SDK's `include` directory (containing
+`optix.h` and `optix_device.h`). OptiX headers are not included in this wheel.
+
 ```powershell
 pip install .
 # Editable development with viewer dependencies:
@@ -64,6 +68,10 @@ and runnable [examples](examples_warp/README.md).
 ## DLSS builds
 
 DLSS is enabled by default and its runtime library is included in the wheel.
+That runtime is covered by the NVIDIA RTX SDKs license in `DLSS_LICENSE.txt`,
+identified in package metadata as `LicenseRef-NVIDIA-RTX-SDK`. It is not
+licensed under Apache 2.0. Public distribution remains subject to the release
+review and written SDK-owner approval.
 Build alternative variants into separate directories:
 
 ```powershell
@@ -121,6 +129,19 @@ NVIDIA license terms. License texts accompany the distribution.
 
 Runnable samples are in `examples_warp/`. The inherited PyOptiX examples,
 upstream test tree, and legacy requirements file have been removed.
+
+## Licenses and contributions
+
+See [third-party notices](THIRD_PARTY_NOTICES.txt) for component licenses and
+source provenance. `src/extension.cpp`, `src/pyoptix_compat.h`, and the inherited
+`CMakeLists.txt` retain BSD-3-Clause; NVIDIA-authored Warp integration uses
+Apache-2.0. The aggregate package metadata also identifies the DLSS SDK terms.
+
+This project is currently not accepting contributions.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Viewer recording invokes a user-installed FFmpeg executable. FFmpeg is not
+bundled; its applicable license depends on the user's FFmpeg build.
 
 ## CUDA graph limitation
 

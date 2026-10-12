@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """OptiX kernel-type helpers.
 
 ``OptixKernelType`` maps supported OptiX program kinds to their entry-name
