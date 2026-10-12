@@ -1,7 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION
+# SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION
 # SPDX-License-Identifier: Apache-2.0
 #
-# 1:1 translation of func_common.h (CUDA/OptiX shared utility functions).
+# Modified Python/Warp translation of func_common.h from the intermediate OptiX port.
+# Vector, basis, and sampling utilities derive from nvpro_core:
+# https://github.com/nvpro-samples/nvpro_core/blob/bc19d6ac3ef62938d0ea0e099735878457ce1b6e/nvvkhl/shaders/func.h
+# Original notices: licenses/vk_denoise_dlssrr-NOTICE.txt and
+# licenses/nvpro_core-NOTICE.txt.
+
+#
+# Utility functions for the Python/Warp renderer.
 
 from __future__ import annotations
 

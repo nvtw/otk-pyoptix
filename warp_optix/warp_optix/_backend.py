@@ -31,16 +31,19 @@ if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
 
 def _get_package_dir():
     # Editable installs load Python from the source tree and native/data files
-    # from the environment. Resolve runtime libraries and headers consistently.
+    # from the environment. Resolve runtime libraries consistently.
     return Path(_extensions.__file__).resolve().parent
 
 
 def _get_optix_include_dir():
+    # Editable installs keep SDK data alongside the installed native extension.
     for root in (_package_dir, _get_package_dir()):
         include = root / "include"
-        if (include / "optix.h").is_file():
+        if (include / "optix.h").is_file() and (include / "optix_device.h").is_file():
             return str(include)
-    raise FileNotFoundError("Packaged OptiX headers are missing; reinstall warp-optix")
+    raise FileNotFoundError(
+        "Packaged OptiX SDK headers are missing or incomplete; reinstall warp-optix."
+    )
 
 
 def _dlss_support_available():

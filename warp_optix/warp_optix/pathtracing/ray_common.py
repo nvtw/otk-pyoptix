@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION
 # SPDX-License-Identifier: Apache-2.0
 #
-# 1:1 translation of ray_common.h (ray payload structures and utilities).
+# Modified Python/Warp translation of ray_common.h (ray payload structures and utilities).
+# Adapted from NVIDIA vk_denoise_dlssrr; upstream reference:
+# https://github.com/nvpro-samples/vk_denoise_dlssrr/blob/f8113a84fa952278bb1286e7899f81b7afe8f41e/dlss_rr/shaders/ray_common.glsl
+# See THIRD_PARTY_NOTICES.txt and licenses/vk_denoise_dlssrr-NOTICE.txt.
 
 from __future__ import annotations
 

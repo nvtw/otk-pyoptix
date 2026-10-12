@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION
 # SPDX-License-Identifier: Apache-2.0
 #
-# 1:1 translation of viewer_rt_common.h (common helpers for pathtracing viewer).
+# Modified Python/Warp translation of viewer_rt_common.h from the intermediate
+# OptiX port of vk_denoise_dlssrr (matrix and environment-direction helpers).
+# The intermediate source reference is recorded in THIRD_PARTY_NOTICES.txt.
+# Original notices: licenses/vk_denoise_dlssrr-NOTICE.txt and
+# licenses/nvpro_core-NOTICE.txt.
+
+#
+# Translation of viewer_rt_common.h (common helpers for pathtracing viewer).
 # Functions that depend on launch params (eval_environment, sample_environment_importance,
 # sky_params_from_launch) remain in pathtracing_warp_kernels.py because they access
 # PathtraceLaunchParams fields directly.  This file contains the param-free helpers.

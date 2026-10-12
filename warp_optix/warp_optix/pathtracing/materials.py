@@ -1,5 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION
 # SPDX-License-Identifier: Apache-2.0
+#
+# Modified Python/NumPy adaptation of glTF material and texture structures:
+# https://github.com/nvpro-samples/nvpro_core/blob/bc19d6ac3ef62938d0ea0e099735878457ce1b6e/nvvkhl/shaders/dh_scn_desc.h
+# Original notices: licenses/vk_denoise_dlssrr-NOTICE.txt and
+# licenses/nvpro_core-NOTICE.txt.
+
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.

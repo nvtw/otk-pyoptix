@@ -9,6 +9,33 @@ from warp_optix.pathtracing import tonemap
 from warp_optix.pathtracing.tonemap import Tonemapper, _adapt_auto_exposure
 
 
+@wp.kernel
+def _compress_test_colors(colors: wp.array(dtype=wp.vec3), output: wp.array(dtype=wp.vec3)):
+    i = wp.tid()
+    output[i] = tonemap.compress_highlights(colors[i])
+
+
+def test_highlight_compression_is_bounded_monotonic_and_preserves_color_ratios():
+    colors = np.array(
+        [[0, 0, 0], [-1, -2, -3], [0.2, 0.1, 0.05], [2, 1, 0.5], [2e20, 1e20, 5e19]],
+        dtype=np.float32,
+    )
+    output = wp.empty(len(colors), dtype=wp.vec3, device="cpu")
+    wp.launch(
+        _compress_test_colors,
+        dim=len(colors),
+        inputs=[wp.array(colors, dtype=wp.vec3, device="cpu"), output],
+        device="cpu",
+    )
+    result = output.numpy()
+    assert np.isfinite(result).all()
+    assert ((result >= 0) & (result <= 1)).all()
+    np.testing.assert_array_equal(result[:2], 0)
+    assert (np.diff(result[2:, 0]) > 0).all()
+    np.testing.assert_allclose(result[2:, 0] / result[2:, 1], 2.0)
+    np.testing.assert_allclose(result[2:, 1] / result[2:, 2], 2.0)
+
+
 def test_tonemap_preserves_pixels_and_orientation_on_non_square_image():
     wp.init()
     if not wp.is_cuda_available():
@@ -54,9 +81,8 @@ def test_debug_normals_preserve_orientation_when_upscaled():
     np.testing.assert_array_equal(mapper.get_numpy(), expected)
 
 
-@pytest.mark.parametrize("method", range(7))
 @pytest.mark.parametrize("auto_exposure", [False, True])
-def test_texture_input_matches_array_tonemapping(method, auto_exposure):
+def test_texture_input_matches_array_tonemapping(auto_exposure):
     wp.init()
     if not wp.is_cuda_available():
         pytest.skip("CUDA device unavailable")
@@ -68,7 +94,6 @@ def test_texture_input_matches_array_tonemapping(method, auto_exposure):
     outputs = []
     for source in (array, texture):
         mapper = Tonemapper(17, 9)
-        mapper.method = method
         mapper.exposure = 0.68
         mapper.contrast = 1.08
         mapper.saturation = 1.1

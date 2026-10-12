@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """OptiX builtin registrations for Warp.
 
 This module was extracted from ``warp/_src/builtins.py``; importing it

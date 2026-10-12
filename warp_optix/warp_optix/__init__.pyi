@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from ._api import Context as Context
 from ._api import AccelerationStructure as AccelerationStructure
 from ._api import Pipeline as Pipeline

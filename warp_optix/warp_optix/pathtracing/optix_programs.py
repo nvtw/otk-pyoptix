@@ -1,7 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION
 # SPDX-License-Identifier: Apache-2.0
 #
-# 1:1 translation of optix_programs.h (OptiX entry points and motion vector helpers).
+# Modified Python/Warp translation of optix_programs.h from the intermediate
+# OptiX port of vk_denoise_dlssrr. Motion vectors adapt primary.rgen:
+# https://github.com/nvpro-samples/vk_denoise_dlssrr/tree/f8113a84fa952278bb1286e7899f81b7afe8f41e/dlss_rr/shaders/primary.rgen
+# The intermediate source reference is recorded in THIRD_PARTY_NOTICES.txt.
+# Original notices: licenses/vk_denoise_dlssrr-NOTICE.txt and
+# licenses/nvpro_core-NOTICE.txt.
+
+#
+# OptiX motion vector helpers.
 # The actual kernel entry points (primary_raygen, primary_miss, etc.) remain in
 # pathtracing_warp_kernels.py because they reference PathtraceLaunchParams and the
 # full set of scene accessors.  This file provides the motion vector computation
