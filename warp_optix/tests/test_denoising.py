@@ -13,6 +13,7 @@ from warp_optix.pathtracing import (
     PathTracingRenderer,
 )
 from warp_optix.pathtracing import pathtracing_viewer as renderer_module
+from warp_optix.pathtracing.defaults import DLSS_PROJECT_ID
 
 
 def _renderer(monkeypatch, mode, *, dlss_available=False):
@@ -191,7 +192,7 @@ def test_renderer_gpu_dlss_quality_survives_backend_switch():
 
     context, _logger = _gpu_context()
     context.close()
-    if not optix.dlss_rr_available():
+    if not optix.dlss_rr_available(DLSS_PROJECT_ID):
         pytest.skip("DLSS RR unavailable")
     api = PathTracerAPI(
         width=128,
@@ -228,7 +229,7 @@ def test_dlss_gpu_frame_is_ordered_when_called_from_another_stream():
 
     context, _logger = _gpu_context()
     context.close()
-    if not optix.dlss_rr_available():
+    if not optix.dlss_rr_available(DLSS_PROJECT_ID):
         pytest.skip("DLSS RR unavailable")
     def first_frame(caller):
         api = PathTracerAPI(
